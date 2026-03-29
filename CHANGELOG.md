@@ -10,6 +10,16 @@ is breaking anyways, semantic versioning is not followed.
 
 ### Added
 
+### Changed
+
+- Re-export `azalea-chat` from `azalea`, and move the other `azalea::chat` module to `azalea::client_chat`.
+
+### Fixed
+
+## [0.16.0+mc26.1] - 2026-03-27
+
+### Added
+
 - Add `SimulationPathfinderExecutionPlugin`, an alternative execution engine for the pathfinder with smoother movement.
 - The pathfinder can now traverse on the surface of water.
 - `Account`s can now have custom refresh and join behavior using `AccountTrait`.
@@ -26,6 +36,7 @@ is breaking anyways, semantic versioning is not followed.
 
 ### Changed
 
+- Update to Minecraft 26.1.
 - Rename `Instance` to `World` (and rename other related types).
 - Move the `Client` struct out of `azalea-client` into `azalea`.
 - `Client::ecs` is now an `RwLock` instead of a `Mutex`.
