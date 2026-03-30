@@ -1,7 +1,8 @@
 use azalea_client::{
-    PhysicsState, SprintDirection, StartSprintEvent, StartWalkEvent, WalkDirection,
+    ClientMovementState, SprintDirection, StartSprintEvent, StartWalkEvent, WalkDirection,
 };
 use azalea_entity::{Jumping, LookDirection};
+use parking_lot::MappedRwLockReadGuard;
 
 use crate::Client;
 
@@ -23,14 +24,14 @@ impl Client {
     }
 
     pub fn set_crouching(&self, crouching: bool) {
-        self.query_self::<&mut PhysicsState, _>(|mut p| p.trying_to_crouch = crouching);
+        self.query_self::<&mut ClientMovementState, _>(|mut p| p.trying_to_crouch = crouching);
     }
 
     /// Whether the client is currently trying to sneak.
     ///
     /// You may want to check the [`Pose`](azalea_entity::Pose) instead.
     pub fn crouching(&self) -> bool {
-        self.query_self::<&PhysicsState, _>(|p| p.trying_to_crouch)
+        self.query_self::<&ClientMovementState, _>(|p| p.trying_to_crouch)
     }
 
     /// Sets the direction the client is looking.
@@ -75,6 +76,14 @@ impl Client {
             entity: self.entity,
             direction,
         });
+    }
+
+    /// Returns the [`ClientMovementState`] data for this client.
+    ///
+    /// This includes the direction that we're walking/sprinting in, and whether
+    /// we're trying to sprint or crouch.
+    pub fn movement_state(&self) -> ClientMovementState {
+        self.component::<ClientMovementState>().clone()
     }
 
     /// Start sprinting in the given direction.

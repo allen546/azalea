@@ -10,7 +10,7 @@ use azalea_core::tick::GameTick;
 use azalea_entity::{
     EntityUpdateSystems, PlayerAbilities, indexing::EntityIdIndex, inventory::Inventory,
 };
-use azalea_physics::local_player::PhysicsState;
+use azalea_physics::client_movement::ClientMovementState;
 use azalea_world::Worlds;
 use bevy_app::{App, AppExit, Plugin, PluginsState, SubApp, Update};
 use bevy_ecs::{
@@ -56,7 +56,7 @@ pub struct LocalPlayerBundle {
 #[derive(Bundle, Default)]
 pub struct JoinedClientBundle {
     // note that WorldHolder isn't here because it's set slightly before we fully join the world
-    pub physics_state: PhysicsState,
+    pub physics_state: ClientMovementState,
     pub inventory: Inventory,
     pub tab_list: TabList,
     pub block_state_prediction_handler: BlockStatePredictionHandler,

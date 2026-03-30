@@ -11,6 +11,7 @@ use azalea_world::{World, WorldName, Worlds};
 use bevy_ecs::prelude::*;
 
 use crate::{
+    client_movement::ClientMovementState,
     collision::{
         MoveCtx, MoverType, Shapes,
         entity_collisions::{AabbQuery, CollidableEntityQuery, get_entity_collisions},
@@ -18,7 +19,6 @@ use crate::{
         world_collisions::{get_block_and_liquid_collisions, get_block_collisions},
     },
     get_block_pos_below_that_affects_movement, handle_relative_friction_and_calculate_movement,
-    local_player::PhysicsState,
 };
 
 /// Move the entity with the given acceleration while handling friction,
@@ -32,7 +32,7 @@ pub fn travel(
             &WorldName,
             &OnClimbable,
             &Jumping,
-            Option<&PhysicsState>,
+            Option<&ClientMovementState>,
             Option<&Sprinting>,
             Option<&Pose>,
             Option<&PlayerAbilities>,

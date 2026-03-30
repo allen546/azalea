@@ -29,7 +29,7 @@ use tracing::warn;
 
 use self::world_collisions::get_block_collisions;
 use crate::{
-    collision::entity_collisions::AabbQuery, local_player::PhysicsState, travel::no_collision,
+    client_movement::ClientMovementState, collision::entity_collisions::AabbQuery, travel::no_collision,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,7 +116,7 @@ pub struct MoveCtx<'world, 'state, 'a, 'b> {
     pub source_entity: Entity,
     pub aabb_query: &'a AabbQuery<'world, 'state, 'b>,
     pub collidable_entity_query: &'a CollidableEntityQuery<'world, 'state>,
-    pub physics_state: Option<&'a PhysicsState>,
+    pub physics_state: Option<&'a ClientMovementState>,
     pub attributes: &'a Attributes,
     pub abilities: Option<&'a PlayerAbilities>,
 

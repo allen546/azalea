@@ -6,7 +6,7 @@
 use std::{borrow::Cow, time::Instant};
 
 use azalea_client::{
-    PhysicsState, SprintDirection, StartSprintEvent, StartWalkEvent,
+    ClientMovementState, SprintDirection, StartSprintEvent, StartWalkEvent,
     local_player::WorldHolder,
     mining::{Mining, MiningSystems, StartMiningBlockEvent},
 };
@@ -107,7 +107,7 @@ pub fn tick_execute_path(
         &mut LookDirection,
         &Position,
         &Physics,
-        &PhysicsState,
+        &ClientMovementState,
         Option<&Mining>,
         &WorldHolder,
         &Attributes,
@@ -398,7 +398,7 @@ fn run_one_simulation(
                 direction: SprintDirection::Forward,
             });
         } else if ecs
-            .get::<PhysicsState>(sim.entity)
+            .get::<ClientMovementState>(sim.entity)
             .map(|p| p.was_sprinting)
             .unwrap_or_default()
         {

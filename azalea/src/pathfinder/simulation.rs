@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use azalea_client::{
-    PhysicsState, interact::BlockStatePredictionHandler, local_player::LocalGameMode,
+    ClientMovementState, interact::BlockStatePredictionHandler, local_player::LocalGameMode,
     mining::MineBundle,
 };
 use azalea_core::{
@@ -24,7 +24,7 @@ use uuid::Uuid;
 pub struct SimulatedPlayerBundle {
     pub position: Position,
     pub physics: Physics,
-    pub physics_state: PhysicsState,
+    pub physics_state: ClientMovementState,
     pub look_direction: LookDirection,
     pub attributes: Attributes,
     pub inventory: Inventory,
@@ -37,7 +37,7 @@ impl SimulatedPlayerBundle {
         SimulatedPlayerBundle {
             position: Position::new(position),
             physics: Physics::new(&dimensions, position),
-            physics_state: PhysicsState::default(),
+            physics_state: ClientMovementState::default(),
             look_direction: LookDirection::default(),
             attributes: Attributes::new(EntityKind::Player),
             inventory: Inventory::default(),

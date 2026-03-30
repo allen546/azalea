@@ -9,7 +9,7 @@ use std::{
 
 use azalea_block::BlockState;
 use azalea_client::{
-    PhysicsState, SprintDirection, StartSprintEvent, StartWalkEvent, WalkDirection,
+    ClientMovementState, SprintDirection, StartSprintEvent, StartWalkEvent, WalkDirection,
     inventory::SetSelectedHotbarSlotEvent, mining::StartMiningBlockEvent,
 };
 use azalea_core::position::{BlockPos, Vec3};
@@ -134,7 +134,7 @@ impl ExecuteCtx<'_, '_, '_, '_, '_, '_, '_, '_> {
         self.commands
             .entity(self.entity)
             .queue(move |mut entity: EntityWorldMut<'_>| {
-                if let Some(mut physics_state) = entity.get_mut::<PhysicsState>() {
+                if let Some(mut physics_state) = entity.get_mut::<ClientMovementState>() {
                     physics_state.trying_to_crouch = sneaking;
                 }
             });

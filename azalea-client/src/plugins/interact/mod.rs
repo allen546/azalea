@@ -21,8 +21,8 @@ use azalea_entity::{
 };
 use azalea_inventory::{ItemStack, ItemStackData, components};
 use azalea_physics::{
-    PhysicsSystems, collision::entity_collisions::update_last_bounding_box,
-    local_player::PhysicsState,
+    PhysicsSystems, client_movement::ClientMovementState,
+    collision::entity_collisions::update_last_bounding_box,
 };
 use azalea_protocol::packets::game::{
     ServerboundInteract, ServerboundUseItem,
@@ -313,7 +313,7 @@ pub struct EntityInteractEvent {
 pub fn handle_entity_interact(
     trigger: On<EntityInteractEvent>,
     mut commands: Commands,
-    client_query: Query<(&PhysicsState, &EntityIdIndex, &HitResultComponent)>,
+    client_query: Query<(&ClientMovementState, &EntityIdIndex, &HitResultComponent)>,
     target_query: Query<&Position>,
 ) {
     let Some((physics_state, entity_id_index, hit_result)) = client_query.get(trigger.client).ok()

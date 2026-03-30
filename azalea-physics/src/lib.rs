@@ -1,10 +1,10 @@
 #![doc = include_str!("../README.md")]
 #![feature(trait_alias)]
 
+pub mod client_movement;
 pub mod clip;
 pub mod collision;
 pub mod fluids;
-pub mod local_player;
 pub mod travel;
 
 use std::collections::HashSet;

@@ -13,8 +13,8 @@ use azalea_entity::{
 };
 use azalea_physics::{
     PhysicsSystems, ai_step,
+    client_movement::{ClientMovementState, SprintDirection, WalkDirection},
     collision::entity_collisions::{AabbQuery, CollidableEntityQuery, update_last_bounding_box},
-    local_player::{PhysicsState, SprintDirection, WalkDirection},
     travel::{no_collision, travel},
 };
 use azalea_protocol::{
@@ -92,7 +92,7 @@ pub fn send_position(
             Entity,
             &Position,
             &LookDirection,
-            &mut PhysicsState,
+            &mut ClientMovementState,
             &mut LastSentPosition,
             &mut Physics,
             &mut LastSentLookDirection,
@@ -196,7 +196,12 @@ pub fn send_position(
 #[derive(Clone, Component, Debug, Default, Eq, PartialEq)]
 pub struct LastSentInput(pub ServerboundPlayerInput);
 pub fn send_player_input_packet(
-    mut query: Query<(Entity, &PhysicsState, &Jumping, Option<&LastSentInput>)>,
+    mut query: Query<(
+        Entity,
+        &ClientMovementState,
+        &Jumping,
+        Option<&LastSentInput>,
+    )>,
     mut commands: Commands,
 ) {
     for (entity, physics_state, jumping, last_sent_input) in query.iter_mut() {
@@ -227,7 +232,12 @@ pub fn send_player_input_packet(
 }
 
 pub fn send_sprinting_if_needed(
-    mut query: Query<(Entity, &MinecraftEntityId, &Sprinting, &mut PhysicsState)>,
+    mut query: Query<(
+        Entity,
+        &MinecraftEntityId,
+        &Sprinting,
+        &mut ClientMovementState,
+    )>,
     mut commands: Commands,
 ) {
     for (entity, minecraft_entity_id, sprinting, mut physics_state) in query.iter_mut() {
@@ -253,7 +263,7 @@ pub fn send_sprinting_if_needed(
 
 /// Updates the [`PhysicsState::move_vector`] based on the
 /// [`PhysicsState::move_direction`].
-pub(crate) fn tick_controls(mut query: Query<&mut PhysicsState>) {
+pub(crate) fn tick_controls(mut query: Query<&mut ClientMovementState>) {
     for mut physics_state in query.iter_mut() {
         let mut forward_impulse: f32 = 0.;
         let mut left_impulse: f32 = 0.;
@@ -292,7 +302,7 @@ pub fn local_player_ai_step(
     mut query: Query<
         (
             Entity,
-            &PhysicsState,
+            &ClientMovementState,
             &PlayerAbilities,
             &metadata::Swimming,
             &metadata::SleepingPos,
@@ -481,7 +491,7 @@ pub struct StartWalkEvent {
 /// [`StartWalkEvent`].
 pub fn handle_walk(
     mut events: MessageReader<StartWalkEvent>,
-    mut query: Query<(&mut PhysicsState, &mut Sprinting, &mut Attributes)>,
+    mut query: Query<(&mut ClientMovementState, &mut Sprinting, &mut Attributes)>,
 ) {
     for event in events.read() {
         if let Ok((mut physics_state, mut sprinting, mut attributes)) = query.get_mut(event.entity)
@@ -504,7 +514,7 @@ pub struct StartSprintEvent {
 /// The system that makes the player start sprinting when they receive a
 /// [`StartSprintEvent`].
 pub fn handle_sprint(
-    mut query: Query<&mut PhysicsState>,
+    mut query: Query<&mut ClientMovementState>,
     mut events: MessageReader<StartSprintEvent>,
 ) {
     for event in events.read() {
@@ -542,7 +552,7 @@ fn set_sprinting(
 }
 
 // Whether the player is moving fast enough to be able to start sprinting.
-fn has_enough_impulse_to_start_sprinting(physics_state: &PhysicsState) -> bool {
+fn has_enough_impulse_to_start_sprinting(physics_state: &ClientMovementState) -> bool {
     // if self.underwater() {
     //     self.has_forward_impulse()
     // } else {
@@ -585,7 +595,7 @@ pub fn update_pose(
         Entity,
         &mut Pose,
         &Physics,
-        &PhysicsState,
+        &ClientMovementState,
         &LocalGameMode,
         &WorldHolder,
         &Position,
