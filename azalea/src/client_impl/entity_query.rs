@@ -1,12 +1,12 @@
 use std::{any, sync::Arc};
 
 use azalea_core::position::Vec3;
-use azalea_entity::Position;
+use azalea_entity::{LocalEntity, Position, metadata};
 use azalea_world::WorldName;
 use bevy_ecs::{
     component::Component,
     entity::Entity,
-    query::{QueryData, QueryEntityError, QueryFilter, QueryItem, ROQueryItem},
+    query::{QueryData, QueryEntityError, QueryFilter, QueryItem, ROQueryItem, With, Without},
     world::World,
 };
 use parking_lot::{
@@ -242,6 +242,26 @@ impl Client {
             .map(|e| self.entity_ref_for(e))
             .collect()
     }
+    /// Returns an array of [`EntityRef`] for all known entities in the world
+    /// that match the given filter, sorted by nearest first.
+    ///
+    /// Also see [`Self::nearest_entities_by`].
+    pub fn nearest_entities<F: QueryFilter>(&self) -> Box<[EntityRef]> {
+        self.nearest_entities_by::<(), F>(|_| true)
+    }
+
+    /// Returns an array of [`EntityRef`]s for all nearby player entities
+    /// (including this bot), sorted by nearest first.
+    ///
+    /// This is a shortcut for calling [`Self::nearest_entities`] with the
+    /// filter `With<metadata::Player>`.
+    ///
+    /// If you're in a swarm, this includes all players that are visible by at
+    /// least one client.
+    pub fn nearby_players(&self) -> Box<[EntityRef]> {
+        self.nearest_entities::<(With<metadata::Player>, Without<LocalEntity>)>()
+    }
+
     /// Returns an array of all [`Entity`]s in the world that match the
     /// predicate, sorted by nearest first.
     ///
