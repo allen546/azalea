@@ -2,9 +2,8 @@ use azalea_client::{
     ClientMovementState, SprintDirection, StartSprintEvent, StartWalkEvent, WalkDirection,
 };
 use azalea_entity::{Jumping, LookDirection};
-use parking_lot::MappedRwLockReadGuard;
 
-use crate::Client;
+use crate::{Client, client_impl::error::AzaleaResult};
 
 impl Client {
     /// Set whether we're jumping. This acts as if you held space in
@@ -14,17 +13,17 @@ impl Client {
     ///
     /// If you're making a realistic client, calling this function every tick is
     /// recommended.
-    pub fn set_jumping(&self, jumping: bool) {
-        self.query_self::<&mut Jumping, _>(|mut j| **j = jumping);
+    pub fn set_jumping(&self, jumping: bool) -> AzaleaResult<()> {
+        self.query_self::<&mut Jumping, _>(|mut j| **j = jumping)
     }
 
     /// Returns whether the player will try to jump next tick.
     pub fn jumping(&self) -> bool {
-        **self.component::<Jumping>()
+        self.component::<Jumping>().map(|j| **j).unwrap_or_default()
     }
 
-    pub fn set_crouching(&self, crouching: bool) {
-        self.query_self::<&mut ClientMovementState, _>(|mut p| p.trying_to_crouch = crouching);
+    pub fn set_crouching(&self, crouching: bool) -> AzaleaResult<()> {
+        self.query_self::<&mut ClientMovementState, _>(|mut p| p.trying_to_crouch = crouching)
     }
 
     /// Whether the client is currently trying to sneak.
@@ -32,6 +31,7 @@ impl Client {
     /// You may want to check the [`Pose`](azalea_entity::Pose) instead.
     pub fn crouching(&self) -> bool {
         self.query_self::<&ClientMovementState, _>(|p| p.trying_to_crouch)
+            .unwrap_or(false)
     }
 
     /// Sets the direction the client is looking.
@@ -40,17 +40,17 @@ impl Client {
     /// is pitch (looking up and down, between -90 to 90).
     ///
     /// You can get these numbers from the vanilla f3 screen.
-    pub fn set_direction(&self, y_rot: f32, x_rot: f32) {
+    pub fn set_direction(&self, y_rot: f32, x_rot: f32) -> AzaleaResult<()> {
         self.query_self::<&mut LookDirection, _>(|mut ld| {
             ld.update(LookDirection::new(y_rot, x_rot));
-        });
+        })
     }
 
     /// Returns the direction the client is looking.
     ///
     /// See [`Self::set_direction`] for more details.
-    pub fn direction(&self) -> LookDirection {
-        *self.component::<LookDirection>()
+    pub fn direction(&self) -> AzaleaResult<LookDirection> {
+        Ok(*self.component::<LookDirection>()?)
     }
 
     /// Start walking in the given direction.
@@ -82,8 +82,8 @@ impl Client {
     ///
     /// This includes the direction that we're walking/sprinting in, and whether
     /// we're trying to sprint or crouch.
-    pub fn movement_state(&self) -> ClientMovementState {
-        self.component::<ClientMovementState>().clone()
+    pub fn movement_state(&self) -> AzaleaResult<ClientMovementState> {
+        Ok(self.component::<ClientMovementState>()?.clone())
     }
 
     /// Start sprinting in the given direction.

@@ -34,6 +34,7 @@ use uuid::Uuid;
 
 use crate::{
     bot::DefaultBotPlugins,
+    client_impl::error::AzaleaResult,
     entity_ref::EntityRef,
     events::{Event, LocalPlayerEvents},
     swarm::DefaultSwarmPlugins,
@@ -43,6 +44,7 @@ pub mod attack;
 pub mod chat;
 pub mod client_information;
 pub mod entity_query;
+pub mod error;
 pub mod interact;
 pub mod inventory;
 pub mod mining;
@@ -307,10 +309,13 @@ impl Client {
         self.ecs.write().write_message(AppExit::Success);
     }
 
-    pub fn with_raw_connection<R>(&self, f: impl FnOnce(&RawConnection) -> R) -> R {
+    pub fn with_raw_connection<R>(&self, f: impl FnOnce(&RawConnection) -> R) -> AzaleaResult<R> {
         self.query_self::<&RawConnection, _>(f)
     }
-    pub fn with_raw_connection_mut<R>(&self, f: impl FnOnce(Mut<'_, RawConnection>) -> R) -> R {
+    pub fn with_raw_connection_mut<R>(
+        &self,
+        f: impl FnOnce(Mut<'_, RawConnection>) -> R,
+    ) -> AzaleaResult<R> {
         self.query_self::<&mut RawConnection, _>(f)
     }
 
@@ -340,9 +345,9 @@ impl Client {
     /// component. If it's a normal client, then it'll be the same as the
     /// world the client has loaded. If the client is using a shared world,
     /// then the shared world will be a superset of the client's world.
-    pub fn world(&self) -> Arc<RwLock<World>> {
-        let world_holder = self.component::<WorldHolder>();
-        world_holder.shared.clone()
+    pub fn world(&self) -> AzaleaResult<Arc<RwLock<World>>> {
+        let world_holder = self.component::<WorldHolder>()?;
+        Ok(world_holder.shared.clone())
     }
 
     /// Get an `RwLock` with a reference to the world that this client has
@@ -354,15 +359,15 @@ impl Client {
     /// let world = client.partial_world();
     /// let is_0_0_loaded = world.read().chunks.limited_get(&ChunkPos::new(0, 0)).is_some();
     /// # }
-    pub fn partial_world(&self) -> Arc<RwLock<PartialWorld>> {
-        let world_holder = self.component::<WorldHolder>();
-        world_holder.partial.clone()
+    pub fn partial_world(&self) -> AzaleaResult<Arc<RwLock<PartialWorld>>> {
+        let world_holder = self.component::<WorldHolder>()?;
+        Ok(world_holder.partial.clone())
     }
 
     /// Returns whether we have a received the login packet yet.
     pub fn logged_in(&self) -> bool {
         // the login packet tells us the world name
-        self.query_self::<Option<&WorldName>, _>(|ins| ins.is_some())
+        self.query_self::<&WorldName, _>(|_| {}).is_ok()
     }
 
     /// Returns the client as an [`EntityRef`], allowing you to treat it as any
@@ -381,31 +386,47 @@ impl Client {
     /// Get the hunger level of this client, which includes both food and
     /// saturation.
     ///
-    /// This is a shortcut for `self.component::<Hunger>().to_owned()`.
-    pub fn hunger(&self) -> Hunger {
-        self.component::<Hunger>().to_owned()
+    /// This is a shortcut for `self.component::<Hunger>()?.to_owned()`.
+    pub fn hunger(&self) -> AzaleaResult<Hunger> {
+        Ok(self.component::<Hunger>()?.to_owned())
     }
 
     /// Get the experience of this client.
     ///
     /// This is a shortcut for `self.component::<Experience>().to_owned()`.
-    pub fn experience(&self) -> Experience {
-        self.component::<Experience>().to_owned()
+    pub fn experience(&self) -> AzaleaResult<Experience> {
+        Ok(self.component::<Experience>()?.to_owned())
     }
 
-    /// Get the username of this client.
+    /// Get the username of this client's account.
     ///
-    /// This is a shortcut for
-    /// `bot.component::<GameProfileComponent>().name.to_owned()`.
+    /// This is a shortcut for `bot.account().username().to_owned()`.
     pub fn username(&self) -> String {
-        self.profile().name.to_owned()
+        self.account().username().to_owned()
+    }
+    /// Get the username of this client, as sent to us by the server.
+    ///
+    /// This is a shortcut for `bot.profile()?.name.to_owned()`.
+    ///
+    /// In some cases, this may be different from [`Self::username`] if the
+    /// server sends us a [`GameProfile`] with a mismatching username. Using
+    /// [`Self::username`] is recommended if you're not sure which one to use.
+    pub fn server_username(&self) -> AzaleaResult<String> {
+        Ok(self.profile()?.name.to_owned())
+    }
+
+    /// Get the Minecraft UUID of this client's account.
+    ///
+    /// This is a shortcut for `**self.component::<EntityUuid>()`.
+    pub fn uuid(&self) -> Uuid {
+        self.account().uuid()
     }
 
     /// Get a map of player UUIDs to their information in the tab list.
     ///
     /// This is a shortcut for `*bot.component::<TabList>()`.
-    pub fn tab_list(&self) -> HashMap<Uuid, PlayerInfo> {
-        (**self.component::<TabList>()).clone()
+    pub fn tab_list(&self) -> AzaleaResult<HashMap<Uuid, PlayerInfo>> {
+        Ok((**self.component::<TabList>()?).clone())
     }
 
     /// Returns the [`GameProfile`] for our client. This contains your username,
@@ -417,13 +438,17 @@ impl Client {
     /// the tab list, which you can get from [`Self::tab_list`].
     ///
     /// This as also available from the ECS as [`GameProfileComponent`].
-    pub fn profile(&self) -> GameProfile {
-        (**self.component::<GameProfileComponent>()).clone()
+    pub fn profile(&self) -> AzaleaResult<GameProfile> {
+        Ok((**self.component::<GameProfileComponent>()?).clone())
     }
 
     /// Returns the [`Account`] for our client.
     pub fn account(&self) -> Account {
-        self.component::<Account>().clone()
+        self.component::<Account>()
+            .expect(
+                "clients cannot exist without an Account, and Account isn't removed from clients",
+            )
+            .clone()
     }
 
     /// A convenience function to get the Minecraft Uuid of a player by their
@@ -431,11 +456,12 @@ impl Client {
     ///
     /// You can chain this with [`Client::entity_by_uuid`] to get the ECS
     /// `Entity` for the player.
-    pub fn player_uuid_by_username(&self, username: &str) -> Option<Uuid> {
-        self.tab_list()
+    pub fn player_uuid_by_username(&self, username: &str) -> AzaleaResult<Option<Uuid>> {
+        Ok(self
+            .tab_list()?
             .values()
             .find(|player| player.profile.name == username)
-            .map(|player| player.profile.uuid)
+            .map(|player| player.profile.uuid))
     }
 
     /// Get an [`Entity`] in the world by its Minecraft UUID, if it's within
@@ -457,7 +483,7 @@ impl Client {
     /// Get an [`Entity`] in the world by its [`MinecraftEntityId`].
     ///
     /// Also see [`Self::entity_by_uuid`] and [`Self::entity_id_by_uuid`].
-    pub fn entity_id_by_minecraft_id(&self, id: MinecraftEntityId) -> Option<Entity> {
+    pub fn entity_id_by_minecraft_id(&self, id: MinecraftEntityId) -> AzaleaResult<Option<Entity>> {
         self.query_self::<&EntityIdIndex, _>(|entity_id_index| {
             entity_id_index.get_by_minecraft_entity(id)
         })
@@ -465,9 +491,10 @@ impl Client {
     /// Get an [`EntityRef`] in the world by its [`MinecraftEntityId`].
     ///
     /// Also see [`Self::entity_id_by_uuid`].
-    pub fn entity_by_minecraft_id(&self, id: MinecraftEntityId) -> Option<EntityRef> {
-        self.entity_id_by_minecraft_id(id)
-            .map(|e| EntityRef::new(self.clone(), e))
+    pub fn entity_by_minecraft_id(&self, id: MinecraftEntityId) -> AzaleaResult<Option<EntityRef>> {
+        Ok(self
+            .entity_id_by_minecraft_id(id)?
+            .map(|e| EntityRef::new(self.clone(), e)))
     }
 
     /// Call the given function with the client's [`RegistryHolder`].
@@ -480,10 +507,10 @@ impl Client {
     pub fn with_registry_holder<R>(
         &self,
         f: impl FnOnce(&azalea_core::registry_holder::RegistryHolder) -> R,
-    ) -> R {
-        let world = self.world();
+    ) -> AzaleaResult<R> {
+        let world = self.world()?;
         let registries = &world.read().registries;
-        f(registries)
+        Ok(f(registries))
     }
 
     /// Resolve the given registry to its name.
@@ -495,7 +522,7 @@ impl Client {
     pub fn resolve_registry_name(
         &self,
         registry: &impl ResolvableDataRegistry,
-    ) -> Option<Identifier> {
+    ) -> AzaleaResult<Option<Identifier>> {
         self.with_registry_holder(|registries| registry.key(registries).map(|r| r.into_ident()))
     }
 
@@ -508,7 +535,10 @@ impl Client {
     /// `.map(|r| r.into_ident())`.
     ///
     /// [`Enchantment`]: azalea_registry::data::Enchantment
-    pub fn resolve_registry_key<R: ResolvableDataRegistry>(&self, registry: &R) -> Option<R::Key> {
+    pub fn resolve_registry_key<R: ResolvableDataRegistry>(
+        &self,
+        registry: &R,
+    ) -> AzaleaResult<Option<R::Key>> {
         self.with_registry_holder(|registries| registry.key_owned(registries))
     }
 
@@ -525,7 +555,7 @@ impl Client {
         &self,
         registry: R,
         f: impl FnOnce(&Identifier, &R::DeserializesTo) -> Ret,
-    ) -> Option<Ret> {
+    ) -> AzaleaResult<Option<Ret>> {
         self.with_registry_holder(|registries| {
             registry
                 .resolve(registries)
@@ -538,8 +568,6 @@ impl Client {
     ///
     /// This is a shortcut for getting the [`TicksConnected`] component.
     pub fn ticks_connected(&self) -> u64 {
-        self.get_component::<TicksConnected>()
-            .map(|c| c.0)
-            .unwrap_or(0)
+        self.component::<TicksConnected>().map(|c| c.0).unwrap_or(0)
     }
 }

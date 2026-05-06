@@ -2,7 +2,7 @@ pub mod shared_impls;
 
 use std::fmt::Debug;
 
-use azalea_entity::EntityKindComponent;
+use azalea_entity::{EntityKindComponent, EntityUuid};
 use azalea_registry::builtin::EntityKind;
 use bevy_ecs::{
     component::Component,
@@ -10,8 +10,12 @@ use bevy_ecs::{
     query::{QueryData, QueryEntityError, QueryItem},
 };
 use parking_lot::MappedRwLockReadGuard;
+use uuid::Uuid;
 
-use crate::Client;
+use crate::{
+    Client,
+    client_impl::error::{AzaleaResult, MissingComponentError},
+};
 
 /// A reference to an entity in a world.
 ///
@@ -61,7 +65,9 @@ impl EntityRef {
     /// # fn example(client: &azalea::Client) {
     /// let world_name = client.component::<WorldName>();
     /// # }
-    pub fn component<T: Component>(&self) -> MappedRwLockReadGuard<'_, T> {
+    pub fn component<T: Component>(
+        &self,
+    ) -> Result<MappedRwLockReadGuard<'_, T>, MissingComponentError> {
         self.client.entity_component(self.entity)
     }
 
@@ -81,23 +87,24 @@ impl EntityRef {
     ///
     /// Also see [`Client::query_self`] and [`Client::query_entity`].
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// This will panic if the entity doesn't exist or is missing a component
-    /// required by the query. Consider using [`Self::try_query_self`] to
-    /// avoid this.
-    pub fn query_self<D: QueryData, R>(&self, f: impl FnOnce(QueryItem<D>) -> R) -> R {
+    /// This will return an error if the entity doesn't exist or is missing a
+    /// component required by the query.
+    pub fn query_self<D: QueryData, R>(
+        &self,
+        f: impl FnOnce(QueryItem<D>) -> R,
+    ) -> AzaleaResult<R> {
         self.client.query_entity(self.entity, f)
     }
 
-    /// Query the ECS for data from the entity, or return an error if the query
-    /// fails.
-    ///
-    /// Also see [`Self::query_self`].
+    #[doc(hidden)]
+    #[deprecated = "replaced with `Self::query_self`."]
     pub fn try_query_self<D: QueryData, R>(
         &self,
         f: impl FnOnce(QueryItem<D>) -> R,
     ) -> Result<R, QueryEntityError> {
+        #[allow(deprecated)]
         self.client.try_query_entity(self.entity, f)
     }
 }
@@ -113,8 +120,17 @@ impl Debug for EntityRef {
 
 impl EntityRef {
     /// Returns the type of entity that this is.
-    pub fn kind(&self) -> EntityKind {
-        **self.component::<EntityKindComponent>()
+    pub fn kind(&self) -> AzaleaResult<EntityKind> {
+        Ok(**self.component::<EntityKindComponent>()?)
+    }
+
+    /// Get the Minecraft UUID of this entity.
+    ///
+    /// Also see [`Client::uuid`].
+    pub fn uuid(&self) -> AzaleaResult<Uuid> {
+        // note: this isn't in shared_impls because the Client counterpart isn't
+        // fallible
+        Ok(**self.component::<EntityUuid>()?)
     }
 }
 
@@ -134,13 +150,13 @@ impl EntityRef {
     }
 
     /// Look at this entity from the client that created the `EntityRef`.
-    pub fn look_at(&self) {
-        self.client.look_at(self.eye_position());
+    pub fn look_at(&self) -> AzaleaResult<()> {
+        Ok(self.client.look_at(self.eye_position()?))
     }
 
     /// Returns the distance between the client's feet position and this
     /// entity's feet position.
-    pub fn distance_to_client(&self) -> f64 {
-        self.position().distance_to(self.client.position())
+    pub fn distance_to_client(&self) -> AzaleaResult<f64> {
+        Ok(self.position()?.distance_to(self.client.position()?))
     }
 }

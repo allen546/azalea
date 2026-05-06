@@ -281,15 +281,16 @@ impl PathfinderClientExt for Client {
         }
     }
     fn is_goto_target_reached(&self) -> bool {
-        self.get_component::<Pathfinder>()
+        self.component::<Pathfinder>()
+            .ok()
             .is_none_or(|p| p.goal.is_none() && !p.is_calculating)
     }
     fn is_executing_path(&self) -> bool {
-        self.get_component::<ExecutingPath>().is_some()
+        self.component::<ExecutingPath>().is_ok()
     }
     fn is_calculating_path(&self) -> bool {
-        self.get_component::<Pathfinder>()
-            .is_some_and(|p| p.is_calculating)
+        self.component::<Pathfinder>()
+            .is_ok_and(|p| p.is_calculating)
     }
 }
 

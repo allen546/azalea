@@ -189,10 +189,10 @@ async fn handle(bot: Client, event: azalea::Event, state: State) -> eyre::Result
                 if let Some(following) = &*state.following_entity.lock()
                     && following.is_alive()
                 {
-                    let goal = RadiusGoal::new(following.position(), 3.);
+                    let goal = RadiusGoal::new(following.position()?, 3.);
                     if bot.is_calculating_path() {
                         // keep waiting
-                    } else if !goal.success(bot.position().into()) || bot.is_executing_path() {
+                    } else if !goal.success(bot.position()?.into()) || bot.is_executing_path() {
                         bot.start_goto_with_opts(
                             goal,
                             PathfinderOpts::new()

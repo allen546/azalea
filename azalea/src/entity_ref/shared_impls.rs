@@ -1,12 +1,11 @@
 use azalea_core::{entity_id::MinecraftEntityId, position::Vec3};
 use azalea_entity::{
-    Attributes, Dead, EntityUuid, Physics, Position, dimensions::EntityDimensions, metadata::Health,
+    Attributes, Dead, Physics, Position, dimensions::EntityDimensions, metadata::Health,
 };
 use azalea_world::WorldName;
-use uuid::Uuid;
 
 use super::EntityRef;
-use crate::Client;
+use crate::{Client, client_impl::error::AzaleaResult};
 
 macro_rules! impl_entity_functions {
     ( $(
@@ -50,8 +49,8 @@ impl_entity_functions! {
     /// To get the client's eye position, use [`Self::eye_position`].
     ///
     /// Also see [`Client::position`].
-    pub fn position(&self) -> Vec3 {
-        **self.component::<Position>()
+    pub fn position(&self) -> AzaleaResult<Vec3> {
+        Ok(**self.component::<Position>()?)
     }
 
     Client:
@@ -65,8 +64,8 @@ impl_entity_functions! {
     /// width, height, and eye height.
     ///
     /// Also see [`Client::dimensions`]
-    pub fn dimensions(&self) -> EntityDimensions {
-        self.component::<EntityDimensions>().clone()
+    pub fn dimensions(&self) -> AzaleaResult<EntityDimensions> {
+        Ok(self.component::<EntityDimensions>()?.clone())
     }
 
     Client:
@@ -80,7 +79,7 @@ impl_entity_functions! {
     /// Get the position of this entity's eyes.
     ///
     /// Also see [`Client::eye_position`].
-    pub fn eye_position(&self) -> Vec3 {
+    pub fn eye_position(&self) -> AzaleaResult<Vec3> {
         self.query_self::<(&Position, &EntityDimensions), _>(|(pos, dim)| {
             pos.up(dim.eye_height as f64)
         })
@@ -94,20 +93,8 @@ impl_entity_functions! {
     /// Get the health of this entity, typically in the range `0..=20`.
     ///
     /// Also see [`Client::health`].
-    pub fn health(&self) -> f32 {
-        **self.component::<Health>()
-    }
-
-    Client:
-    /// Get the Minecraft UUID of this client.
-    ///
-    /// This is a shortcut for `**self.component::<EntityUuid>()`.
-    EntityRef:
-    /// Get the Minecraft UUID of this entity.
-    ///
-    /// Also see [`Client::uuid`].
-    pub fn uuid(&self) -> Uuid {
-        **self.component::<EntityUuid>()
+    pub fn health(&self) -> AzaleaResult<f32> {
+        Ok(**self.component::<Health>()?)
     }
 
     Client:
@@ -124,8 +111,8 @@ impl_entity_functions! {
     /// consider using [`Self::uuid`] instead.
     ///
     /// Also see [`Client::minecraft_id`].
-    pub fn minecraft_id(&self) -> MinecraftEntityId {
-        *self.component::<MinecraftEntityId>()
+    pub fn minecraft_id(&self) -> AzaleaResult<MinecraftEntityId> {
+        Ok(*self.component::<MinecraftEntityId>()?)
     }
 
     Client:
@@ -134,17 +121,19 @@ impl_entity_functions! {
     EntityRef:
     /// Returns the attribute values of the entity, which can be used to
     /// determine things like its movement speed.
-    pub fn attributes(&self) -> Attributes {
+    pub fn attributes(&self) -> AzaleaResult<Attributes> {
         // this *could* return a mapped read guard for performance but that rarely
         // matters and it's just easier for the user if it doesn't.
-        self.component::<Attributes>().clone()
+        Ok(self.component::<Attributes>()?.clone())
     }
 
     Client:
+    #[doc(hidden)]
     #[deprecated = "renamed to `world_name`."]
     EntityRef:
+    #[doc(hidden)]
     #[deprecated = "renamed to `world_name`."]
-    pub fn instance_name(&self) -> WorldName {
+    pub fn instance_name(&self) -> AzaleaResult<WorldName> {
         self.world_name()
     }
 
@@ -162,8 +151,8 @@ impl_entity_functions! {
     ///
     /// Also see [`Client::world_name`],
     #[doc(alias("dimension_name"))]
-    pub fn world_name(&self) -> WorldName {
-        (*self.component::<WorldName>()).clone()
+    pub fn world_name(&self) -> AzaleaResult<WorldName> {
+        Ok((*self.component::<WorldName>()?).clone())
     }
 
     Client:
@@ -183,7 +172,7 @@ impl_entity_functions! {
     ///
     /// Also see [`Client::is_alive`] and [`Self::exists`].
     pub fn is_alive(&self) -> bool {
-        self.try_query_self::<Option<&Dead>, _>(|dead| dead.is_none()).unwrap_or(false)
+        self.query_self::<Option<&Dead>, _>(|dead| dead.is_none()).unwrap_or(false)
     }
 
     Client:
@@ -197,7 +186,7 @@ impl_entity_functions! {
     ///
     /// Also see [`Client::exists`].
     pub fn exists(&self) -> bool {
-        self.try_query_self::<Option<&MinecraftEntityId>, _>(|entity_id| entity_id.is_some()).unwrap_or(false)
+        self.query_self::<Option<&MinecraftEntityId>, _>(|entity_id| entity_id.is_some()).unwrap_or(false)
     }
 
     Client:
@@ -208,7 +197,7 @@ impl_entity_functions! {
     /// collisions, etc.
     ///
     /// Also see [`Client::physics`].
-    pub fn physics(&self) -> Physics {
-        self.component::<Physics>().clone()
+    pub fn physics(&self) -> AzaleaResult<Physics> {
+        Ok(self.component::<Physics>()?.clone())
     }
 }

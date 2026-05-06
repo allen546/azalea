@@ -9,11 +9,13 @@ use bevy_ecs::{
     query::{QueryData, QueryEntityError, QueryFilter, QueryItem, ROQueryItem, With, Without},
     world::World,
 };
-use parking_lot::{
-    MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
-};
+use parking_lot::{MappedRwLockReadGuard, RwLock, RwLockReadGuard};
 
-use crate::{Client, entity_ref::EntityRef};
+use crate::{
+    Client,
+    client_impl::error::{AzaleaResult, MissingComponentError},
+    entity_ref::EntityRef,
+};
 
 impl Client {
     /// Get a component from the client.
@@ -27,9 +29,6 @@ impl Client {
     /// it may be simpler for you to immediately clone the component after
     /// accessing it.
     ///
-    /// If the component isn't guaranteed to be present, consider using
-    /// [`Self::get_component`] instead.
-    ///
     /// To do more complex queries or to mutate data, see [`Self::query_self`].
     ///
     /// To access data about other entities, you can use
@@ -38,11 +37,6 @@ impl Client {
     /// You may also use [`Self::ecs`] directly if you need more control over
     /// when the ECS is locked.
     ///
-    /// # Panics
-    ///
-    /// This will panic if the component doesn't exist on the client. Use
-    /// [`Self::get_component`] to avoid this.
-    ///
     /// # Examples
     ///
     /// ```
@@ -50,21 +44,19 @@ impl Client {
     /// # fn example(client: &azalea::Client) {
     /// let world_name = client.component::<WorldName>();
     /// # }
-    pub fn component<T: Component>(&self) -> MappedRwLockReadGuard<'_, T> {
-        self.get_component::<T>().unwrap_or_else(|| {
-            panic!(
-                "Our client is missing a required component: {:?}",
-                any::type_name::<&T>()
-            )
+    pub fn component<T: Component>(
+        &self,
+    ) -> Result<MappedRwLockReadGuard<'_, T>, MissingComponentError> {
+        self.entity_component::<T>(self.entity).map_err(|mut err| {
+            err.entity_description = "Player";
+            err
         })
     }
 
-    /// Get a component on this client, or `None` if it doesn't exist.
-    ///
-    /// If the component is guaranteed to be present, consider using
-    /// [`Self::component`]. Also see that function for more details.
+    #[doc(hidden)]
+    #[deprecated = "replaced with `Self::component`."]
     pub fn get_component<T: Component>(&self) -> Option<MappedRwLockReadGuard<'_, T>> {
-        self.get_entity_component::<T>(self.entity)
+        self.component().ok()
     }
 
     /// Query the ECS for data from our client entity.
@@ -87,19 +79,18 @@ impl Client {
     ///
     /// This will panic if the client is missing a component required by the
     /// query. Consider using [`Self::try_query_self`] to avoid this.
-    pub fn query_self<D: QueryData, R>(&self, f: impl FnOnce(QueryItem<D>) -> R) -> R {
-        self.try_query_self::<D, R>(f).unwrap_or_else(|_| {
-            panic!(
-                "`Client::query_self` failed when querying for {:?}",
-                any::type_name::<D>()
-            )
+    pub fn query_self<D: QueryData, R>(
+        &self,
+        f: impl FnOnce(QueryItem<D>) -> R,
+    ) -> AzaleaResult<R> {
+        self.query_entity(self.entity, f).map_err(|mut err| {
+            err.entity_description = "Player";
+            err
         })
     }
 
-    /// Query the ECS for data from our client entity, or return `None` if the
-    /// query failed.
-    ///
-    /// Also see [`Self::query_self`].
+    #[doc(hidden)]
+    #[deprecated = "replaced with `Self::query_self`."]
     pub fn try_query_self<D: QueryData, R>(
         &self,
         f: impl FnOnce(QueryItem<D>) -> R,
@@ -111,35 +102,33 @@ impl Client {
 
     /// Query the ECS for data from an entity.
     ///
-    /// Note that it is often simpler to use [`Self::entity_component`].
-    ///
-    /// To query the client, you should use [`Self::query_self`].
-    ///
     /// You can also use this to mutate data on an entity.
     ///
-    /// # Panics
+    /// Note that it is often simpler to use [`Self::entity_component`]. To
+    /// query the client, you should use [`Self::query_self`].
     ///
-    /// This will panic if the entity doesn't exist or if the query isn't valid
-    /// for the entity. For a non-panicking version, you may use
-    /// [`Self::try_query_entity`].
+    /// # Errors
+    ///
+    /// This will return an error if the entity doesn't exist or if the query
+    /// isn't valid for the entity.
     pub fn query_entity<D: QueryData, R>(
         &self,
         entity: Entity,
         f: impl FnOnce(QueryItem<D>) -> R,
-    ) -> R {
-        self.try_query_entity(entity, f).unwrap_or_else(|_| {
-            panic!(
-                "Querying entity {entity} failed when getting {:?}",
-                any::type_name::<D>()
-            )
-        })
+    ) -> AzaleaResult<R> {
+        let mut ecs = self.ecs.write();
+        let mut qs = ecs.query::<D>();
+        qs.get_mut(&mut ecs, entity)
+            .map(f)
+            .map_err(|_| MissingComponentError {
+                entity_description: "Entity",
+                entity,
+                component: any::type_name::<D>(),
+            })
     }
 
-    /// A convenience function for getting components from any entity, or None
-    /// if the query fails.
-    ///
-    /// If you're sure that the entity exists and that the query will succeed,
-    /// you can use [`Self::query_entity`].
+    #[doc(hidden)]
+    #[deprecated = "replaced with `Self::query_entity`."]
     pub fn try_query_entity<D: QueryData, R>(
         &self,
         entity: Entity,
@@ -158,9 +147,10 @@ impl Client {
     pub fn any_entity_by<Q: QueryData, F: QueryFilter>(
         &self,
         predicate: impl EntityPredicate<Q, F>,
-    ) -> Option<EntityRef> {
-        self.any_entity_id_by(predicate)
-            .map(|e| self.entity_ref_for(e))
+    ) -> AzaleaResult<Option<EntityRef>> {
+        Ok(self
+            .any_entity_id_by(predicate)?
+            .map(|e| self.entity_ref_for(e)))
     }
     /// Quickly returns a lightweight [`Entity`] for an arbitrary entity that
     /// matches the given predicate function that is in the same
@@ -190,9 +180,9 @@ impl Client {
     pub fn any_entity_id_by<Q: QueryData, F: QueryFilter>(
         &self,
         predicate: impl EntityPredicate<Q, F>,
-    ) -> Option<Entity> {
-        let world_name = self.get_component::<WorldName>()?.clone();
-        predicate.find_any(self.ecs.clone(), &world_name)
+    ) -> AzaleaResult<Option<Entity>> {
+        let world_name = self.component::<WorldName>()?.clone();
+        Ok(predicate.find_any(self.ecs.clone(), &world_name))
     }
 
     /// Return an [`EntityRef`] for the nearest entity that matches the
@@ -207,9 +197,10 @@ impl Client {
     pub fn nearest_entity_by<Q: QueryData, F: QueryFilter>(
         &self,
         predicate: impl EntityPredicate<Q, F>,
-    ) -> Option<EntityRef> {
-        self.nearest_entity_id_by(predicate)
-            .map(|e| self.entity_ref_for(e))
+    ) -> AzaleaResult<Option<EntityRef>> {
+        Ok(self
+            .nearest_entity_id_by(predicate)?
+            .map(|e| self.entity_ref_for(e)))
     }
     /// Return a lightweight [`Entity`] for the nearest entity that matches the
     /// given predicate function.
@@ -223,8 +214,8 @@ impl Client {
     pub fn nearest_entity_id_by<Q: QueryData, F: QueryFilter>(
         &self,
         predicate: impl EntityPredicate<Q, F>,
-    ) -> Option<Entity> {
-        self.nearest_entity_ids_by(predicate).first().copied()
+    ) -> AzaleaResult<Option<Entity>> {
+        Ok(self.nearest_entity_ids_by(predicate)?.first().copied())
     }
 
     /// Returns an array of all [`EntityRef`]s in the world that match the
@@ -236,17 +227,18 @@ impl Client {
     pub fn nearest_entities_by<Q: QueryData, F: QueryFilter>(
         &self,
         predicate: impl EntityPredicate<Q, F>,
-    ) -> Box<[EntityRef]> {
-        self.nearest_entity_ids_by(predicate)
+    ) -> AzaleaResult<Box<[EntityRef]>> {
+        Ok(self
+            .nearest_entity_ids_by(predicate)?
             .into_iter()
             .map(|e| self.entity_ref_for(e))
-            .collect()
+            .collect())
     }
     /// Returns an array of [`EntityRef`] for all known entities in the world
     /// that match the given filter, sorted by nearest first.
     ///
     /// Also see [`Self::nearest_entities_by`].
-    pub fn nearest_entities<F: QueryFilter>(&self) -> Box<[EntityRef]> {
+    pub fn nearest_entities<F: QueryFilter>(&self) -> AzaleaResult<Box<[EntityRef]>> {
         self.nearest_entities_by::<(), F>(|_| true)
     }
 
@@ -258,7 +250,7 @@ impl Client {
     ///
     /// If you're in a swarm, this includes all players that are visible by at
     /// least one client.
-    pub fn nearby_players(&self) -> Box<[EntityRef]> {
+    pub fn nearby_players(&self) -> AzaleaResult<Box<[EntityRef]>> {
         self.nearest_entities::<(With<metadata::Player>, Without<LocalEntity>)>()
     }
 
@@ -280,19 +272,15 @@ impl Client {
     pub fn nearest_entity_ids_by<Q: QueryData, F: QueryFilter>(
         &self,
         predicate: impl EntityPredicate<Q, F>,
-    ) -> Box<[Entity]> {
+    ) -> AzaleaResult<Box<[Entity]>> {
         let (world_name, position) = {
-            let Some(world_name) = self.get_component::<WorldName>() else {
-                return Box::new([]);
-            };
-            let Some(position) = self.get_component::<Position>() else {
-                return Box::new([]);
-            };
+            let world_name = self.component::<WorldName>()?;
+            let position = self.component::<Position>()?;
 
             (world_name.clone(), **position)
         };
 
-        predicate.find_all_sorted(self.ecs.clone(), &world_name, position)
+        Ok(predicate.find_all_sorted(self.ecs.clone(), &world_name, position))
     }
 
     /// Get a component from an entity.
@@ -315,13 +303,16 @@ impl Client {
     ///
     /// This will panic if the component doesn't exist on the entity. Use
     /// [`Self::get_entity_component`] to avoid this.
-    pub fn entity_component<T: Component>(&self, entity: Entity) -> MappedRwLockReadGuard<'_, T> {
-        self.get_entity_component::<T>(entity).unwrap_or_else(|| {
-            panic!(
-                "Entity {entity} is missing a required component: {:?}",
-                any::type_name::<&T>()
-            )
-        })
+    pub fn entity_component<T: Component>(
+        &self,
+        entity: Entity,
+    ) -> Result<MappedRwLockReadGuard<'_, T>, MissingComponentError> {
+        self.get_entity_component::<T>(entity)
+            .ok_or_else(|| MissingComponentError {
+                entity_description: "Entity",
+                entity,
+                component: any::type_name::<T>(),
+            })
     }
 
     /// Get a component from an entity, if it exists.

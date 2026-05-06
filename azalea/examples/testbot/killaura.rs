@@ -13,7 +13,7 @@ pub fn tick(bot: Client, state: State) -> eyre::Result<()> {
     if bot.has_attack_cooldown() {
         return Ok(());
     }
-    let bot_position = bot.eye_position();
+    let bot_position = bot.eye_position()?;
 
     let nearest_entity = bot.nearest_entity_by::<&Position, (
         With<AbstractMonster>,
@@ -22,7 +22,7 @@ pub fn tick(bot: Client, state: State) -> eyre::Result<()> {
     )>(|position: &Position| {
         let distance = bot_position.distance_to(**position);
         distance < 4.
-    });
+    })?;
 
     if let Some(nearest_entity) = nearest_entity {
         println!("attacking {nearest_entity:?}");

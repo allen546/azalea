@@ -130,6 +130,7 @@ fn handle_auto_mine(
 ///
 /// This is only present if we're currently mining a block.
 #[derive(Clone, Component, Debug)]
+#[component(storage = "SparseSet")]
 pub struct Mining {
     pub pos: BlockPos,
     pub dir: Direction,

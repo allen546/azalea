@@ -16,7 +16,7 @@ impl Client {
 
     /// Returns true if the client is currently trying to mine a block.
     pub fn is_mining(&self) -> bool {
-        self.get_component::<Mining>().is_some()
+        self.component::<Mining>().is_ok()
     }
 
     /// When enabled, the bot will mine any block that it is looking at if it is

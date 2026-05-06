@@ -17,7 +17,7 @@ use bevy_app::{App, Plugin, Update};
 use bevy_ecs::{component::Component, prelude::MessageReader, system::Commands};
 use derive_more::Deref;
 
-use crate::Client;
+use crate::{Client, client_impl::error::AzaleaResult};
 
 pub struct ContainerPlugin;
 impl Plugin for ContainerPlugin {
@@ -37,7 +37,7 @@ impl Client {
     ///
     /// ```
     /// # use azalea::{prelude::*, registry::builtin::BlockKind};
-    /// # async fn example(mut bot: azalea::Client) {
+    /// # async fn example(mut bot: azalea::Client) -> AzaleaResult<()> {
     /// let target_pos = bot
     ///     .world()
     ///     .read()
@@ -46,10 +46,11 @@ impl Client {
     ///     bot.chat("no chest found");
     ///     return;
     /// };
-    /// let container = bot.open_container_at(target_pos).await;
+    /// let container = bot.open_container_at(target_pos).await?;
+    /// # Ok(())
     /// # }
     /// ```
-    pub async fn open_container_at(&self, pos: BlockPos) -> Option<ContainerHandle> {
+    pub async fn open_container_at(&self, pos: BlockPos) -> AzaleaResult<Option<ContainerHandle>> {
         self.open_container_at_with_timeout_ticks(pos, Some(20 * 5))
             .await
     }
@@ -69,11 +70,15 @@ impl Client {
         &self,
         pos: BlockPos,
         timeout_ticks: Option<usize>,
-    ) -> Option<ContainerHandle> {
+    ) -> AzaleaResult<Option<ContainerHandle>> {
         let mut ticks = self.get_tick_broadcaster();
         // wait until it's not air (up to 10 ticks)
         for _ in 0..10 {
-            let block = self.world().read().get_block_state(pos).unwrap_or_default();
+            let block = self
+                .world()?
+                .read()
+                .get_block_state(pos)
+                .unwrap_or_default();
             if !block.is_collision_shape_empty() {
                 break;
             }
@@ -98,7 +103,7 @@ impl Client {
     pub async fn wait_for_container_open(
         &self,
         timeout_ticks: Option<usize>,
-    ) -> Option<ContainerHandle> {
+    ) -> AzaleaResult<Option<ContainerHandle>> {
         let mut ticks = self.get_tick_broadcaster();
         let mut elapsed_ticks = 0;
         while ticks.recv().await.is_ok() {
@@ -111,16 +116,15 @@ impl Client {
             if let Some(timeout_ticks) = timeout_ticks
                 && elapsed_ticks >= timeout_ticks
             {
-                return None;
+                return Ok(None);
             }
         }
 
-        let ecs = self.ecs.read();
-        let inventory = ecs.get::<Inventory>(self.entity).expect("no inventory");
-        if inventory.id == 0 {
-            None
+        let inventory_id = self.component::<Inventory>()?.id;
+        if inventory_id == 0 {
+            Ok(None)
         } else {
-            Some(ContainerHandle::new(inventory.id, self.clone()))
+            Ok(Some(ContainerHandle::new(inventory_id, self.clone())))
         }
     }
 
@@ -135,13 +139,13 @@ impl Client {
     /// If you just want to get the items in the player's inventory without
     /// sending any packets, use [`Client::menu`], [`Menu::player_slots_range`],
     /// and [`Menu::slots`].
-    pub fn open_inventory(&self) -> Option<ContainerHandle> {
-        let inventory = self.component::<Inventory>();
-        if inventory.id == 0 {
+    pub fn open_inventory(&self) -> AzaleaResult<Option<ContainerHandle>> {
+        let inventory = self.component::<Inventory>()?;
+        Ok(if inventory.id == 0 {
             Some(ContainerHandle::new(0, self.clone()))
         } else {
             None
-        }
+        })
     }
 
     /// Returns a [`ContainerHandleRef`] to the client's currently open
@@ -155,14 +159,17 @@ impl Client {
     /// won't trigger anticheats, use [`Client::open_inventory`].
     ///
     /// To open a container in the world, use [`Client::open_container_at`].
-    pub fn get_inventory(&self) -> ContainerHandleRef {
-        ContainerHandleRef::new(self.component::<Inventory>().id, self.clone())
+    pub fn get_inventory(&self) -> AzaleaResult<ContainerHandleRef> {
+        Ok(ContainerHandleRef::new(
+            self.component::<Inventory>()?.id,
+            self.clone(),
+        ))
     }
 
     /// Get the item in the bot's hotbar that is currently being held in its
     /// main hand.
-    pub fn get_held_item(&self) -> ItemStack {
-        self.component::<Inventory>().held_item().clone()
+    pub fn get_held_item(&self) -> AzaleaResult<ItemStack> {
+        Ok(self.component::<Inventory>()?.held_item().clone())
     }
 }
 
@@ -209,7 +216,7 @@ impl ContainerHandleRef {
     /// Note that any modifications you make to the `Menu` you're given will not
     /// actually cause any packets to be sent. If you're trying to modify your
     /// inventory, use [`Self::click`] instead
-    pub fn menu(&self) -> Option<Menu> {
+    pub fn menu(&self) -> AzaleaResult<Option<Menu>> {
         self.map_inventory(|inv| {
             if self.id == 0 {
                 inv.inventory_menu.clone()
@@ -219,7 +226,7 @@ impl ContainerHandleRef {
         })
     }
 
-    fn map_inventory<R>(&self, f: impl FnOnce(&Inventory) -> R) -> Option<R> {
+    fn map_inventory<R>(&self, f: impl FnOnce(&Inventory) -> R) -> AzaleaResult<Option<R>> {
         self.client.query_self::<&Inventory, _>(|inv| {
             if inv.id == self.id {
                 Some(f(inv))
@@ -235,14 +242,14 @@ impl ContainerHandleRef {
     ///
     /// If the container is closed, this will return `None`.
     pub fn contents(&self) -> Option<Vec<ItemStack>> {
-        self.menu().map(|menu| menu.contents())
+        Some(self.menu().ok()??.contents())
     }
 
     /// Return the contents of the menu, including the player's inventory.
     ///
     /// If the container is closed, this will return `None`.
     pub fn slots(&self) -> Option<Vec<ItemStack>> {
-        self.menu().map(|menu| menu.slots())
+        Some(self.menu().ok()??.slots())
     }
 
     /// Returns the title of the container, or `None` if no container is open.
@@ -258,7 +265,7 @@ impl ContainerHandleRef {
     /// ```
     pub fn title(&self) -> Option<FormattedText> {
         self.map_inventory(|inv| inv.container_menu_title.clone())
-            .flatten()
+            .ok()??
     }
 
     /// A shortcut for [`Self::click`] with `PickupClick::Left`.

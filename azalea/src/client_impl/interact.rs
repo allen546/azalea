@@ -3,13 +3,13 @@ use azalea_core::{hit_result::HitResult, position::BlockPos};
 use azalea_protocol::packets::game::s_interact::InteractionHand;
 use bevy_ecs::entity::Entity;
 
-use crate::Client;
+use crate::{Client, client_impl::error::AzaleaResult};
 
 impl Client {
     /// Returns the current [`HitResult`], which is the block or entity in the
     /// client's crosshair.
-    pub fn hit_result(&self) -> HitResult {
-        (**self.component::<HitResultComponent>()).clone()
+    pub fn hit_result(&self) -> AzaleaResult<HitResult> {
+        Ok((**self.component::<HitResultComponent>()?).clone())
     }
 
     /// Right-click a block.

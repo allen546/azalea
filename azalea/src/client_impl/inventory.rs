@@ -2,7 +2,7 @@ use azalea_client::inventory::SetSelectedHotbarSlotEvent;
 use azalea_entity::inventory::Inventory;
 use azalea_inventory::Menu;
 
-use crate::Client;
+use crate::{Client, client_impl::error::AzaleaResult};
 
 impl Client {
     /// Return the menu that is currently open, or the player's inventory if no
@@ -10,8 +10,8 @@ impl Client {
     ///
     /// If you need to interact with the menu, consider using
     /// [`Self::open_inventory`] instead.
-    pub fn menu(&self) -> Menu {
-        self.component::<Inventory>().menu().clone()
+    pub fn menu(&self) -> AzaleaResult<Menu> {
+        Ok(self.component::<Inventory>()?.menu().clone())
     }
 
     /// Returns the index of the hotbar slot that's currently selected.
@@ -21,8 +21,8 @@ impl Client {
     /// the start of [`azalea_inventory::Menu::hotbar_slots_range`].
     ///
     /// You can use [`Self::set_selected_hotbar_slot`] to change it.
-    pub fn selected_hotbar_slot(&self) -> u8 {
-        self.component::<Inventory>().selected_hotbar_slot
+    pub fn selected_hotbar_slot(&self) -> AzaleaResult<u8> {
+        Ok(self.component::<Inventory>()?.selected_hotbar_slot)
     }
 
     /// Update the selected hotbar slot index.

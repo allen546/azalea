@@ -37,6 +37,8 @@ impl CommandSource {
             .any_entity_by::<&GameProfileComponent, With<Player>>(
                 |profile: &GameProfileComponent| profile.name == username,
             )
+            .ok()
+            .flatten()
     }
 }
 

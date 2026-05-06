@@ -22,9 +22,9 @@ impl Client {
     ///
     /// Also see [`Client::attack_cooldown_remaining_ticks`].
     pub fn has_attack_cooldown(&self) -> bool {
-        let Some(attack_strength_scale) = self.get_component::<AttackStrengthScale>() else {
+        let Ok(attack_strength_scale) = self.component::<AttackStrengthScale>() else {
             // they don't even have an AttackStrengthScale so they probably can't even
-            // attack? whatever, just return false
+            // attack. whatever, just return false
             return false;
         };
         **attack_strength_scale < 1.0
