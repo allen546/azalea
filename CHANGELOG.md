@@ -10,12 +10,19 @@ is breaking anyways, semantic versioning is not followed.
 
 ### Added
 
+- `azalea-brigadier` now optionally allows commands to return a `Result<i32, _>` instead of just an `i32`.
+- `azalea-chat` is now re-exported in `azalea::chat`.
+- Shape offsets were implemented, so bots no longer get stuck on bamboo and dripstone.
+
 ### Changed
 
-- Re-export `azalea-chat` from `azalea`, and move the other `azalea::chat` module to `azalea::client_chat`.
 - Many functions in `Client` and `EntityRef` now return an `AzaleaResult` instead of panicking when getting entity data fails.
+- The previous `azalea::chat` module (from `azalea-client`) was moved to `azalea::client_chat`.
 
 ### Fixed
+
+- Incorrect `damage_kind` component protocol implementation.
+- The `AirSupply` metadata component was defaulting to `0` instead of `300`. (@wbbradley)
 
 ## [0.16.0+mc26.1] - 2026-03-27
 

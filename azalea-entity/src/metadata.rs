@@ -545,13 +545,13 @@ impl Default for AbstractEntityMetadataBundle {
             currently_glowing: CurrentlyGlowing(false),
             invisible: Invisible(false),
             fall_flying: FallFlying(false),
-            air_supply: AirSupply(Default::default()),
-            custom_name: CustomName(Default::default()),
-            custom_name_visible: CustomNameVisible(Default::default()),
-            silent: Silent(Default::default()),
-            no_gravity: NoGravity(Default::default()),
+            air_supply: AirSupply(300),
+            custom_name: CustomName(None),
+            custom_name_visible: CustomNameVisible(false),
+            silent: Silent(false),
+            no_gravity: NoGravity(false),
             pose: Pose::default(),
-            ticks_frozen: TicksFrozen(Default::default()),
+            ticks_frozen: TicksFrozen(0),
         }
     }
 }
