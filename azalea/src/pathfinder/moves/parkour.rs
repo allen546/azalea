@@ -236,13 +236,13 @@ fn execute_parkour_move(mut ctx: ExecuteCtx) {
 
         // it's possible to hit our heads on a block when doing certain jumps (which
         // resets our horizontal velocity), but we can avoid that by sneaking
-        if !ctx.physics.on_ground() && ctx.physics.velocity.y.abs() < 0.1 {
+        if !ctx.physics.on_ground() && ctx.physics.velocity.y.abs() < 0.25 {
             let should_sneak = {
                 let world = ctx.world.read();
-                let pos_above = ctx.position.up(1.8 + 0.1);
+                let pos_above = ctx.position.up(1.8 + 0.25);
                 let block_pos_above = BlockPos::from(pos_above);
                 let block_pos_above_plus_velocity =
-                    BlockPos::from(pos_above + ctx.physics.velocity.with_y(0.) * 4.);
+                    BlockPos::from(pos_above + ctx.physics.velocity.with_y(0.) * 5.);
 
                 let block_above = world.get_block_state(block_pos_above).unwrap_or_default();
                 let block_above_plus_velocity = world

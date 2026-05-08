@@ -29,8 +29,10 @@ where
 }
 
 // used for better results when timing out
-// see https://github.com/cabaletta/baritone/blob/1.19.4/src/main/java/baritone/pathing/calc/AbstractNodeCostSearch.java#L68
-const COEFFICIENTS: [f32; 7] = [1.5, 2., 2.5, 3., 4., 5., 10.];
+// based on Baritone's implementation (with tweaks), see
+// https://github.com/cabaletta/baritone/blob/1.19.4/src/main/java/baritone/pathing/calc/AbstractNodeCostSearch.java#L68
+// for more info
+const COEFFICIENTS: [f32; 7] = [1.5, 2., 2.5, 3., 4., 5., 15.];
 
 const MIN_IMPROVEMENT: f32 = 0.01;
 

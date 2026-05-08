@@ -427,12 +427,14 @@ pub fn recalculate_near_end_of_path(
         if (executing_path.path.len() == 50 || executing_path.path.len() < 5)
             && !pathfinder.is_calculating
             && executing_path.is_path_partial
+            // don't recalculate if we're already planning on switching to a different path
+            && executing_path.queued_path.is_none()
         {
             match pathfinder.goal.as_ref().cloned() {
                 Some(goal) => {
                     debug!("Recalculating path because it's empty or ends soon");
                     debug!(
-                        "recalculate_near_end_of_path executing_path.is_path_partial: {}",
+                        "   executing_path.is_path_partial: {}",
                         executing_path.is_path_partial
                     );
 

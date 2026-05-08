@@ -34,8 +34,7 @@ use std::{
         Arc,
         atomic::{self, AtomicBool, AtomicUsize},
     },
-    thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use astar::Edge;
@@ -435,6 +434,8 @@ pub fn goto_listener(
                         executing_path.path
                     )
                 }
+            } else {
+                debug!("Couldn't find path instantly...");
             }
 
             if !executing_path.path.is_empty() {
@@ -445,6 +446,9 @@ pub fn goto_listener(
                 // truncate the executing path so we can cleanly combine the two paths later
                 executing_path.path.truncate(executing_path_limit);
 
+                // TODO: this should probably have better handling when we have a queued path
+                // (since it can result in skipped nodes which is very bad). you should probably
+                // write a test for this before trying to fix it, though.
                 start = executing_path
                     .path
                     .back()
@@ -552,8 +556,6 @@ pub fn calculate_path(ctx: CalculatePathCtx) -> Option<PathFoundEvent> {
         } else {
             info!("Pathfinder took {duration:?} (incomplete path)");
         }
-        // wait a bit so it's not a busy loop
-        thread::sleep(Duration::from_millis(100));
     } else {
         info!("Pathfinder took {duration:?}");
     }
@@ -692,7 +694,8 @@ pub fn path_found_listener(
                             first_node_of_new_path.movement.target,
                         );
 
-                        if successors(last_target_of_current_path)
+                        let successors = successors(last_target_of_current_path);
+                        if successors
                             .iter()
                             .any(|edge| edge.movement.target == first_target_of_new_path)
                         {
@@ -706,6 +709,10 @@ pub fn path_found_listener(
                                 found_path.iter().take(10).collect::<Vec<_>>()
                             );
                             new_path.extend(executing_path.path.iter().cloned());
+                        } else {
+                            debug!(
+                                "failed to combine old and new paths. first_target_of_new_path: {first_target_of_new_path:?}, successors: {successors:?}"
+                            )
                         }
                     } else {
                         new_path.extend(executing_path.path.iter().cloned());
