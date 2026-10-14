@@ -28,6 +28,7 @@ bevy_time.workspace = true
 chrono = { workspace = true, features = ["now"] }
 derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 indexmap.workspace = true
+libc = "0.2"
 minecraft_folder_path.workspace = true
 parking_lot.workspace = true
 regex.workspace = true

@@ -142,3 +142,20 @@ pub fn mark(kind: Option<Kind>) {
     }
     *l = Some(Instant::now());
 }
+
+/// CPU time used by the calling thread, in ns.
+pub fn thread_cpu_ns() -> u64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+/// CPU time used by the whole process, in ns.
+pub fn process_cpu_ns() -> u64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+/// Thread CPU ns spent inside ECS schedule runs (Update loop + GameTick) on the ECS thread.
+pub static ECS_CPU_NS: AtomicU64 = AtomicU64::new(0);
+/// Thread CPU ns spent inside pathfinder A* tasks on the AsyncComputeTaskPool.
+pub static POOL_ASTAR_CPU_NS: AtomicU64 = AtomicU64::new(0);

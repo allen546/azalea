@@ -189,8 +189,10 @@ async fn run_schedule_loop(
 
         // if last tick is None or more than 50ms ago, run the GameTick schedule
         {
+            let _c0 = crate::bench_metrics::thread_cpu_ns();
             let _t = crate::bench_metrics::Timer::new(crate::bench_metrics::Kind::UpdateLoop);
             ecs.run_schedule(outer_schedule_label);
+            crate::bench_metrics::ECS_CPU_NS.fetch_add(crate::bench_metrics::thread_cpu_ns() - _c0, std::sync::atomic::Ordering::Relaxed);
         }
         if last_tick
             .map(|last_tick| last_tick.elapsed() > GAME_TICK_DURATION_TARGET)
@@ -211,8 +213,10 @@ async fn run_schedule_loop(
                 last_tick = Some(now);
             }
             {
+                let _c0 = crate::bench_metrics::thread_cpu_ns();
                 let _t = crate::bench_metrics::Timer::new(crate::bench_metrics::Kind::GameTick);
                 ecs.run_schedule(GameTick);
+                crate::bench_metrics::ECS_CPU_NS.fetch_add(crate::bench_metrics::thread_cpu_ns() - _c0, std::sync::atomic::Ordering::Relaxed);
             }
         }
 

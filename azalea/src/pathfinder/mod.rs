@@ -481,6 +481,7 @@ pub fn goto_listener(
             azalea_client::bench_metrics::record_ns(azalea_client::bench_metrics::Kind::PfQueueWait, bench_spawned.elapsed().as_nanos() as u64);
             azalea_client::bench_metrics::count(azalea_client::bench_metrics::counter::PATH_POOL, 1);
             let bench_t1 = Instant::now();
+            let bench_c1 = azalea_client::bench_metrics::thread_cpu_ns();
             let mut r = calculate_path(CalculatePathCtx {
                 entity,
                 start,
@@ -491,6 +492,7 @@ pub fn goto_listener(
                 custom_state,
                 opts,
             });
+            azalea_client::bench_metrics::POOL_ASTAR_CPU_NS.fetch_add(azalea_client::bench_metrics::thread_cpu_ns() - bench_c1, std::sync::atomic::Ordering::Relaxed);
             azalea_client::bench_metrics::record_ns(azalea_client::bench_metrics::Kind::PfAstarPool, bench_t1.elapsed().as_nanos() as u64);
             if let Some(r) = r.as_mut() {
                 r.requested_at = Some(bench_requested);
