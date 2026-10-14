@@ -45,7 +45,8 @@ pub enum Kind {
     ChunkEvent,
     // observer
     ObsPacketSystem,
-    ObsOther,
+    /// observer: events handled in one system call (value is a count, not ns)
+    ObsEventsPerCall,
     Count,
 }
 const N: usize = Kind::Count as usize;
