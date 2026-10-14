@@ -245,7 +245,7 @@ impl CachedWorld {
     fn calculate_bitsets_for_section(&self, section_pos: SmallChunkSectionPos) -> CachedSection {
         let _bench_t = azalea_client::bench_metrics::Timer::new(azalea_client::bench_metrics::Kind::PfBitsets);
         azalea_client::bench_metrics::count(azalea_client::bench_metrics::counter::SECTIONS_BUILT, 1);
-        if azalea_client::bench_metrics::enabled() {
+        if azalea_client::bench_metrics::enabled() && std::env::var_os("BENCH_SECTION_UNIQUE").is_some() {
             static SEEN: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<(i32, i32, i32)>>> = std::sync::OnceLock::new();
             let seen = SEEN.get_or_init(Default::default);
             if seen.lock().insert((section_pos.x as i32, section_pos.y as i32, section_pos.z as i32)) {
