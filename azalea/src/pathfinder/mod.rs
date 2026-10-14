@@ -146,6 +146,8 @@ pub struct PathFoundEvent {
     pub is_partial: bool,
     pub successors_fn: SuccessorsFn,
     pub allow_mining: bool,
+    /// bench instrumentation
+    pub requested_at: Option<Instant>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -312,6 +314,7 @@ pub fn goto_listener(
     )>,
     worlds: Res<Worlds>,
 ) {
+    let _bt = azalea_client::bench_metrics::Timer::new(azalea_client::bench_metrics::Kind::PfGotoListener);
     let thread_pool = AsyncComputeTaskPool::get();
 
     for event in events.read() {
@@ -393,6 +396,7 @@ pub fn goto_listener(
                         .unwrap_or(cur_pos)
                 });
 
+            let bench_t0 = Instant::now();
             let path_found_event = calculate_path(CalculatePathCtx {
                 entity,
                 start: instant_path_start,
@@ -408,9 +412,12 @@ pub fn goto_listener(
                 },
             });
 
-            if let Some(path_found_event) = path_found_event
+            azalea_client::bench_metrics::record_ns(azalea_client::bench_metrics::Kind::PfAstarInstant, bench_t0.elapsed().as_nanos() as u64);
+            azalea_client::bench_metrics::count(azalea_client::bench_metrics::counter::PATH_INSTANT, 1);
+            if let Some(mut path_found_event) = path_found_event
                 && !path_found_event.is_partial
             {
+                path_found_event.requested_at = Some(event.requested_at);
                 debug!("Found path instantly!");
 
                 // instant_path_start needs to be equal to executing_path.path.back() for the
@@ -468,8 +475,13 @@ pub fn goto_listener(
         }
 
         let mining_cache = MiningCache::new(inventory_menu);
+        let bench_spawned = Instant::now();
+        let bench_requested = event.requested_at;
         let task = thread_pool.spawn(async move {
-            calculate_path(CalculatePathCtx {
+            azalea_client::bench_metrics::record_ns(azalea_client::bench_metrics::Kind::PfQueueWait, bench_spawned.elapsed().as_nanos() as u64);
+            azalea_client::bench_metrics::count(azalea_client::bench_metrics::counter::PATH_POOL, 1);
+            let bench_t1 = Instant::now();
+            let mut r = calculate_path(CalculatePathCtx {
                 entity,
                 start,
                 goal,
@@ -478,7 +490,12 @@ pub fn goto_listener(
                 mining_cache,
                 custom_state,
                 opts,
-            })
+            });
+            azalea_client::bench_metrics::record_ns(azalea_client::bench_metrics::Kind::PfAstarPool, bench_t1.elapsed().as_nanos() as u64);
+            if let Some(r) = r.as_mut() {
+                r.requested_at = Some(bench_requested);
+            }
+            r
         });
 
         commands.entity(event.entity).insert(ComputePath(task));
@@ -565,11 +582,18 @@ pub fn calculate_path(ctx: CalculatePathCtx) -> Option<PathFoundEvent> {
         debug!("  {}", movement.target.apply(origin));
     }
 
+    {
+        use azalea_client::bench_metrics::{count, counter};
+        if is_partial { count(counter::PATH_PARTIAL, 1); }
+        if movements.is_empty() { count(counter::PATH_EMPTY, 1); }
+        count(counter::PATH_NODES_SUM, movements.len() as u64);
+    }
     let path = movements.into_iter().collect::<VecDeque<_>>();
 
     let goto_id_now = ctx.goto_id_atomic.load(atomic::Ordering::SeqCst);
     if goto_id != goto_id_now {
         // we must've done another goto while calculating this path, so throw it away
+        azalea_client::bench_metrics::count(azalea_client::bench_metrics::counter::PATH_OUTDATED, 1);
         warn!("finished calculating a path, but it's outdated");
         return None;
     }
@@ -612,6 +636,7 @@ pub fn calculate_path(ctx: CalculatePathCtx) -> Option<PathFoundEvent> {
         is_partial,
         successors_fn: ctx.opts.successors_fn,
         allow_mining: ctx.opts.allow_mining,
+        requested_at: None,
     })
 }
 
@@ -621,6 +646,7 @@ pub fn handle_tasks(
     mut transform_tasks: Query<(Entity, &mut ComputePath)>,
     mut path_found_events: MessageWriter<PathFoundEvent>,
 ) {
+    let _bt = azalea_client::bench_metrics::Timer::new(azalea_client::bench_metrics::Kind::PfHandleTasks);
     for (entity, mut task) in &mut transform_tasks {
         if let Some(optional_path_found_event) = future::block_on(future::poll_once(&mut task.0)) {
             if let Some(path_found_event) = optional_path_found_event {
@@ -647,7 +673,12 @@ pub fn path_found_listener(
     worlds: Res<Worlds>,
     mut commands: Commands,
 ) {
+    let _bt = azalea_client::bench_metrics::Timer::new(azalea_client::bench_metrics::Kind::PfPathFoundListener);
     for event in events.read() {
+        if let Some(r) = event.requested_at {
+            azalea_client::bench_metrics::record_ns(azalea_client::bench_metrics::Kind::PfRequestToFound, r.elapsed().as_nanos() as u64);
+            azalea_client::bench_metrics::count(azalea_client::bench_metrics::counter::PATH_FOUND_OK, 1);
+        }
         let Ok((mut pathfinder, executing_path, world_name, inventory, custom_state)) =
             query.get_mut(event.entity)
         else {

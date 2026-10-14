@@ -49,12 +49,19 @@ impl Plugin for DefaultPathfinderExecutionPlugin {
         app.add_systems(
             GameTick,
             (
+                || azalea_client::bench_metrics::mark(None),
                 timeout_movement,
+                || azalea_client::bench_metrics::mark(Some(azalea_client::bench_metrics::Kind::PfTimeoutMovement)),
                 patching::check_for_path_obstruction,
+                || azalea_client::bench_metrics::mark(Some(azalea_client::bench_metrics::Kind::PfCheckObstruction)),
                 check_node_reached,
+                || azalea_client::bench_metrics::mark(Some(azalea_client::bench_metrics::Kind::PfCheckNodeReached)),
                 tick_execute_path,
+                || azalea_client::bench_metrics::mark(Some(azalea_client::bench_metrics::Kind::PfTickExecute)),
                 recalculate_near_end_of_path,
+                || azalea_client::bench_metrics::mark(Some(azalea_client::bench_metrics::Kind::PfRecalcNearEnd)),
                 recalculate_if_has_goal_but_no_path,
+                || azalea_client::bench_metrics::mark(Some(azalea_client::bench_metrics::Kind::PfRecalcNoPath)),
             )
                 .chain()
                 .after(PhysicsSystems)
@@ -446,7 +453,7 @@ pub fn recalculate_near_end_of_path(
                         PathfinderTimeout::Time(Duration::from_secs(1))
                     };
 
-                    goto_events.write(GotoEvent { entity, goal, opts });
+                    goto_events.write(GotoEvent { entity, goal, opts, requested_at: std::time::Instant::now() });
                     pathfinder.is_calculating = true;
 
                     if executing_path.path.is_empty() {
@@ -497,7 +504,7 @@ pub fn recalculate_if_has_goal_but_no_path(
             && let Some(opts) = pathfinder.opts.clone()
         {
             debug!("Recalculating path because it has a goal but no ExecutingPath");
-            goto_events.write(GotoEvent { entity, goal, opts });
+            goto_events.write(GotoEvent { entity, goal, opts, requested_at: std::time::Instant::now() });
             pathfinder.is_calculating = true;
         }
     }

@@ -211,6 +211,8 @@ impl CachedWorld {
             return Some(f(section));
         }
 
+        let bench_t = azalea_client::bench_metrics::Timer::new(azalea_client::bench_metrics::Kind::PfChunkClone);
+        azalea_client::bench_metrics::count(azalea_client::bench_metrics::counter::CHUNK_CLONES, 1);
         let world = self.world_lock.read();
         let chunk = world.chunks.get(&chunk_pos)?;
         let chunk = chunk.read();
@@ -220,6 +222,7 @@ impl CachedWorld {
             .iter()
             .map(|section| section.states.clone())
             .collect::<Box<[PalettedContainer<BlockState>]>>();
+        drop(bench_t);
 
         if section_index >= sections.len() {
             // y position is out of bounds
@@ -240,6 +243,15 @@ impl CachedWorld {
     }
 
     fn calculate_bitsets_for_section(&self, section_pos: SmallChunkSectionPos) -> CachedSection {
+        let _bench_t = azalea_client::bench_metrics::Timer::new(azalea_client::bench_metrics::Kind::PfBitsets);
+        azalea_client::bench_metrics::count(azalea_client::bench_metrics::counter::SECTIONS_BUILT, 1);
+        if azalea_client::bench_metrics::enabled() {
+            static SEEN: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<(i32, i32, i32)>>> = std::sync::OnceLock::new();
+            let seen = SEEN.get_or_init(Default::default);
+            if seen.lock().insert((section_pos.x as i32, section_pos.y as i32, section_pos.z as i32)) {
+                azalea_client::bench_metrics::count(azalea_client::bench_metrics::counter::SECTIONS_UNIQUE, 1);
+            }
+        }
         let bitsets = self
             .with_section(section_pos, |section| {
                 let mut bitsets = SectionBitsets {

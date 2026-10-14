@@ -188,7 +188,10 @@ async fn run_schedule_loop(
         let mut ecs = ecs.write();
 
         // if last tick is None or more than 50ms ago, run the GameTick schedule
-        ecs.run_schedule(outer_schedule_label);
+        {
+            let _t = crate::bench_metrics::Timer::new(crate::bench_metrics::Kind::UpdateLoop);
+            ecs.run_schedule(outer_schedule_label);
+        }
         if last_tick
             .map(|last_tick| last_tick.elapsed() > GAME_TICK_DURATION_TARGET)
             .unwrap_or(true)
@@ -207,7 +210,10 @@ async fn run_schedule_loop(
             } else {
                 last_tick = Some(now);
             }
-            ecs.run_schedule(GameTick);
+            {
+                let _t = crate::bench_metrics::Timer::new(crate::bench_metrics::Kind::GameTick);
+                ecs.run_schedule(GameTick);
+            }
         }
 
         ecs.clear_trackers();

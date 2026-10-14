@@ -23,6 +23,8 @@ pub struct GotoEvent {
     pub entity: Entity,
     pub goal: Arc<dyn Goal>,
     pub opts: PathfinderOpts,
+    /// bench instrumentation: when this request was created
+    pub requested_at: std::time::Instant,
 }
 
 impl GotoEvent {
@@ -31,6 +33,7 @@ impl GotoEvent {
             entity,
             goal: Arc::new(goal),
             opts,
+            requested_at: std::time::Instant::now(),
         }
     }
 }

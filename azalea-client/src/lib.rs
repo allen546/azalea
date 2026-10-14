@@ -3,6 +3,7 @@
 #![allow(clippy::type_complexity, reason = "Bevy Query types")]
 
 pub mod account;
+pub mod bench_metrics;
 mod client;
 pub mod local_player;
 pub mod ping;
