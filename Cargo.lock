@@ -268,6 +268,7 @@ dependencies = [
  "rand 0.10.0",
  "rustc-hash",
  "serde",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
@@ -300,6 +301,8 @@ dependencies = [
  "azalea-block-macros",
  "azalea-buf",
  "azalea-registry",
+ "criterion",
+ "rand 0.10.0",
 ]
 
 [[package]]
@@ -385,6 +388,7 @@ dependencies = [
  "derive_more",
  "eyre",
  "indexmap",
+ "libc",
  "minecraft_folder_path",
  "parking_lot",
  "regex",
@@ -533,6 +537,7 @@ dependencies = [
  "azalea-registry",
  "azalea-world",
  "bevy_ecs",
+ "chrono",
  "criterion",
  "eyre",
  "flate2",
@@ -540,6 +545,8 @@ dependencies = [
  "futures-lite",
  "hickory-resolver",
  "indexmap",
+ "minecraft_folder_path",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",

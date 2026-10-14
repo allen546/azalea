@@ -68,6 +68,7 @@ pub fn handle_receive_chunk_event(
     mut events: MessageReader<ReceiveChunkEvent>,
     mut query: Query<&WorldHolder>,
 ) {
+    let _bt = crate::bench_metrics::Timer::new(crate::bench_metrics::Kind::ChunkEvent);
     for event in events.read() {
         let pos = ChunkPos::new(event.packet.x, event.packet.z);
 

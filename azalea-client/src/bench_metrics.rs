@@ -39,6 +39,10 @@ pub enum Kind {
     // chunk-section work inside CachedWorld
     PfChunkClone,
     PfBitsets,
+    /// PreUpdate `read_packets` (decode + packet handlers), all bots
+    ReadPackets,
+    /// Update `handle_receive_chunk_event`
+    ChunkEvent,
     // observer
     ObsPacketSystem,
     ObsOther,

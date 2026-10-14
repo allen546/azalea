@@ -44,6 +44,7 @@ impl Plugin for ConnectionPlugin {
 }
 
 pub fn read_packets(ecs: &mut World) {
+    let _bt = crate::bench_metrics::Timer::new(crate::bench_metrics::Kind::ReadPackets);
     let mut entity_and_conn_query = ecs.query::<(Entity, &mut RawConnection)>();
     let mut conn_query = ecs.query::<&mut RawConnection>();
 
