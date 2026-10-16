@@ -285,6 +285,12 @@ pub(crate) fn tick_controls(mut query: Query<&mut ClientMovementState>) {
     }
 }
 
+/// Marks a local player as using an item (shield up, eating, drawing a bow), which slows its
+/// input to 20% like vanilla's `LocalPlayer.modifyInput`. Null fork: inserted and removed by the
+/// code that sends the use and release packets.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct ItemInUse;
+
 /// Makes the bot do one physics tick.
 ///
 /// This is handled automatically by the client.
@@ -305,6 +311,7 @@ pub fn local_player_ai_step(
             &mut Sprinting,
             &mut Crouching,
             &mut Attributes,
+            Has<ItemInUse>,
         ),
         (With<HasClientLoaded>, With<LocalEntity>),
     >,
@@ -325,6 +332,7 @@ pub fn local_player_ai_step(
         mut sprinting,
         mut crouching,
         mut attributes,
+        item_in_use,
     ) in query.iter_mut()
     {
         // server ai step
@@ -371,8 +379,8 @@ pub fn local_player_ai_step(
         let is_fall_flying = false;
         // TODO: passenger
         let is_passenger = false;
-        // TODO: using items
-        let using_item = false;
+        // Null fork: set by whoever sends the use-item packet (Azalea has no tracking yet).
+        let using_item = item_in_use;
         // TODO: status effects
         let has_blindness = false;
 
@@ -402,7 +410,9 @@ pub fn local_player_ai_step(
                 || !has_enough_impulse
                 || !has_enough_food_to_sprint
                 || (physics.horizontal_collision && !physics.minor_horizontal_collision)
-                || (is_in_water && !is_underwater);
+                || (is_in_water && !is_underwater)
+                // Null fork: never sprint while blocking or eating; anticheats flag it
+                || using_item;
             if should_stop_sprinting {
                 set_sprinting(false, &mut sprinting, &mut attributes);
             }
@@ -412,7 +422,7 @@ pub fn local_player_ai_step(
         // implemented
         let move_vector = modify_input(
             physics_state.move_vector,
-            false,
+            using_item,
             false,
             **crouching,
             &attributes,

@@ -28,5 +28,5 @@ pub use bevy_tasks;
 pub use client::{
     InConfigState, InGameState, JoinedClientBundle, LocalPlayerBundle, start_ecs_runner,
 };
-pub use movement::{StartSprintEvent, StartWalkEvent};
+pub use movement::{ItemInUse, StartSprintEvent, StartWalkEvent};
 pub use plugins::*;
