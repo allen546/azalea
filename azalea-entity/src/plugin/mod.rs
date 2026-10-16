@@ -89,10 +89,17 @@ fn debug_new_entity(query: Query<(Entity, Option<&LocalEntity>), Added<Minecraft
 /// This will be present if an entity is doing the death animation.
 ///
 /// Entities that are dead cannot be revived.
-pub fn add_dead(mut commands: Commands, query: Query<(Entity, &Health), Changed<Health>>) {
-    for (entity, health) in query.iter() {
+pub fn add_dead(
+    mut commands: Commands,
+    query: Query<(Entity, &Health, Has<Dead>, Has<LocalEntity>), Changed<Health>>,
+) {
+    for (entity, health, dead, local) in query.iter() {
         if **health <= 0.0 {
             commands.entity(entity).insert(Dead);
+        } else if dead && !local {
+            // Null fork: a respawned player keeps its entity id and is re-added onto the same
+            // ECS entity, so it must lose the marker. Local players clear it on respawn.
+            commands.entity(entity).remove::<Dead>();
         }
     }
 }
