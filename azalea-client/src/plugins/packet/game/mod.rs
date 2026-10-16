@@ -43,7 +43,7 @@ use crate::{
     movement::{KnockbackData, KnockbackEvent},
     packet::{
         as_system, declare_packet_handlers,
-        relative_updates::{EntityUpdateQuery, RelativeEntityUpdate, should_apply_entity_update},
+        relative_updates::{EntityUpdateQuery, RelativeEntityUpdate, UpdatedBy, should_apply_entity_update},
     },
     player::{GameProfileComponent, PlayerInfo},
     tick_counter::TicksConnected,
@@ -573,6 +573,7 @@ impl GamePacketHandler<'_> {
             Query<Entity>,
             Res<Worlds>,
             ResMut<EntityUuidIndex>,
+            Query<(Option<&UpdatedBy>, Has<LocalEntity>)>,
         )>(
             self.ecs,
             |(
@@ -582,6 +583,7 @@ impl GamePacketHandler<'_> {
                 entity_query,
                 worlds,
                 mut entity_uuid_index,
+                updated_by_query,
             )| {
                 let (mut entity_id_index, world_name, tab_list) =
                     query.get_mut(self.player).unwrap();
@@ -614,6 +616,25 @@ impl GamePacketHandler<'_> {
                         }
                         return;
                     };
+                    // Null fork: if no client still tracking it drives its updates, the
+                    // stored position is stale (respawn, teleport, back in range); take
+                    // the absolute one from this packet.
+                    // Never for a local entity: another bot in our swarm owns its own position.
+                    let (updated_by, local) = updated_by_query.get(ecs_entity).unwrap_or((None, true));
+                    let driven = updated_by.is_some_and(|u| u.0 != self.player && loaded_by.contains(&u.0));
+                    if !driven && !local {
+                        let pos = p.position;
+                        commands.entity(ecs_entity).insert(UpdatedBy(self.player));
+                        commands.entity(ecs_entity).queue(move |mut e: EntityWorldMut| {
+                            if let Some(mut position) = e.get_mut::<Position>() {
+                                **position = pos;
+                            }
+                            if let Some(mut physics) = e.get_mut::<Physics>() {
+                                physics.vec_delta_codec.set_base(pos);
+                                physics.set_old_pos(Position::new(pos));
+                            }
+                        });
+                    }
                     loaded_by.insert(self.player);
 
                     // per-client id index
