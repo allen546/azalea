@@ -1,23 +1,17 @@
 // How entity updates are processed (to avoid issues with shared worlds)
-// - each bot contains a map of { entity id: updates received }
-// - the shared world also contains a canonical "true" updates received for each
-//   entity
-// - when a client loads an entity, its "updates received" is set to the same as
-//   the global "updates received"
-// - when the shared world sees an entity for the first time, the "updates
-//   received" is set to 1.
-// - clients can force the shared "updates received" to 0 to make it so certain
-//   entities (i.e. other bots in our swarm) don't get confused and updated by
-//   other bots
-// - when a client gets an update to an entity, we check if our "updates
-//   received" is the same as the shared world's "updates received": if it is,
-//   then process the update and increment the client's and shared world's
-//   "updates received" if not, then we simply increment our local "updates
-//   received" and do nothing else
+// - Null fork: one client at a time, recorded in `UpdatedBy`, applies relative
+//   updates for each non-local entity; packets for it from other clients are
+//   ignored.
+// - when the updater stops tracking the entity (it leaves the updater's
+//   `LoadedBy`), the next client that gets an update for it takes over.
+// - the old per-client counters were never synced when a client loaded an
+//   entity, so after the leading client died or moved away, no client could
+//   update the entity and it froze in place.
 
 use std::sync::Arc;
 
 use azalea_core::entity_id::MinecraftEntityId;
+use azalea_entity::LoadedBy;
 use azalea_entity::LocalEntity;
 use azalea_world::PartialWorld;
 use bevy_ecs::prelude::*;
@@ -65,12 +59,22 @@ impl RelativeEntityUpdate {
 #[derive(Component, Debug, Deref, DerefMut)]
 pub struct UpdatesReceived(u32);
 
+/// The client whose packets currently drive this entity's relative updates.
+///
+/// Null fork: replaces the per-client update counters, which froze an entity
+/// for every client once the client that was ahead stopped receiving updates
+/// for it (it died, respawned, disconnected or moved out of range). Another
+/// client takes over as soon as the updater no longer has it in `LoadedBy`.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UpdatedBy(pub Entity);
+
 pub type EntityUpdateQuery<'world, 'state, 'a> = Query<
     'world,
     'state,
     (
         &'a MinecraftEntityId,
-        Option<&'a UpdatesReceived>,
+        Option<&'a UpdatedBy>,
+        Option<&'a LoadedBy>,
         Option<&'a LocalEntity>,
     ),
 >;
@@ -92,7 +96,8 @@ pub fn should_apply_entity_update(
         return true;
     };
 
-    let Ok((minecraft_entity_id, updates_received, local_entity)) = entity_update_query.get(entity)
+    let Ok((_minecraft_entity_id, updated_by, loaded_by, local_entity)) =
+        entity_update_query.get(entity)
     else {
         // this can happen when the entity despawns in the same Update that we got a
         // relative update for it
@@ -105,30 +110,21 @@ pub fn should_apply_entity_update(
         return false;
     }
 
-    let this_client_updates_received = partial_entity_infos
-        .updates_received
-        .get(minecraft_entity_id)
-        .copied();
-
-    let can_update = if let Some(updates_received) = updates_received {
-        this_client_updates_received.unwrap_or(1) == **updates_received
-    } else {
-        // no UpdatesReceived means the entity was just spawned
-        true
-    };
-    if can_update {
-        let new_updates_received = this_client_updates_received.unwrap_or(0) + 1;
-        partial_entity_infos
-            .updates_received
-            .insert(*minecraft_entity_id, new_updates_received);
-
-        commands
-            .entity(entity)
-            .insert(UpdatesReceived(new_updates_received));
-
+    let Some(this_client) = partial_entity_infos.owner_entity else {
+        // a world with no owner (tests): there is only one source of updates
         return true;
+    };
+
+    let can_update = match updated_by {
+        None => true,
+        Some(UpdatedBy(c)) if *c == this_client => true,
+        // the updater no longer tracks this entity, so its packets stopped
+        Some(UpdatedBy(c)) => !loaded_by.is_some_and(|l| l.contains(c)),
+    };
+    if can_update && updated_by != Some(&UpdatedBy(this_client)) {
+        commands.entity(entity).insert(UpdatedBy(this_client));
     }
-    false
+    can_update
 }
 
 impl EntityCommand for RelativeEntityUpdate {
@@ -154,12 +150,12 @@ impl EntityCommand for RelativeEntityUpdate {
     }
 }
 
-/// A system that logs a warning if an entity has both [`UpdatesReceived`]
+/// A system that logs a warning if an entity has both [`UpdatedBy`]
 /// and [`LocalEntity`].
 pub fn debug_detect_updates_received_on_local_entities(
-    query: Query<Entity, (With<LocalEntity>, With<UpdatesReceived>)>,
+    query: Query<Entity, (With<LocalEntity>, With<UpdatedBy>)>,
 ) {
     for entity in &query {
-        warn!("Entity {entity:?} has both LocalEntity and UpdatesReceived");
+        warn!("Entity {entity:?} has both LocalEntity and UpdatedBy");
     }
 }
