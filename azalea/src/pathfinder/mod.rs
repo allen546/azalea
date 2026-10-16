@@ -807,6 +807,7 @@ pub struct StopPathfindingEvent {
 pub fn handle_stop_pathfinding_event(
     mut events: MessageReader<StopPathfindingEvent>,
     mut query: Query<(&mut Pathfinder, &mut ExecutingPath)>,
+    mut idle_query: Query<&mut Pathfinder, Without<ExecutingPath>>,
     mut walk_events: MessageWriter<StartWalkEvent>,
     mut commands: Commands,
 ) {
@@ -815,6 +816,13 @@ pub fn handle_stop_pathfinding_event(
         commands.entity(event.entity).remove::<ComputePath>();
 
         let Ok((mut pathfinder, mut executing_path)) = query.get_mut(event.entity) else {
+            // Null patch: a stop during a search used to drop the search but keep the goal and
+            // is_calculating, so the bot read "calculating" until its next goto.
+            if let Ok(mut p) = idle_query.get_mut(event.entity) {
+                p.goal = None;
+                p.opts = None;
+                p.is_calculating = false;
+            }
             continue;
         };
         pathfinder.goal = None;
