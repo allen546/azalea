@@ -5,11 +5,23 @@
 //! and the direct one (the arrow itself, or the same player for melee). `ClientboundHurtAnimation`
 //! follows with the direction of the hit. We keep both for the local player in
 //! [`RecentAttackers`], stamped with a tick counter of our own.
+//!
+//! A hit that a raised shield blocks sends no damage event: vanilla `LivingEntity#hurtServer`
+//! calls `BlocksAttacks#onBlocked` instead, which plays the item's `block_sound` at the player.
+//! We keep those as [`BlockedHit`]s. Both kinds carry the server ticks of the use at that moment,
+//! so a bot can learn the item's raise-to-block delay (vanilla `getItemBlockingWith`).
 
 use azalea_core::{entity_id::MinecraftEntityId, position::Vec3, tick::GameTick};
-use azalea_protocol::packets::game::{ClientboundDamageEvent, ClientboundHurtAnimation};
+use azalea_entity::{Position, inventory::Inventory};
+use azalea_inventory::components::{BlocksAttacks, EquipmentSlot};
+use azalea_protocol::packets::game::{
+    ClientboundDamageEvent, ClientboundHurtAnimation, ClientboundSound, s_interact::InteractionHand,
+};
+use azalea_registry::Holder;
 use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::*;
+
+use crate::movement::ItemInUse;
 
 /// Hits older than this many ticks are dropped (20 s).
 const KEEP_TICKS: u64 = 400;
@@ -34,6 +46,18 @@ pub struct AttackerHit {
     pub source_type: u32,
     /// Where the damage came from when no entity did (explosions, `damage ... at`).
     pub position: Option<Vec3>,
+    /// [`ItemInUse::server_ticks`](crate::movement::ItemInUse::server_ticks) when the hit came,
+    /// if an item with `blocks_attacks` was in use and the server had confirmed it.
+    pub use_ticks: Option<u32>,
+}
+
+/// A hit our raised shield (or other `blocks_attacks` item) blocked: its block sound at us.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlockedHit {
+    /// [`RecentAttackers::now`] when the sound came.
+    pub tick: u64,
+    /// Server ticks of the use, as in [`AttackerHit::use_ticks`].
+    pub use_ticks: Option<u32>,
 }
 
 impl AttackerHit {
@@ -51,6 +75,8 @@ pub struct RecentAttackers {
     pub hits: Vec<AttackerHit>,
     /// The latest hurt animation: the tick it came and the yaw of the hit relative to us.
     pub last_hurt: Option<(u64, f32)>,
+    /// Hits blocked by the item in use, oldest first.
+    pub blocked: Vec<BlockedHit>,
 }
 
 impl RecentAttackers {
@@ -65,6 +91,7 @@ pub fn age_recent_attackers(mut query: Query<&mut RecentAttackers>) {
         r.now += 1;
         let cutoff = r.now.saturating_sub(KEEP_TICKS);
         r.hits.retain(|h| h.tick >= cutoff);
+        r.blocked.retain(|h| h.tick >= cutoff);
     }
 }
 
@@ -74,6 +101,11 @@ pub(crate) fn handle_damage_event(ecs: &mut World, player: Entity, p: &Clientbou
     if e.get::<MinecraftEntityId>() != Some(&p.entity_id) {
         return;
     }
+    // Only a use that can block: a hit while eating says nothing about a shield.
+    let use_ticks = match (e.get::<ItemInUse>(), e.get::<Inventory>()) {
+        (Some(u), Some(inv)) if blocks_in_use(u, inv).is_some() => u.server_ticks(),
+        _ => None,
+    };
     let Some(mut r) = e.get_mut::<RecentAttackers>() else { return };
     let tick = r.now;
     r.hits.push(AttackerHit {
@@ -82,7 +114,46 @@ pub(crate) fn handle_damage_event(ecs: &mut World, player: Entity, p: &Clientbou
         direct: p.source_direct_id.0.map(|i| MinecraftEntityId(i as i32)),
         source_type: p.source_type_id,
         position: p.source_position,
+        use_ticks,
     });
+}
+
+/// The `blocks_attacks` component of the item in use, if it has one.
+fn blocks_in_use<'a>(using: &ItemInUse, inventory: &'a Inventory) -> Option<std::borrow::Cow<'a, BlocksAttacks>> {
+    let slot = match using.hand {
+        InteractionHand::MainHand => EquipmentSlot::Mainhand,
+        InteractionHand::OffHand => EquipmentSlot::Offhand,
+    };
+    inventory.get_equipment(slot)?.get_component::<BlocksAttacks>()
+}
+
+/// Vanilla `BlocksAttacks#onBlocked` plays the block sound at the blocker's position; the packet
+/// carries it in eighths of a block. Any player blocking nearby makes the same sound, hence the
+/// distance check.
+pub(crate) fn handle_sound(ecs: &mut World, player: Entity, p: &ClientboundSound) {
+    let Ok(mut e) = ecs.get_entity_mut(player) else { return };
+    let (Some(using), Some(inventory), Some(pos)) =
+        (e.get::<ItemInUse>(), e.get::<Inventory>(), e.get::<Position>())
+    else {
+        return;
+    };
+    let Some(sound) = blocks_in_use(using, inventory).and_then(|b| b.block_sound.clone()) else {
+        return;
+    };
+    let same = match (&sound, &p.sound) {
+        (Holder::Reference(a), Holder::Reference(b)) => a == b,
+        (Holder::Direct(a), Holder::Direct(b)) => a.sound_id == b.sound_id,
+        _ => false,
+    };
+    let at = Vec3::new(p.x as f64 / 8.0, p.y as f64 / 8.0, p.z as f64 / 8.0);
+    if !same || at.distance_squared_to(**pos) > 0.5 * 0.5 {
+        return;
+    }
+    let use_ticks = using.server_ticks();
+    if let Some(mut r) = e.get_mut::<RecentAttackers>() {
+        let tick = r.now;
+        r.blocked.push(BlockedHit { tick, use_ticks });
+    }
 }
 
 pub(crate) fn handle_hurt_animation(ecs: &mut World, player: Entity, p: &ClientboundHurtAnimation) {

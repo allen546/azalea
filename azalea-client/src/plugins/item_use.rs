@@ -152,6 +152,7 @@ pub fn handle_use_item_queued(
                 slot: inventory.selected_hotbar_slot,
                 ticks: 0,
                 confirmed: false,
+                confirmed_at: None,
             });
         }
     }
@@ -204,8 +205,9 @@ pub fn tick_item_in_use(
 ) {
     for (entity, mut item, inventory, flag, dead) in &mut query {
         let flagged = flag.is_some_and(|f| f.0);
-        if flagged {
+        if flagged && !item.confirmed {
             item.confirmed = true;
+            item.confirmed_at = Some(item.ticks);
         }
         let ended = dead
             || (item.confirmed && !flagged)

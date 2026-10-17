@@ -1027,7 +1027,9 @@ impl GamePacketHandler<'_> {
         });
     }
 
-    pub fn sound(&mut self, _p: &ClientboundSound) {}
+    pub fn sound(&mut self, p: &ClientboundSound) {
+        crate::attackers::handle_sound(self.ecs, self.player, p);
+    }
 
     pub fn level_event(&mut self, p: &ClientboundLevelEvent) {
         debug!("Got level event packet {p:?}");

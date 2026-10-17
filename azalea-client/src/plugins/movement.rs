@@ -297,6 +297,17 @@ pub struct ItemInUse {
     pub ticks: u32,
     /// The server has flagged the use on our entity; the flag dropping afterwards ends it.
     pub confirmed: bool,
+    /// `ticks` on the tick the server's flag arrived. `ticks - confirmed_at` counts the server's
+    /// ticks of the use (vanilla `getUseDuration - useItemRemaining`) to about one tick, since
+    /// the flag and later packets come down the same lag.
+    pub confirmed_at: Option<u32>,
+}
+
+impl ItemInUse {
+    /// Server ticks of this use so far, once the server has confirmed it.
+    pub fn server_ticks(&self) -> Option<u32> {
+        self.confirmed_at.map(|c| self.ticks.saturating_sub(c))
+    }
 }
 
 /// Makes the bot do one physics tick.
