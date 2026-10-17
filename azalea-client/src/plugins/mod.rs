@@ -1,6 +1,7 @@
 use bevy_app::{PluginGroup, PluginGroupBuilder};
 
 pub mod attack;
+pub mod attackers;
 pub mod block_actions;
 pub mod block_update;
 pub mod brand;
@@ -51,6 +52,7 @@ impl PluginGroup for DefaultPlugins {
             .add(mining::MiningPlugin)
             .add(block_actions::BlockActionsPlugin)
             .add(attack::AttackPlugin)
+            .add(attackers::AttackersPlugin)
             .add(item_use::ItemUsePlugin)
             .add(chunks::ChunksPlugin)
             .add(block_update::BlockUpdatePlugin)

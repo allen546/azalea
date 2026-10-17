@@ -23,7 +23,7 @@ use tokio::{sync::oneshot, time};
 use tracing::{info, warn};
 
 use crate::{
-    attack, block_actions,
+    attack, attackers, block_actions,
     block_update::QueuedServerBlockUpdates,
     chunks::ChunkBatchInfo,
     connection::RawConnection,
@@ -74,6 +74,7 @@ pub struct JoinedClientBundle {
 
     pub mining: mining::MineBundle,
     pub attack: attack::AttackBundle,
+    pub recent_attackers: attackers::RecentAttackers,
 
     pub in_game_state: InGameState,
 }

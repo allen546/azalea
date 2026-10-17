@@ -1593,8 +1593,12 @@ impl GamePacketHandler<'_> {
     pub fn tag_query(&mut self, _p: &ClientboundTagQuery) {}
     pub fn take_item_entity(&mut self, _p: &ClientboundTakeItemEntity) {}
     pub fn bundle_delimiter(&mut self, _p: &ClientboundBundleDelimiter) {}
-    pub fn damage_event(&mut self, _p: &ClientboundDamageEvent) {}
-    pub fn hurt_animation(&mut self, _p: &ClientboundHurtAnimation) {}
+    pub fn damage_event(&mut self, p: &ClientboundDamageEvent) {
+        crate::attackers::handle_damage_event(self.ecs, self.player, p);
+    }
+    pub fn hurt_animation(&mut self, p: &ClientboundHurtAnimation) {
+        crate::attackers::handle_hurt_animation(self.ecs, self.player, p);
+    }
     pub fn ticking_state(&mut self, _p: &ClientboundTickingState) {}
     pub fn ticking_step(&mut self, _p: &ClientboundTickingStep) {}
     pub fn reset_score(&mut self, _p: &ClientboundResetScore) {}
