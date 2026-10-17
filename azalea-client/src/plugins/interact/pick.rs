@@ -15,6 +15,7 @@ use azalea_entity::{
 };
 use azalea_physics::{
     clip::{BlockShapeType, ClipContext, FluidPickType},
+    collision::VoxelShape,
     collision::entity_collisions::{AabbQuery, get_entities},
 };
 use azalea_world::{World, WorldName, Worlds};
@@ -231,7 +232,7 @@ pub fn pick_block(
     let view_vector = view_vector(look_direction);
     let end_position = eye_position + (view_vector * pick_range);
 
-    azalea_physics::clip::clip(
+    let hit = azalea_physics::clip::clip(
         chunks,
         ClipContext {
             from: eye_position,
@@ -239,7 +240,52 @@ pub fn pick_block(
             block_shape_type: BlockShapeType::Outline,
             fluid_pick_type: FluidPickType::None,
         },
-    )
+    );
+    with_interaction_override(chunks, eye_position, end_position, hit)
+}
+
+/// Vanilla `getInteractionShape`: for a cauldron, hopper, composter or scaffolding, an interaction
+/// shape that the ray enters before the outline's hit point changes the face of the hit (not its
+/// location). azalea-physics' `clip` leaves this as a TODO, so it is applied here to the block
+/// the ray hit, which is the only one vanilla applies it to.
+fn with_interaction_override(
+    chunks: &azalea_world::ChunkStorage,
+    from: Vec3,
+    to: Vec3,
+    hit: BlockHitResult,
+) -> BlockHitResult {
+    use azalea_physics::collision::box_shape;
+    use azalea_registry::builtin::BlockKind;
+    use std::sync::LazyLock;
+    static CAULDRON: LazyLock<VoxelShape> =
+        LazyLock::new(|| box_shape(0.125, 0.25, 0.125, 0.875, 1.0, 0.875));
+    static HOPPER: LazyLock<VoxelShape> =
+        LazyLock::new(|| box_shape(0.125, 0.6875, 0.125, 0.875, 1.0, 0.875));
+    static COMPOSTER: LazyLock<VoxelShape> =
+        LazyLock::new(|| box_shape(0.125, 0.125, 0.125, 0.875, 1.0, 0.875));
+    static FULL: LazyLock<VoxelShape> = LazyLock::new(|| box_shape(0., 0., 0., 1., 1., 1.));
+    if hit.miss {
+        return hit;
+    }
+    let Some(state) = chunks.get_block_state(hit.block_pos) else { return hit };
+    let shape: &VoxelShape = match BlockKind::from(state) {
+        BlockKind::Cauldron
+        | BlockKind::WaterCauldron
+        | BlockKind::LavaCauldron
+        | BlockKind::PowderSnowCauldron => &CAULDRON,
+        BlockKind::Hopper => &HOPPER,
+        BlockKind::Composter => &COMPOSTER,
+        BlockKind::Scaffolding => &FULL,
+        _ => return hit,
+    };
+    match shape.clip(from, to, hit.block_pos) {
+        Some(inner)
+            if inner.location.distance_squared_to(from) < hit.location.distance_squared_to(from) =>
+        {
+            hit.with_direction(inner.direction)
+        }
+        _ => hit,
+    }
 }
 
 struct PickEntityOpts<'world, 'state, 'a, 'b> {
