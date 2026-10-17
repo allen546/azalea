@@ -81,6 +81,11 @@ impl Plugin for InteractPlugin {
 pub struct BlockStatePredictionHandler {
     /// The total number of changes that this client has made to blocks.
     seq: u32,
+    /// The highest sequence number the server has acknowledged with
+    /// [`ClientboundBlockChangedAck`].
+    ///
+    /// [`ClientboundBlockChangedAck`]: azalea_protocol::packets::game::ClientboundBlockChangedAck
+    acked_seq: u32,
     server_state: HashMap<BlockPos, ServerVerifiedState>,
 }
 #[derive(Clone, Debug)]
@@ -94,6 +99,16 @@ struct ServerVerifiedState {
 }
 
 impl BlockStatePredictionHandler {
+    /// The sequence number of the latest change this client sent.
+    pub fn seq(&self) -> u32 {
+        self.seq
+    }
+
+    /// The highest sequence number the server has acknowledged so far.
+    pub fn acked_seq(&self) -> u32 {
+        self.acked_seq
+    }
+
     /// Get the next sequence number that we're going to use and increment the
     /// value.
     pub fn start_predicting(&mut self) -> u32 {
@@ -141,6 +156,7 @@ impl BlockStatePredictionHandler {
     }
 
     pub fn end_prediction_up_to(&mut self, seq: u32, world: &World) {
+        self.acked_seq = self.acked_seq.max(seq);
         let mut to_remove = Vec::new();
         for (pos, state) in &self.server_state {
             if state.seq > seq {

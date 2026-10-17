@@ -23,7 +23,7 @@ use tokio::{sync::oneshot, time};
 use tracing::{info, warn};
 
 use crate::{
-    attack,
+    attack, block_actions,
     block_update::QueuedServerBlockUpdates,
     chunks::ChunkBatchInfo,
     connection::RawConnection,
@@ -60,6 +60,7 @@ pub struct JoinedClientBundle {
     pub inventory: Inventory,
     pub tab_list: TabList,
     pub block_state_prediction_handler: BlockStatePredictionHandler,
+    pub block_action_results: block_actions::BlockActionResults,
     pub queued_server_block_updates: QueuedServerBlockUpdates,
     pub last_sent_direction: LastSentLookDirection,
     pub abilities: PlayerAbilities,

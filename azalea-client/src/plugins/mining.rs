@@ -337,6 +337,7 @@ pub fn handle_mining_queued(
             }
 
             let held_item = inventory.held_item();
+            let start_seq = sequence_number.start_predicting();
 
             if block_is_solid
                 && get_mine_progress(
@@ -352,6 +353,12 @@ pub fn handle_mining_queued(
                 commands.trigger(FinishMiningBlockEvent {
                     entity,
                     position: mining_queued.position,
+                });
+                // the server breaks it on the start packet, so its ack settles the break
+                commands.trigger(BlockBreakSent {
+                    entity,
+                    position: mining_queued.position,
+                    seq: start_seq,
                 });
             } else {
                 let mining = Mining {
@@ -378,7 +385,7 @@ pub fn handle_mining_queued(
                     action: s_player_action::Action::StartDestroyBlock,
                     pos: mining_queued.position,
                     direction: mining_queued.direction,
-                    seq: sequence_number.start_predicting(),
+                    seq: start_seq,
                 },
             ));
             commands.trigger(SwingArmEvent { entity });
@@ -460,6 +467,17 @@ pub struct MineBlockPos(pub Option<BlockPos>);
 /// [`ItemStack::Empty`] if nothing is being mined.
 #[derive(Clone, Component, Debug, Default, Deref, DerefMut)]
 pub struct MineItem(pub ItemStack);
+
+/// A trigger that's sent when we sent the packet that makes the server break the block we were
+/// mining. The server's [`ClientboundBlockChangedAck`] for `seq` settles the break.
+///
+/// [`ClientboundBlockChangedAck`]: azalea_protocol::packets::game::ClientboundBlockChangedAck
+#[derive(EntityEvent)]
+pub struct BlockBreakSent {
+    pub entity: Entity,
+    pub position: BlockPos,
+    pub seq: u32,
+}
 
 /// A trigger that's sent when we completed mining a block.
 #[derive(EntityEvent)]
@@ -677,15 +695,21 @@ pub fn continue_mining_block(
                     entity,
                     position: mining.pos,
                 });
+                let stop_seq = prediction_handler.start_predicting();
                 commands.trigger(SendGamePacketEvent::new(
                     entity,
                     ServerboundPlayerAction {
                         action: s_player_action::Action::StopDestroyBlock,
                         pos: mining.pos,
                         direction: mining.dir,
-                        seq: prediction_handler.start_predicting(),
+                        seq: stop_seq,
                     },
                 ));
+                commands.trigger(BlockBreakSent {
+                    entity,
+                    position: mining.pos,
+                    seq: stop_seq,
+                });
                 **mine_progress = 0.;
                 **mine_ticks = 0.;
                 **mine_delay = 5;
