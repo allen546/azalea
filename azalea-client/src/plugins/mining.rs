@@ -350,6 +350,7 @@ pub fn handle_mining_queued(
                 ) >= 1.
             {
                 // block was broken instantly (instamined)
+                commands.entity(entity).remove::<SkipStartTickProgress>();
                 commands.trigger(FinishMiningBlockEvent {
                     entity,
                     position: mining_queued.position,
@@ -586,6 +587,12 @@ pub fn handle_stop_mining_block_event(
     }
 }
 
+/// Null fork: no progress in the tick mining starts, as in vanilla's held-button mining, where the
+/// start comes from `continueDestroyBlock` and adds nothing that tick. Without it a break is one
+/// tick shorter than Grim's FastBreak predicts.
+#[derive(Component, Debug)]
+pub struct SkipStartTickProgress;
+
 pub fn decrement_mine_delay(mut query: Query<&mut MineDelay>) {
     for mut mine_delay in &mut query {
         if **mine_delay > 0 {
@@ -611,7 +618,7 @@ pub fn continue_mining_block(
         &mut MineDelay,
         &mut MineProgress,
         &mut MineTicks,
-        &mut BlockStatePredictionHandler,
+        (&mut BlockStatePredictionHandler, Has<SkipStartTickProgress>),
     )>,
     mut commands: Commands,
     mut mine_block_progress_events: MessageWriter<MineBlockProgressEvent>,
@@ -632,9 +639,13 @@ pub fn continue_mining_block(
         mut mine_delay,
         mut mine_progress,
         mut mine_ticks,
-        mut prediction_handler,
+        (mut prediction_handler, skip_start_tick),
     ) in query.iter_mut()
     {
+        if skip_start_tick {
+            commands.entity(entity).remove::<SkipStartTickProgress>();
+            continue;
+        }
         if game_mode.current == GameMode::Creative {
             // TODO: worldborder check
             **mine_delay = 5;

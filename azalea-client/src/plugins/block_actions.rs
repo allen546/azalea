@@ -47,7 +47,10 @@ use crate::{
     },
     inventory::ensure_has_sent_carried_item,
     local_player::{LocalGameMode, WorldHolder},
-    mining::{BlockBreakSent, MineProgress, Mining, MiningQueued, MiningSystems},
+    mining::{
+        BlockBreakSent, MineDelay, MineProgress, Mining, MiningQueued, MiningSystems,
+        SkipStartTickProgress,
+    },
     packet::game::SendGamePacketEvent,
 };
 
@@ -180,9 +183,19 @@ pub struct BreakBlockQueued {
 /// that block (as `handle_start_mining_block_event` does); [`begin_break_result`] then checks it.
 pub fn handle_break_block_queued(
     mut commands: Commands,
-    query: Query<(Entity, &BreakBlockQueued, &HitResultComponent)>,
+    query: Query<(Entity, &BreakBlockQueued, &HitResultComponent, &MineDelay, Option<&Mining>)>,
 ) {
-    for (entity, queued, hit_result) in &query {
+    for (entity, queued, hit_result, delay, mining) in &query {
+        // Already breaking it: a repeated command must not restart it (nor skip another tick).
+        if mining.is_some_and(|m| m.pos == queued.position) {
+            commands.entity(entity).remove::<BreakBlockQueued>();
+            continue;
+        }
+        // Vanilla's held-button mining waits out `destroyDelay` (5 ticks) after a finished break,
+        // so the next start comes 6 ticks (300 ms) later; Grim's FastBreak expects that gap.
+        if **delay > 0 {
+            continue;
+        }
         let direction = hit_result
             .as_block_hit_result_if_not_miss()
             .filter(|h| h.block_pos == queued.position)
@@ -190,7 +203,11 @@ pub fn handle_break_block_queued(
         commands
             .entity(entity)
             .remove::<BreakBlockQueued>()
-            .insert((MiningQueued { position: queued.position, direction, force: true }, CheckBreakClick));
+            .insert((
+                MiningQueued { position: queued.position, direction, force: true },
+                CheckBreakClick,
+                SkipStartTickProgress,
+            ));
     }
 }
 
