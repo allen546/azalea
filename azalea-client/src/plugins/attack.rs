@@ -55,6 +55,8 @@ pub fn handle_attack_queued(
     mut query: Query<(
         Entity,
         &mut TicksSinceLastAttack,
+        &mut AttackStrengthScale,
+        &Attributes,
         &mut Physics,
         &mut Sprinting,
         &AttackQueued,
@@ -66,6 +68,8 @@ pub fn handle_attack_queued(
     for (
         client_entity,
         mut ticks_since_last_attack,
+        mut attack_strength_scale,
+        attributes,
         mut physics,
         mut sprinting,
         attack_queued,
@@ -103,7 +107,11 @@ pub fn handle_attack_queued(
             continue;
         };
 
-        ticks_since_last_attack.0 = 0;
+        // Vanilla resets the counter in `handleKeybinds`, before the player's tick adds one, so
+        // the server counts 1 on the next tick. Ours ticks first and resets after, so start at 1
+        // and refresh the scale that this tick's `update_attack_strength_scale` already set.
+        ticks_since_last_attack.0 = 1;
+        **attack_strength_scale = get_attack_strength_scale(1, attributes, 0.5);
 
         physics.velocity = physics.velocity.multiply(0.6, 1.0, 0.6);
         **sprinting = false;
