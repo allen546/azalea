@@ -248,21 +248,36 @@ pub fn pick_block(
 /// shape that the ray enters before the outline's hit point changes the face of the hit (not its
 /// location). azalea-physics' `clip` leaves this as a TODO, so it is applied here to the block
 /// the ray hit, which is the only one vanilla applies it to.
+///
+/// Shapes from vanilla 1.21.11, Mojang names: `AbstractCauldronBlock#getInteractionShape`,
+/// `HopperBlock#getInteractionShape` (per `FACING`), `ComposterBlock#getInteractionShape`,
+/// `ScaffoldingBlock#getInteractionShape`; logic from `BlockGetter#clipWithInteractionOverride`.
 fn with_interaction_override(
     chunks: &azalea_world::ChunkStorage,
     from: Vec3,
     to: Vec3,
     hit: BlockHitResult,
 ) -> BlockHitResult {
-    use azalea_physics::collision::box_shape;
+    use azalea_block::properties::Facing;
+    use azalea_physics::collision::{Shapes, box_shape};
     use azalea_registry::builtin::BlockKind;
     use std::sync::LazyLock;
     static CAULDRON: LazyLock<VoxelShape> =
         LazyLock::new(|| box_shape(0.125, 0.25, 0.125, 0.875, 1.0, 0.875));
-    static HOPPER: LazyLock<VoxelShape> =
+    // The hopper's bowl; a sideways hopper adds its spout on the facing side.
+    static HOPPER_DOWN: LazyLock<VoxelShape> =
         LazyLock::new(|| box_shape(0.125, 0.6875, 0.125, 0.875, 1.0, 0.875));
-    static COMPOSTER: LazyLock<VoxelShape> =
-        LazyLock::new(|| box_shape(0.125, 0.125, 0.125, 0.875, 1.0, 0.875));
+    static HOPPER_SIDE: LazyLock<[VoxelShape; 4]> = LazyLock::new(|| {
+        let spout = |x0, z0, x1, z1| {
+            Shapes::or(HOPPER_DOWN.clone(), box_shape(x0, 0.5, z0, x1, 0.625, z1))
+        };
+        [
+            spout(0.375, 0.0, 0.625, 0.25),
+            spout(0.75, 0.375, 1.0, 0.625),
+            spout(0.375, 0.75, 0.625, 1.0),
+            spout(0.0, 0.375, 0.25, 0.625),
+        ]
+    });
     static FULL: LazyLock<VoxelShape> = LazyLock::new(|| box_shape(0., 0., 0., 1., 1., 1.));
     if hit.miss {
         return hit;
@@ -273,9 +288,14 @@ fn with_interaction_override(
         | BlockKind::WaterCauldron
         | BlockKind::LavaCauldron
         | BlockKind::PowderSnowCauldron => &CAULDRON,
-        BlockKind::Hopper => &HOPPER,
-        BlockKind::Composter => &COMPOSTER,
-        BlockKind::Scaffolding => &FULL,
+        BlockKind::Hopper => match state.property::<Facing>() {
+            Some(Facing::North) => &HOPPER_SIDE[0],
+            Some(Facing::East) => &HOPPER_SIDE[1],
+            Some(Facing::South) => &HOPPER_SIDE[2],
+            Some(Facing::West) => &HOPPER_SIDE[3],
+            _ => &HOPPER_DOWN,
+        },
+        BlockKind::Composter | BlockKind::Scaffolding => &FULL,
         _ => return hit,
     };
     match shape.clip(from, to, hit.block_pos) {
