@@ -13,6 +13,7 @@ pub mod connection;
 pub mod cookies;
 pub mod disconnect;
 pub mod interact;
+pub mod item_use;
 pub mod inventory;
 pub mod join;
 pub mod loading;
@@ -50,6 +51,7 @@ impl PluginGroup for DefaultPlugins {
             .add(mining::MiningPlugin)
             .add(block_actions::BlockActionsPlugin)
             .add(attack::AttackPlugin)
+            .add(item_use::ItemUsePlugin)
             .add(chunks::ChunksPlugin)
             .add(block_update::BlockUpdatePlugin)
             .add(tick_end::TickEndPlugin)

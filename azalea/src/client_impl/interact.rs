@@ -1,4 +1,7 @@
-use azalea_client::interact::{EntityInteractEvent, StartUseItemEvent, pick::HitResultComponent};
+use azalea_client::{
+    interact::{EntityInteractEvent, StartUseItemEvent, pick::HitResultComponent},
+    item_use::{ReleaseUseItemQueued, UseItemQueued},
+};
 use azalea_core::{hit_result::HitResult, position::BlockPos};
 use azalea_protocol::packets::game::s_interact::InteractionHand;
 use bevy_ecs::entity::Entity;
@@ -54,5 +57,17 @@ impl Client {
             hand: InteractionHand::MainHand,
             force_block: None,
         });
+    }
+
+    /// Start using the item in `hand` (eat, raise a shield) even with a block under the
+    /// crosshair, which [`Client::start_use_item`] would click instead. Hold it until the server
+    /// finishes it (food: 32 ticks) or call [`Client::release_use_item`].
+    pub fn hold_use_item(&self, hand: InteractionHand) {
+        self.ecs.write().entity_mut(self.entity).insert(UseItemQueued { hand });
+    }
+
+    /// Let go of the item in use. Does nothing if none is.
+    pub fn release_use_item(&self) {
+        self.ecs.write().entity_mut(self.entity).insert(ReleaseUseItemQueued);
     }
 }

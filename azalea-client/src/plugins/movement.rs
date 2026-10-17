@@ -286,10 +286,18 @@ pub(crate) fn tick_controls(mut query: Query<&mut ClientMovementState>) {
 }
 
 /// Marks a local player as using an item (shield up, eating, drawing a bow), which slows its
-/// input to 20% like vanilla's `LocalPlayer.modifyInput`. Null fork: inserted and removed by the
-/// code that sends the use and release packets.
-#[derive(Component, Clone, Copy, Debug, Default)]
-pub struct ItemInUse;
+/// input to 20% like vanilla's `LocalPlayer.modifyInput`. Null fork: managed by
+/// [`item_use`](super::item_use), which also tracks the hand and the ticks.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct ItemInUse {
+    pub hand: azalea_protocol::packets::game::s_interact::InteractionHand,
+    /// The hotbar slot held when the use began; a main-hand use ends if it changes.
+    pub slot: u8,
+    /// Ticks since the use packet was sent (1 on the tick after it).
+    pub ticks: u32,
+    /// The server has flagged the use on our entity; the flag dropping afterwards ends it.
+    pub confirmed: bool,
+}
 
 /// Makes the bot do one physics tick.
 ///
