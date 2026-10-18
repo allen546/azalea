@@ -314,6 +314,10 @@ pub fn handle_client_side_close_container_trigger(
         let new_inventory = inventory_menu.slots()[inventory_menu.player_slots_range()].to_vec();
         let new_inventory = <[ItemStack; 36]>::try_from(new_inventory).unwrap();
         *inventory.inventory_menu.as_player_mut().inventory = new_inventory;
+        // Null fork: the cursor stack belongs to a menu in vanilla; the player menu's own is
+        // empty. The server puts a stack that was on the container's cursor back in the
+        // inventory (`AbstractContainerMenu#removed`) and sends no cursor update for menu 0.
+        inventory.carried = ItemStack::Empty;
     }
 
     inventory.id = 0;

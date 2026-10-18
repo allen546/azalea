@@ -1,6 +1,7 @@
 use std::ops::RangeInclusive;
 
 use azalea_buf::AzBuf;
+use azalea_registry::builtin::ItemKind;
 
 use crate::{
     AnvilMenuLocation, BeaconMenuLocation, BlastFurnaceMenuLocation, BrewingStandMenuLocation,
@@ -300,7 +301,13 @@ impl Menu {
                 };
                 let empty = |m: &Self, i: usize| m.slot(i).is_some_and(|s| s.is_empty());
                 match slot_index {
-                    0 => self.move_item_stack_to(slot_index, 9..=44, true),
+                    0 => {
+                        // vanilla `InventoryMenu#quickMoveStack`: a taken result uses up the grid
+                        if self.move_item_stack_to(slot_index, 9..=44, true) {
+                            self.craft_took_result();
+                        }
+                        true
+                    }
                     1..=8 => self.move_item_stack_to(slot_index, 9..=44, false),
                     _ if armor_slot.is_some_and(|j| empty(self, j)) => {
                         let j = armor_slot.unwrap();
@@ -431,15 +438,29 @@ impl Menu {
                     self.try_move_item_to_slots(slot_index, self.player_slots_range());
                 }
             },
+            // Null fork: vanilla `CraftingMenu#quickMoveStack`. The result goes to the inventory
+            // (last slot first) and uses up the grid; inventory stacks go to the grid first, then
+            // across hotbar and main; grid stacks go to the inventory.
             MenuLocation::Crafting(l) => match l {
                 CraftingMenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::CRAFTING_GRID_SLOTS,
-                    );
+                    if !self.move_item_stack_to(slot_index, Menu::CRAFTING_GRID_SLOTS, false) {
+                        let other = if self.is_hotbar_slot(slot_index) {
+                            self.player_slots_without_hotbar_range()
+                        } else {
+                            self.hotbar_slots_range()
+                        };
+                        self.move_item_stack_to(slot_index, other, false);
+                    }
+                }
+                _ if slot_index == 0 => {
+                    let player = self.player_slots_range();
+                    if self.move_item_stack_to(slot_index, player, true) {
+                        self.craft_took_result();
+                    }
                 }
                 _ => {
-                    self.try_move_item_to_slots(slot_index, self.player_slots_range());
+                    let player = self.player_slots_range();
+                    self.move_item_stack_to(slot_index, player, false);
                 }
             },
             MenuLocation::Enchantment(l) => match l {
@@ -573,6 +594,94 @@ impl Menu {
         }
 
         ItemStack::Empty
+    }
+
+
+    /// Whether `slot` is this menu's crafting result (vanilla `ResultSlot`).
+    pub fn is_crafting_result(&self, slot: usize) -> bool {
+        slot == 0 && matches!(self, Menu::Player(_) | Menu::Crafting { .. })
+    }
+
+    /// First grid slot and side length of this menu's crafting grid.
+    fn crafting_grid(&self) -> Option<(usize, usize)> {
+        match self {
+            Menu::Player(_) => Some((1, 2)),
+            Menu::Crafting { .. } => Some((1, 3)),
+            _ => None,
+        }
+    }
+
+    // Spec: specs/B3-inventory-crafting.md §4.2 (crafting by clicks)
+    /// The client's half of taking the crafting result, vanilla `ResultSlot#onTake`: one item of
+    /// each used grid cell goes, and its remainder (an empty bucket) takes its place. The client
+    /// has no recipes, so it uses the item defaults (`CraftingRecipe#defaultCraftingReminder`);
+    /// it never computes the next result, the server sends that.
+    pub fn craft_took_result(&mut self) {
+        let Some((first, width)) = self.crafting_grid() else { return };
+        let present = |m: &Self, r: usize, c: usize| m.slot(first + r * width + c).is_some_and(|s| s.is_present());
+        let rows: Vec<usize> = (0..width).filter(|&r| (0..width).any(|c| present(self, r, c))).collect();
+        let cols: Vec<usize> = (0..width).filter(|&c| (0..width).any(|r| present(self, r, c))).collect();
+        let (Some(&top), Some(&bottom), Some(&left), Some(&right)) =
+            (rows.first(), rows.last(), cols.first(), cols.last())
+        else {
+            return;
+        };
+        // vanilla reads the remainders from the whole box first, then edits cell by cell
+        let mut remainders = Vec::new();
+        for r in top..=bottom {
+            for c in left..=right {
+                remainders.push(crafting_remainder(self.slot(first + r * width + c).map_or(ItemKind::Air, |s| s.kind())));
+            }
+        }
+        let mut k = 0;
+        for r in top..=bottom {
+            for c in left..=right {
+                let i = first + r * width + c;
+                let remainder = remainders[k].take();
+                k += 1;
+                if let Some(cell) = self.slot_mut(i) {
+                    cell.split(1);
+                }
+                let Some(mut rem) = remainder else { continue };
+                match self.slot(i).cloned() {
+                    Some(ItemStack::Present(cell)) => {
+                        if cell.is_same_item_and_components(&rem) {
+                            rem.count += cell.count;
+                            *self.slot_mut(i).unwrap() = ItemStack::Present(rem);
+                        } else {
+                            // vanilla `Inventory#add` (or a drop); approximated hotbar first
+                            self.add_to_player_slots(rem);
+                        }
+                    }
+                    _ => *self.slot_mut(i).unwrap() = ItemStack::Present(rem),
+                }
+            }
+        }
+    }
+
+    /// Merge into the player's stacks, then the first empty slot (hotbar first, as `Inventory`
+    /// orders them). A full inventory drops the item on a real client; nothing to simulate.
+    fn add_to_player_slots(&mut self, mut item: ItemStackData) {
+        let all = self.player_slots_range();
+        let hot = self.hotbar_slots_range();
+        let order: Vec<usize> = hot.clone().chain(all.filter(|i| !hot.contains(i))).collect();
+        for &i in &order {
+            if let Some(ItemStack::Present(t)) = self.slot(i) {
+                let max = self.max_stack_size_for(i, t);
+                if t.is_same_item_and_components(&item) && t.count < max {
+                    let ItemStack::Present(t) = self.slot_mut(i).unwrap() else { unreachable!() };
+                    let n = (max - t.count).min(item.count);
+                    t.count += n;
+                    item.count -= n;
+                    if item.count == 0 {
+                        return;
+                    }
+                }
+            }
+        }
+        if let Some(&i) = order.iter().find(|&&i| self.slot(i).is_some_and(|s| s.is_empty())) {
+            *self.slot_mut(i).unwrap() = ItemStack::Present(item);
+        }
     }
 
     fn try_move_item_to_slots_or_toggle_hotbar(
@@ -784,4 +893,14 @@ impl Menu {
             *target_slot = new_target_slot_data.into();
         }
     }
+}
+
+/// Vanilla `Item#getCraftingRemainder`: the few items that leave something behind.
+fn crafting_remainder(kind: ItemKind) -> Option<ItemStackData> {
+    let left = match kind {
+        ItemKind::WaterBucket | ItemKind::LavaBucket | ItemKind::MilkBucket => ItemKind::Bucket,
+        ItemKind::DragonBreath | ItemKind::HoneyBottle => ItemKind::GlassBottle,
+        _ => return None,
+    };
+    Some(ItemStackData::new(left, 1))
 }

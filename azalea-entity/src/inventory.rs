@@ -326,7 +326,7 @@ impl Inventory {
                                 )
                             {
                                 self.carried.as_present_mut().unwrap().count += removed.count();
-                                // slot.onTake(player, removed);
+                                self.took_from(slot);
                             }
                         } else {
                             let pickup_count = if is_left_click {
@@ -338,7 +338,7 @@ impl Inventory {
                                 self.try_remove(slot, pickup_count, i32::MAX)
                             {
                                 self.carried = new_slot_item;
-                                // slot.onTake(player, newSlot);
+                                self.took_from(slot);
                             }
                         }
                     }
@@ -377,6 +377,7 @@ impl Inventory {
                         if self.menu().may_pickup(source_index) {
                             *self.player_slot_mut(button).unwrap() = source;
                             *self.menu_mut().slot_mut(source_index).unwrap() = ItemStack::Empty;
+                            self.took_from(source_index);
                         }
                     }
                     (ItemStack::Empty, ItemStack::Present(t)) => {
@@ -428,18 +429,23 @@ impl Inventory {
                 | ThrowClick::All { slot: slot_index }) = c;
                 let slot_index = *slot_index as usize;
 
+                let is_result = self.menu().is_crafting_result(slot_index);
                 let Some(slot) = self.menu_mut().slot_mut(slot_index) else {
                     return;
                 };
+                // a crafting result always leaves whole (`ResultContainer#removeItem`)
                 let dropping_count = match c {
-                    ThrowClick::Single { .. } => 1,
-                    ThrowClick::All { .. } => slot.count(),
+                    ThrowClick::Single { .. } if !is_result => 1,
+                    _ => slot.count(),
                 };
 
                 // Null fork: `ItemStack::split` empties the slot when the last item goes, so the
                 // click reports an empty slot, not a 0-count one.
-                let _dropping = slot.split(dropping_count as u32);
+                let dropping = slot.split(dropping_count as u32);
                 // player.drop(dropping, true);
+                if is_result && dropping.is_present() {
+                    self.took_from(slot_index);
+                }
             }
             // Null fork: vanilla `doClick` PICKUP_ALL. Takes only what fits on the cursor, and
             // never from a crafting result.
@@ -552,6 +558,13 @@ impl Inventory {
         false
     }
 
+    // Null fork: vanilla `Slot#onTake`; only a crafting result does anything on the client.
+    fn took_from(&mut self, slot: usize) {
+        if self.menu().is_crafting_result(slot) {
+            self.menu_mut().craft_took_result();
+        }
+    }
+
     // Null fork: vanilla `Slot#safeInsert` checks `mayPlace` and the slot's own limit.
     fn safe_insert(&mut self, slot: usize, src_item: ItemStack, take_count: i32) -> ItemStack {
         let ItemStack::Present(mut src_item) = src_item else {
@@ -592,7 +605,8 @@ impl Inventory {
             return None;
         }
 
-        let count = count.min(limit);
+        // vanilla `ResultContainer#removeItem` hands over the whole result whatever the count
+        let count = if self.menu().is_crafting_result(slot) { slot_item.count() } else { count.min(limit) };
         if count <= 0 {
             return None;
         }
@@ -737,7 +751,7 @@ mod tests {
         let new_slots = inventory.menu().slots();
         assert_eq!(&new_slots[0], &ItemStack::Empty);
         assert_eq!(
-            &new_slots[*Menu::CRAFTING_PLAYER_SLOTS.start()],
+            &new_slots[*Menu::CRAFTING_PLAYER_SLOTS.end()], // vanilla fills from the end
             &spruce_planks
         );
     }
@@ -823,5 +837,91 @@ mod tests {
         click(&mut inv, PickupClick::Left { slot: Some(0) });
         assert_eq!(inv.carried, ItemStack::new(ItemKind::Stone, 3));
         assert_eq!(inv.inventory_menu.slot(0), Some(&ItemStack::Empty));
+    }
+
+    // Null fork: vanilla `ResultSlot#onTake` on a client (item defaults, no recipes).
+    fn table(result: (ItemKind, i32), grid: &[(usize, ItemKind, i32)]) -> Inventory {
+        let mut inv = Inventory::default();
+        let mut menu = Menu::from_kind(azalea_registry::builtin::MenuKind::Crafting);
+        *menu.slot_mut(0).unwrap() = ItemStack::new(result.0, result.1);
+        for &(i, kind, n) in grid {
+            *menu.slot_mut(i).unwrap() = ItemStack::new(kind, n);
+        }
+        inv.container_menu = Some(menu);
+        inv.id = 1;
+        inv
+    }
+
+    #[test]
+    fn taking_the_result_uses_one_of_each_ingredient() {
+        let mut inv = table((ItemKind::OakPlanks, 4), &[(1, ItemKind::OakLog, 3)]);
+        click(&mut inv, PickupClick::Left { slot: Some(0) });
+        assert_eq!(inv.carried, ItemStack::new(ItemKind::OakPlanks, 4));
+        assert_eq!(inv.menu().slot(0), Some(&ItemStack::Empty));
+        assert_eq!(inv.menu().slot(1), Some(&ItemStack::new(ItemKind::OakLog, 2)));
+    }
+
+    #[test]
+    fn a_right_click_takes_the_whole_result() {
+        let mut inv = table((ItemKind::Stick, 4), &[(5, ItemKind::OakPlanks, 2), (8, ItemKind::OakPlanks, 2)]);
+        click(&mut inv, PickupClick::Right { slot: Some(0) });
+        assert_eq!(inv.carried, ItemStack::new(ItemKind::Stick, 4));
+        assert_eq!(inv.menu().slot(5), Some(&ItemStack::new(ItemKind::OakPlanks, 1)));
+        assert_eq!(inv.menu().slot(8), Some(&ItemStack::new(ItemKind::OakPlanks, 1)));
+    }
+
+    #[test]
+    fn buckets_stay_behind_in_their_cells() {
+        let grid = [
+            (1, ItemKind::MilkBucket, 1), (2, ItemKind::MilkBucket, 1), (3, ItemKind::MilkBucket, 1),
+            (4, ItemKind::Sugar, 1), (5, ItemKind::Egg, 1), (6, ItemKind::Sugar, 1),
+            (7, ItemKind::Wheat, 1), (8, ItemKind::Wheat, 1), (9, ItemKind::Wheat, 1),
+        ];
+        let mut inv = table((ItemKind::Cake, 1), &grid);
+        click(&mut inv, PickupClick::Left { slot: Some(0) });
+        for i in 1..=3 {
+            assert_eq!(inv.menu().slot(i), Some(&ItemStack::new(ItemKind::Bucket, 1)));
+        }
+        for i in 4..=9 {
+            assert_eq!(inv.menu().slot(i), Some(&ItemStack::Empty));
+        }
+    }
+
+    #[test]
+    fn shift_click_on_the_result_crafts_once_on_the_client() {
+        let mut inv = table((ItemKind::OakPlanks, 4), &[(1, ItemKind::OakLog, 3)]);
+        click(&mut inv, QuickMoveClick::Left { slot: 0 });
+        assert_eq!(inv.menu().slot(0), Some(&ItemStack::Empty));
+        assert_eq!(inv.menu().slot(1), Some(&ItemStack::new(ItemKind::OakLog, 2)));
+        // the result goes to the last free slot of the inventory (hotbar end)
+        assert_eq!(inv.menu().slot(45), Some(&ItemStack::new(ItemKind::OakPlanks, 4)));
+    }
+
+    #[test]
+    fn shift_click_on_a_table_stack_goes_to_the_grid_first() {
+        let mut inv = table((ItemKind::Air, 0), &[]);
+        *inv.menu_mut().slot_mut(10).unwrap() = ItemStack::new(ItemKind::OakLog, 5);
+        click(&mut inv, QuickMoveClick::Left { slot: 10 });
+        assert_eq!(inv.menu().slot(1), Some(&ItemStack::new(ItemKind::OakLog, 5)));
+        assert_eq!(inv.menu().slot(10), Some(&ItemStack::Empty));
+    }
+
+    #[test]
+    fn the_player_grid_is_two_by_two() {
+        let mut inv = player(&[]);
+        *inv.inventory_menu.slot_mut(0).unwrap() = ItemStack::new(ItemKind::Stick, 4);
+        *inv.inventory_menu.slot_mut(2).unwrap() = ItemStack::new(ItemKind::OakPlanks, 2);
+        *inv.inventory_menu.slot_mut(4).unwrap() = ItemStack::new(ItemKind::OakPlanks, 2);
+        click(&mut inv, PickupClick::Left { slot: Some(0) });
+        assert_eq!(inv.inventory_menu.slot(2), Some(&ItemStack::new(ItemKind::OakPlanks, 1)));
+        assert_eq!(inv.inventory_menu.slot(4), Some(&ItemStack::new(ItemKind::OakPlanks, 1)));
+    }
+
+    #[test]
+    fn an_empty_result_slot_changes_nothing() {
+        let mut inv = table((ItemKind::Air, 0), &[(1, ItemKind::OakLog, 3)]);
+        click(&mut inv, PickupClick::Left { slot: Some(0) });
+        assert_eq!(inv.menu().slot(1), Some(&ItemStack::new(ItemKind::OakLog, 3)));
+        assert!(inv.carried.is_empty());
     }
 }
