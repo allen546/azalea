@@ -286,7 +286,7 @@ impl Menu {
             .location_for_slot(slot_index)
             .expect("we just checked to make sure the slot is Some above, so this shouldn't be able to error");
         match slot_location {
-            // Null fork: vanilla `InventoryMenu#quickMoveStack`, armour and offhand included.
+            // Vanilla: InventoryMenu#quickMoveStack (armour and offhand included).
             MenuLocation::Player(_) => {
                 let equip = self
                     .slot(slot_index)
@@ -302,7 +302,7 @@ impl Menu {
                 let empty = |m: &Self, i: usize| m.slot(i).is_some_and(|s| s.is_empty());
                 match slot_index {
                     0 => {
-                        // vanilla `InventoryMenu#quickMoveStack`: a taken result uses up the grid
+                        // Vanilla: InventoryMenu#quickMoveStack, result slot; a taken result uses up the grid
                         if self.move_item_stack_to(slot_index, 9..=44, true) {
                             self.craft_took_result();
                         }
@@ -438,7 +438,7 @@ impl Menu {
                     self.try_move_item_to_slots(slot_index, self.player_slots_range());
                 }
             },
-            // Null fork: vanilla `CraftingMenu#quickMoveStack`. The result goes to the inventory
+            // Vanilla: CraftingMenu#quickMoveStack. The result goes to the inventory
             // (last slot first) and uses up the grid; inventory stacks go to the grid first, then
             // across hotbar and main; grid stacks go to the inventory.
             MenuLocation::Crafting(l) => match l {

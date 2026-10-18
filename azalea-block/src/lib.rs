@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 mod behavior;
+mod click_use;
 pub mod block_state;
 pub mod fluid_state;
 mod generated;
@@ -11,6 +12,7 @@ use std::{any::Any, collections::HashMap, str::FromStr};
 
 use azalea_registry::builtin::BlockKind;
 pub use behavior::BlockBehavior;
+pub use click_use::block_uses_click;
 // re-exported for convenience
 pub use block_state::BlockState;
 pub use generated::{blocks, properties};
@@ -163,5 +165,39 @@ mod tests {
 
         // Test non-existent property
         assert_eq!(sapling_stage_0.get_property("nonexistent"), None);
+    }
+}
+
+/// Whether a right-click on this block state runs the block's own action, so a click that should
+/// place an item needs a crouch (vanilla `MultiPlayerGameMode#performUseItemOn`). See
+/// [`block_uses_click`].
+// Spec: specs/B6-placement-breaking.md §4.2
+#[must_use]
+pub fn state_uses_click(state: BlockState) -> bool {
+    block_uses_click(BlockKind::from(state))
+}
+
+#[cfg(test)]
+mod click_use_tests {
+    use super::*;
+
+    #[test]
+    fn known_blocks() {
+        for k in [
+            BlockKind::Chest,
+            BlockKind::OakDoor,
+            BlockKind::Cake,
+            BlockKind::Cauldron,
+            BlockKind::NoteBlock,
+            BlockKind::Lever,
+            BlockKind::CraftingTable,
+        ] {
+            assert!(block_uses_click(k), "{k:?}");
+        }
+        for k in [BlockKind::Stone, BlockKind::OakPlanks, BlockKind::Glass, BlockKind::Dirt] {
+            assert!(!block_uses_click(k), "{k:?}");
+        }
+        assert!(state_uses_click(BlockState::from(BlockKind::Chest)));
+        assert!(!state_uses_click(BlockState::from(BlockKind::Stone)));
     }
 }

@@ -60,6 +60,9 @@ use crate::{
     packet::game::SendGamePacketEvent,
 };
 
+/// Eye height while crouching (vanilla 1.21.11 crouching pose), against 1.62 standing.
+const CROUCH_EYE_HEIGHT: f64 = 1.27;
+
 /// Without an ack this many ticks after the action was sent, it is judged on the block alone.
 const ACK_TIMEOUT_TICKS: u32 = 60;
 
@@ -126,6 +129,9 @@ pub enum BlockActionRefusal {
     ScreenOpen,
     /// Mining a block or using an item.
     Busy,
+    /// The clicked block runs its own action on a right-click (opens, toggles), and the bot is not
+    /// crouching: a vanilla client crouches to place instead. Crouch first, or set `auto_crouch`.
+    BlockUsesClick,
 }
 
 impl BlockActionRefusal {
@@ -139,6 +145,7 @@ impl BlockActionRefusal {
             Self::CrouchingWithItem => "crouching with an item in hand would place it",
             Self::ScreenOpen => "a screen is open",
             Self::Busy => "mining or using an item",
+            Self::BlockUsesClick => "block uses the click: crouch first (or auto_crouch) to place",
         }
     }
 }
@@ -249,10 +256,38 @@ pub struct StopMiningQueued;
 ///
 /// The hit point comes from the crosshair raycast if it is on that face, else it is the face centre.
 /// The bot should look at the face first so the server's reach and line checks agree.
+///
+/// A click on a block that uses the click (`azalea_block::state_uses_click`) places the item only
+/// while crouching (vanilla `MultiPlayerGameMode#performUseItemOn`). If the bot is not crouching:
+/// with `auto_crouch` off the click is refused with [`BlockActionRefusal::BlockUsesClick`]; with it
+/// on the bot crouches, clicks on the next tick (the crouch has gone out by then) and goes back to
+/// its earlier crouch state. A sequence of placements should hold the crouch itself instead.
 #[derive(Component, Debug)]
 pub struct PlaceBlockQueued {
     pub position: BlockPos,
     pub direction: Direction,
+    pub auto_crouch: bool,
+}
+
+// Spec: specs/B6-placement-breaking.md §4.2 (crouch handling: crouch now, click next tick)
+/// Set while [`PlaceBlockQueued`] waits one tick for its crouch to reach the server.
+#[derive(Component, Debug)]
+pub struct AutoCrouchHold;
+
+// Spec: specs/B6-placement-breaking.md §4.2 (crouch handling)
+/// Whether the bot crouches now, as vanilla's `isSecondaryUseActive` sees it. Shared by the place
+/// and use commands so the two agree.
+fn is_crouching(mv: &ClientMovementState, crouching: Option<&Crouching>) -> bool {
+    mv.trying_to_crouch || crouching.is_some_and(|c| **c)
+}
+
+// Spec: specs/B6-placement-breaking.md §4.2 (crouch handling)
+/// Either hand holds an item, so a crouched click places it instead of using the block.
+fn hands_loaded(inv: &Inventory) -> bool {
+    !inv.held_item().is_empty()
+        || inv
+            .get_equipment(azalea_inventory::components::EquipmentSlot::Offhand)
+            .is_some_and(|s| !s.is_empty())
 }
 
 // Spec: specs/B6-placement-breaking.md §4.2 (click choice: aim at a visible point of the real shape)
@@ -442,16 +477,72 @@ pub fn handle_place_block_queued(
         &EntityDimensions,
         &Attributes,
         &Inventory,
+        (&mut ClientMovementState, Option<&Crouching>, Has<AutoCrouchHold>),
+        &mut LookDirection,
     )>,
     mut finished: MessageWriter<BlockActionFinished>,
 ) {
-    for (entity, queued, mut prediction, mut results, hit_result, world, position, dims, attrs, inv) in
-        &mut query
+    for (
+        entity,
+        queued,
+        mut prediction,
+        mut results,
+        hit_result,
+        world,
+        position,
+        dims,
+        attrs,
+        inv,
+        (mut mv, crouching, holding),
+        mut look,
+    ) in &mut query
     {
-        commands.entity(entity).remove::<PlaceBlockQueued>();
-
         let world = world.shared.read();
         let clicked = world.get_block_state(queued.position).unwrap_or_default();
+        // Crouch handling: a standing click on a block that uses the click would use it, not place.
+        if !holding
+            && hands_loaded(inv)
+            && azalea_block::state_uses_click(clicked)
+            && !is_crouching(&mv, crouching)
+        {
+            if queued.auto_crouch {
+                // Crouch now; the input packet goes out this tick, the click follows next tick.
+                // The eye drops 0.35, so aim again from the crouched eye; the next tick's pick
+                // (run between ticks) then sees the new eye and look.
+                mv.trying_to_crouch = true;
+                let crouched_eye = position.up(CROUCH_EYE_HEIGHT);
+                let range = attrs.block_interaction_range.calculate();
+                if let Some(aim) =
+                    aim_at_block(&world.chunks, crouched_eye, range, *look, queued.position, Some(queued.direction))
+                {
+                    look.update(aim);
+                }
+                commands.entity(entity).insert(AutoCrouchHold);
+                continue;
+            }
+            commands.entity(entity).remove::<PlaceBlockQueued>();
+            results.next_id += 1;
+            let result = BlockActionResult {
+                id: results.next_id,
+                position: queued.position.offset_with_direction(queued.direction),
+                outcome: BlockActionOutcome::Refused,
+                refusal: Some(BlockActionRefusal::BlockUsesClick),
+                seq: None,
+                finish_ticks: None,
+                ack_ticks: None,
+                elapsed_ticks: 0,
+                before: clicked,
+            };
+            finished.write(BlockActionFinished { entity, is_break: false, result });
+            results.last_place = Some(result);
+            continue;
+        }
+        commands.entity(entity).remove::<PlaceBlockQueued>();
+        if holding {
+            // The click goes out below; stand up again after it (the earlier state was standing).
+            mv.trying_to_crouch = false;
+            commands.entity(entity).remove::<AutoCrouchHold>();
+        }
         let eye = position.up(dims.eye_height.into());
         let range = attrs.block_interaction_range.calculate();
         let checked = check_click(
@@ -586,10 +677,7 @@ pub fn handle_use_block_queued(
         let range = attrs.block_interaction_range.calculate();
         // Vanilla places the held item instead of using the block when crouching with either hand
         // loaded (`isSecondaryUseActive`); a bot that wants the container must stand up first.
-        let hands_loaded = !inv.held_item().is_empty()
-            || inv.get_equipment(azalea_inventory::components::EquipmentSlot::Offhand).is_some_and(|s| !s.is_empty());
-        let crouching = mv.trying_to_crouch || crouching.is_some_and(|c| **c);
-        let places_instead = crouching && hands_loaded;
+        let places_instead = is_crouching(mv, crouching) && hands_loaded(inv);
         let checked = if screen || inv.id != 0 {
             Err(BlockActionRefusal::ScreenOpen)
         } else if mining || using {
