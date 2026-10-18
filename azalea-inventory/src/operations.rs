@@ -594,8 +594,9 @@ impl Menu {
 
     /// Whether the given item could be placed in this slot.
     ///
-    /// Null fork: result slots take nothing and armour slots only matching armour (vanilla
-    /// `ResultSlot#mayPlace`, `ArmorSlot#mayPlace`); other slots still return true.
+    /// Null fork: result slots take nothing, armour slots only matching armour, and a shulker
+    /// box's own slots no shulker box (vanilla `ResultSlot#mayPlace`, `ArmorSlot#mayPlace`,
+    /// `ShulkerBoxSlot#mayPlace`); other slots still return true.
     pub fn may_place(&self, target_slot_index: usize, item: &ItemStackData) -> bool {
         match self {
             Menu::Player(_) => match target_slot_index {
@@ -608,6 +609,11 @@ impl Menu {
                 _ => true,
             },
             Menu::Crafting { .. } => target_slot_index != 0,
+            // vanilla `ShulkerBoxSlot#mayPlace`: `Item#canFitInsideContainerItems` is false for
+            // shulker boxes only
+            Menu::ShulkerBox { .. } if target_slot_index < 27 => {
+                !item.kind.to_str().ends_with("shulker_box")
+            }
             _ => true,
         }
     }

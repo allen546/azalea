@@ -84,7 +84,7 @@ fn handle_menu_opened_trigger(
     inventory.id = event.window_id;
     inventory.container_menu = Some(Menu::from_kind(event.menu_type));
     inventory.container_menu_title = Some(event.title.clone());
-    commands.entity(event.entity).insert(OpenScreen::default());
+    commands.entity(event.entity).insert(OpenScreen { ticks: 0, kind: Some(event.menu_type) });
 }
 
 // Spec: specs/B3-inventory-crafting.md §4.1 (clicks only as a vanilla client makes them)
@@ -97,6 +97,8 @@ fn handle_menu_opened_trigger(
 pub struct OpenScreen {
     /// Ticks since it opened (0 on the tick it opened).
     pub ticks: u32,
+    /// The container's menu kind; `None` for the player's own inventory.
+    pub kind: Option<MenuKind>,
 }
 
 /// Null fork: open the player's own inventory, as vanilla's inventory key does. Vanilla sends no

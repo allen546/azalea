@@ -25,7 +25,7 @@ use azalea_core::{
     tick::GameTick,
 };
 use azalea_entity::{
-    Attributes, LookDirection, Position, dimensions::EntityDimensions, inventory::Inventory,
+    Attributes, Crouching, LookDirection, Position, dimensions::EntityDimensions, inventory::Inventory,
 };
 use azalea_physics::{PhysicsSystems, collision::{BlockWithShape, VoxelShape}};
 use azalea_protocol::packets::game::{
@@ -34,7 +34,11 @@ use azalea_protocol::packets::game::{
     s_player_action::Action,
     s_use_item_on::ServerboundUseItemOn,
 };
-use azalea_registry::{builtin::BlockKind, tags};
+use azalea_physics::client_movement::ClientMovementState;
+use azalea_registry::{
+    builtin::{BlockKind, MenuKind},
+    tags,
+};
 use azalea_world::ChunkStorage;
 use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::*;
@@ -51,6 +55,8 @@ use crate::{
         BlockBreakSent, MineDelay, MineProgress, Mining, MiningQueued, MiningSystems,
         SkipStartTickProgress,
     },
+    inventory::OpenScreen,
+    movement::ItemInUse,
     packet::game::SendGamePacketEvent,
 };
 
@@ -71,7 +77,12 @@ impl Plugin for BlockActionsPlugin {
             )
             .add_systems(
                 GameTick,
-                (handle_place_block_queued, settle_block_actions)
+                (
+                    handle_place_block_queued,
+                    handle_use_block_queued,
+                    settle_block_actions,
+                    settle_use_blocks,
+                )
                     .chain()
                     .after(MiningSystems)
                     .after(ensure_has_sent_carried_item)
@@ -109,6 +120,12 @@ pub enum BlockActionRefusal {
     NotAllowed,
     /// Sent, but no acknowledgement came within [`ACK_TIMEOUT_TICKS`] and the block did not change.
     NoAck,
+    /// Crouching with an item in hand: a vanilla right-click would place the item, not use the block.
+    CrouchingWithItem,
+    /// A screen is open; a vanilla client has no crosshair then.
+    ScreenOpen,
+    /// Mining a block or using an item.
+    Busy,
 }
 
 impl BlockActionRefusal {
@@ -119,6 +136,9 @@ impl BlockActionRefusal {
             Self::NotLookingAtIt => "crosshair does not hit it",
             Self::NotAllowed => "breaking not allowed in this game mode",
             Self::NoAck => "no ack",
+            Self::CrouchingWithItem => "crouching with an item in hand would place it",
+            Self::ScreenOpen => "a screen is open",
+            Self::Busy => "mining or using an item",
         }
     }
 }
@@ -156,6 +176,7 @@ pub struct BlockActionResult {
 pub struct BlockActionResults {
     pub last_place: Option<BlockActionResult>,
     pub last_break: Option<BlockActionResult>,
+    pub last_use: Option<UseBlockResult>,
     next_id: u32,
 }
 
@@ -482,6 +503,158 @@ pub fn handle_place_block_queued(
             }
         }
         results.last_place = Some(result);
+    }
+}
+
+// Spec: specs/B3-inventory-crafting.md §4.7 (open a container by right-clicking it)
+/// Right-click the block at `position` as a vanilla client
+/// does (`MultiPlayerGameMode#useItemOn`), on the next `GameTick`; the result appears in
+/// [`BlockActionResults::last_use`]. Look at the block first, as for [`PlaceBlockQueued`].
+#[derive(Component, Debug)]
+pub struct UseBlockQueued {
+    pub position: BlockPos,
+    pub direction: Option<Direction>,
+}
+
+// Spec: specs/B3-inventory-crafting.md §4.7 (open a container by right-clicking it)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UseBlockOutcome {
+    /// Sent; nothing came back yet.
+    Pending,
+    /// The server opened a screen (the container's window id and menu kind).
+    Opened { window_id: i32, menu: MenuKind },
+    /// Sent and acknowledged, but no screen opened: the block has none, or refused to open (a
+    /// chest with a solid block on top, `ChestBlock#isChestBlockedAt`).
+    NoScreen,
+    /// The client's own checks refused it; nothing was sent.
+    Refused,
+}
+
+// Spec: specs/B3-inventory-crafting.md §4.7 (open a container by right-clicking it)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UseBlockResult {
+    pub id: u32,
+    pub position: BlockPos,
+    pub outcome: UseBlockOutcome,
+    pub refusal: Option<BlockActionRefusal>,
+    pub seq: Option<u32>,
+    /// Ticks since it was sent; stops counting when settled.
+    pub elapsed_ticks: u32,
+    /// Ticks from sending to the open (when it opened).
+    pub open_ticks: Option<u32>,
+    ack_tick: Option<u32>,
+}
+
+// Spec: specs/B3-inventory-crafting.md §4.7 (right-click like `MultiPlayerGameMode#useItemOn`)
+#[allow(clippy::type_complexity)]
+pub fn handle_use_block_queued(
+    mut commands: Commands,
+    mut query: Query<(
+        Entity,
+        &UseBlockQueued,
+        &mut BlockStatePredictionHandler,
+        &mut BlockActionResults,
+        &HitResultComponent,
+        &WorldHolder,
+        &Position,
+        &EntityDimensions,
+        &Attributes,
+        &Inventory,
+        (&ClientMovementState, Option<&Crouching>),
+        (Has<OpenScreen>, Has<Mining>, Has<ItemInUse>),
+    )>,
+) {
+    for (
+        entity,
+        queued,
+        mut prediction,
+        mut results,
+        hit_result,
+        world,
+        position,
+        dims,
+        attrs,
+        inv,
+        (mv, crouching),
+        (screen, mining, using),
+    ) in &mut query
+    {
+        commands.entity(entity).remove::<UseBlockQueued>();
+        let world = world.shared.read();
+        let state = world.get_block_state(queued.position).unwrap_or_default();
+        let eye = position.up(dims.eye_height.into());
+        let range = attrs.block_interaction_range.calculate();
+        // Vanilla places the held item instead of using the block when crouching with either hand
+        // loaded (`isSecondaryUseActive`); a bot that wants the container must stand up first.
+        let hands_loaded = !inv.held_item().is_empty()
+            || inv.get_equipment(azalea_inventory::components::EquipmentSlot::Offhand).is_some_and(|s| !s.is_empty());
+        let crouching = mv.trying_to_crouch || crouching.is_some_and(|c| **c);
+        let places_instead = crouching && hands_loaded;
+        let checked = if screen || inv.id != 0 {
+            Err(BlockActionRefusal::ScreenOpen)
+        } else if mining || using {
+            Err(BlockActionRefusal::Busy)
+        } else if places_instead {
+            Err(BlockActionRefusal::CrouchingWithItem)
+        } else {
+            check_click(eye, range, queued.position, queued.direction, state.outline_shape(), hit_result)
+        };
+        results.next_id += 1;
+        let mut result = UseBlockResult {
+            id: results.next_id,
+            position: queued.position,
+            outcome: UseBlockOutcome::Pending,
+            refusal: None,
+            seq: None,
+            elapsed_ticks: 0,
+            open_ticks: None,
+            ack_tick: None,
+        };
+        match checked {
+            Err(why) => {
+                result.outcome = UseBlockOutcome::Refused;
+                result.refusal = Some(why);
+            }
+            Ok(r) => {
+                let seq = prediction.start_predicting();
+                result.seq = Some(seq);
+                commands.trigger(SendGamePacketEvent::new(
+                    entity,
+                    ServerboundUseItemOn { hand: InteractionHand::MainHand, block_hit: r.into(), seq },
+                ));
+                commands.trigger(SwingArmEvent { entity });
+            }
+        }
+        results.last_use = Some(result);
+    }
+}
+
+// Spec: specs/B3-inventory-crafting.md §4.7 (a screen opening, or not, after a use)
+/// Settles a pending use: opened when the server's open-screen arrives; no screen when the ack is
+/// in and a few ticks passed without one (or the ack never came).
+pub fn settle_use_blocks(
+    mut query: Query<(&mut BlockActionResults, &BlockStatePredictionHandler, &Inventory, Option<&OpenScreen>)>,
+) {
+    /// The open-screen packet follows the use within the server tick that handled it; this many
+    /// ticks after the ack is ample.
+    const GRACE_TICKS: u32 = 4;
+    for (mut results, prediction, inv, screen) in &mut query {
+        let Some(r) = results.last_use.as_mut().filter(|r| r.outcome == UseBlockOutcome::Pending)
+        else {
+            continue;
+        };
+        r.elapsed_ticks += 1;
+        if let (Some(kind), true) = (screen.and_then(|s| s.kind), inv.id != 0) {
+            r.outcome = UseBlockOutcome::Opened { window_id: inv.id, menu: kind };
+            r.open_ticks = Some(r.elapsed_ticks);
+            continue;
+        }
+        if r.seq.is_some_and(|s| prediction.acked_seq() >= s) && r.ack_tick.is_none() {
+            r.ack_tick = Some(r.elapsed_ticks);
+        }
+        if r.ack_tick.is_some_and(|a| r.elapsed_ticks >= a + GRACE_TICKS) || r.elapsed_ticks > ACK_TIMEOUT_TICKS {
+            r.outcome = UseBlockOutcome::NoScreen;
+        }
     }
 }
 
