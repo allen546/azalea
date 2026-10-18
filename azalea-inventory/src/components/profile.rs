@@ -1,10 +1,10 @@
 use azalea_auth::game_profile::{
     GameProfile, GameProfileProperties, SerializableProfileProperties,
 };
-use azalea_buf::AzBuf;
+use azalea_buf::{AzBuf, SerializableUuid};
 use azalea_core::codec_utils::*;
 use azalea_registry::identifier::Identifier;
-use serde::{Serialize, Serializer};
+use serde::{Serialize, Serializer, ser::SerializeMap};
 use uuid::Uuid;
 
 #[derive(AzBuf, Clone, Debug, Default, PartialEq, Serialize)]
@@ -20,7 +20,26 @@ pub struct Profile {
 #[serde(untagged)]
 pub enum PartialOrFullProfile {
     Partial(PartialProfile),
-    Full(GameProfile),
+    Full(#[serde(serialize_with = "serialize_full_profile")] GameProfile),
+}
+// Vanilla `ExtraCodecs.STORED_GAME_PROFILE`: the id is an int array, and the
+// name is always there.
+fn serialize_full_profile<S: Serializer>(
+    profile: &GameProfile,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let properties = SerializableProfileProperties::from((*profile.properties).clone());
+    let mut map = serializer.serialize_map(None)?;
+    map.serialize_entry("id", &uuid_to_int_array(&profile.uuid))?;
+    map.serialize_entry("name", &profile.name)?;
+    if !properties.is_empty() {
+        map.serialize_entry("properties", &properties)?;
+    }
+    map.end()
+}
+fn uuid_to_int_array(uuid: &Uuid) -> IntArray<4> {
+    let [a, b, c, d] = uuid.to_int_array();
+    IntArray([a as i32, b as i32, c as i32, d as i32])
 }
 impl Default for PartialOrFullProfile {
     fn default() -> Self {
@@ -33,7 +52,7 @@ pub struct PartialProfile {
     #[limit(16)]
     #[serde(skip_serializing_if = "is_default")]
     pub name: Option<String>,
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(skip_serializing_if = "is_default", serialize_with = "uuid")]
     pub id: Option<Uuid>,
     #[serde(serialize_with = "serialize_properties")]
     #[serde(skip_serializing_if = "is_default")]

@@ -231,7 +231,7 @@ use crate::{
         "diameter": "f32",
     }
     enum_and_struct_fields["ConsumeEffect::PlaySound"] = {
-        "sound": "SoundEvent",
+        "sound": "azalea_registry::Holder<SoundEvent, CustomSound>",
     }
 
     # we can't call ::new() on enum variants, so define the defaults manually here

@@ -9,7 +9,7 @@ use std::{
     mem::ManuallyDrop,
 };
 
-use azalea_buf::{AzBuf, BufReadError};
+use azalea_buf::{AzBuf, AzBufVar, BufReadError};
 use azalea_chat::FormattedText;
 use azalea_core::{
     attribute_modifier_operation::AttributeModifierOperation,
@@ -17,21 +17,21 @@ use azalea_core::{
     codec_utils::*,
     filterable::Filterable,
     position::GlobalPos,
-    registry_holder::{RegistryHolder, dimension_type::DamageTypeElement},
+    registry_holder::RegistryHolder,
     sound::CustomSound,
 };
 use azalea_registry::{
     Holder, HolderSet,
     builtin::{
-        Attribute, BlockKind, DataComponentKind, EntityKind, ItemKind, MobEffect, Potion,
-        SoundEvent, VillagerKind,
+        Attribute, BlockEntityKind, BlockKind, DataComponentKind, EntityKind, ItemKind, MobEffect,
+        Potion, SoundEvent, VillagerKind,
     },
     data::{self, DamageKind, Enchantment, JukeboxSong, TrimMaterial, TrimPattern},
     identifier::Identifier,
 };
 pub use profile::*;
 use serde::{Serialize, Serializer, ser::SerializeMap};
-use simdnbt::owned::{Nbt, NbtCompound};
+use simdnbt::owned::{Nbt, NbtCompound, NbtList, NbtTag};
 use tracing::trace;
 
 use crate::{ItemStack, item::consume_effect::ConsumeEffect};
@@ -45,8 +45,8 @@ pub trait DataComponentTrait:
 pub trait EncodableDataComponent: Send + Sync + Any {
     fn encode(&self, buf: &mut Vec<u8>) -> io::Result<()>;
     fn crc_hash(&self, registries: &RegistryHolder) -> Checksum;
-    // using the Clone trait makes it not be object-safe, so we have our own clone
-    // function instead
+    // using the Clone trait makes it not be object-safe, so we have our own
+    // clone function instead
     fn clone(&self) -> Box<dyn EncodableDataComponent>;
     // same thing here
     fn eq(&self, other: &dyn EncodableDataComponent) -> bool;
@@ -305,6 +305,7 @@ define_data_components!(
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct CustomData {
+    #[serde(serialize_with = "serialize_nbt")]
     pub nbt: Nbt,
 }
 
@@ -368,15 +369,35 @@ pub struct Enchantments {
     pub levels: HashMap<Enchantment, i32>,
 }
 
-#[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+// The order is the wire order: vanilla `StatePropertiesPredicate.ValueMatcher`
+// is an `Either` of the exact and ranged matchers, which writes the exact one
+// as `true`.
+#[derive(AzBuf, Clone, Debug, PartialEq)]
 pub enum BlockStateValueMatcher {
-    Exact {
-        value: String,
-    },
     Range {
         min: Option<String>,
         max: Option<String>,
     },
+    Exact {
+        value: String,
+    },
+}
+impl Serialize for BlockStateValueMatcher {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Exact { value } => serializer.serialize_str(value),
+            Self::Range { min, max } => {
+                let mut map = serializer.serialize_map(None)?;
+                if let Some(min) = min {
+                    map.serialize_entry("min", min)?;
+                }
+                if let Some(max) = max {
+                    map.serialize_entry("max", max)?;
+                }
+                map.end()
+            }
+        }
+    }
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
@@ -384,15 +405,54 @@ pub struct BlockStatePropertyMatcher {
     pub name: String,
     pub value_matcher: BlockStateValueMatcher,
 }
+// vanilla `StatePropertiesPredicate#PROPERTIES_CODEC` is a map of name to
+// matcher
+fn serialize_property_matchers<S: Serializer>(
+    matchers: &Option<Vec<BlockStatePropertyMatcher>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut map = serializer.serialize_map(None)?;
+    for matcher in matchers.iter().flatten() {
+        map.serialize_entry(&matcher.name, &matcher.value_matcher)?;
+    }
+    map.end()
+}
+
+/// The `DataComponentMatchers` of a block predicate. Only the empty form is
+/// read, since nothing a server sends for adventure mode uses the others.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DataComponentMatchers;
+impl AzBuf for DataComponentMatchers {
+    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+        let exact = u32::azalea_read_var(buf)?;
+        let partial = u32::azalea_read_var(buf)?;
+        if exact != 0 || partial != 0 {
+            return Err(BufReadError::Custom(
+                "block predicates with component matchers are not supported".to_owned(),
+            ));
+        }
+        Ok(Self)
+    }
+    fn azalea_write(&self, buf: &mut impl io::Write) -> io::Result<()> {
+        0u32.azalea_write_var(buf)?;
+        0u32.azalea_write_var(buf)
+    }
+}
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct BlockPredicate {
     #[serde(skip_serializing_if = "is_default")]
     pub blocks: Option<HolderSet<BlockKind, Identifier>>,
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(
+        rename = "state",
+        skip_serializing_if = "is_default",
+        serialize_with = "serialize_property_matchers"
+    )]
     pub properties: Option<Vec<BlockStatePropertyMatcher>>,
     #[serde(skip_serializing_if = "is_default")]
     pub nbt: Option<NbtCompound>,
+    #[serde(skip)]
+    pub components: DataComponentMatchers,
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
@@ -427,6 +487,10 @@ pub enum EquipmentSlotGroup {
     Head,
     Armor,
     Body,
+    Saddle,
+}
+fn is_any_slot(slot: &EquipmentSlotGroup) -> bool {
+    matches!(slot, EquipmentSlotGroup::Any)
 }
 
 // this is duplicated in azalea-entity, BUT the one there has a different
@@ -445,6 +509,7 @@ pub struct AttributeModifiersEntry {
     pub kind: Attribute,
     #[serde(flatten)]
     pub modifier: AttributeModifier,
+    #[serde(skip_serializing_if = "is_any_slot")]
     pub slot: EquipmentSlotGroup,
     #[serde(skip_serializing_if = "is_default")]
     pub display: AttributeModifierDisplay,
@@ -457,12 +522,13 @@ pub struct AttributeModifiers {
 }
 
 #[derive(AzBuf, Clone, Debug, Default, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub enum AttributeModifierDisplay {
     #[default]
     Default,
     Hidden,
     Override {
+        #[serde(rename = "value")]
         text: FormattedText,
     },
 }
@@ -495,20 +561,39 @@ pub struct EnchantmentGlintOverride {
     pub show_glint: bool,
 }
 
-#[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct IntangibleProjectile;
+// vanilla sends this one as its codec's NBT, which is an empty compound
+impl AzBuf for IntangibleProjectile {
+    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+        NbtCompound::azalea_read(buf)?;
+        Ok(Self)
+    }
+    fn azalea_write(&self, buf: &mut impl io::Write) -> io::Result<()> {
+        NbtCompound::new().azalea_write(buf)
+    }
+}
+
+// Vanilla `ExtraCodecs.UNSIGNED_BYTE` is `Codec.BYTE` underneath, so it hashes
+// as a byte.
+fn serialize_unsigned_byte<S: Serializer>(value: &i32, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_i8(*value as i8)
+}
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct MobEffectDetails {
     #[var]
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(
+        skip_serializing_if = "is_default",
+        serialize_with = "serialize_unsigned_byte"
+    )]
     pub amplifier: i32,
     #[var]
     #[serde(skip_serializing_if = "is_default")]
     pub duration: i32,
     #[serde(skip_serializing_if = "is_default")]
     pub ambient: bool,
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(skip_serializing_if = "is_true")]
     pub show_particles: bool,
     pub show_icon: bool,
     #[serde(skip_serializing_if = "is_default")]
@@ -599,7 +684,8 @@ pub struct Tool {
     #[serde(skip_serializing_if = "is_true")]
     pub can_destroy_blocks_in_creative: bool,
 }
-// Vanilla `Tool#CODEC` leaves out a field equal to its default: 1.0, 1 and true.
+// Vanilla `Tool#CODEC` leaves out a field equal to its default: 1.0, 1 and
+// true.
 fn is_default_mining_speed(value: &f32) -> bool {
     *value == 1.
 }
@@ -706,8 +792,11 @@ pub struct SuspiciousStewEffect {
     #[serde(rename = "id")]
     pub effect: MobEffect,
     #[var]
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(skip_serializing_if = "is_default_stew_duration")]
     pub duration: i32,
+}
+fn is_default_stew_duration(value: &i32) -> bool {
+    *value == 160
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
@@ -718,6 +807,7 @@ pub struct SuspiciousStewEffects {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct WritableBookContent {
+    #[serde(skip_serializing_if = "is_default")]
     pub pages: Vec<Filterable<String>>,
 }
 
@@ -737,8 +827,16 @@ pub struct WrittenBookContent {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct Trim {
-    pub material: TrimMaterial,
-    pub pattern: TrimPattern,
+    pub material: Holder<TrimMaterial, DirectTrimMaterial>,
+    pub pattern: Holder<TrimPattern, DirectTrimPattern>,
+}
+
+#[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+pub struct DirectTrimPattern {
+    pub asset_id: Identifier,
+    pub description: FormattedText,
+    // vanilla writes this one even when false
+    pub decal: bool,
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
@@ -751,21 +849,22 @@ pub struct DebugStickState {
 pub struct EntityData {
     #[serde(rename = "id")]
     pub kind: EntityKind,
-    #[serde(flatten)]
+    #[serde(flatten, serialize_with = "serialize_nbt_compound")]
     pub data: NbtCompound,
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct BucketEntityData {
+    #[serde(serialize_with = "serialize_nbt_compound")]
     pub entity: NbtCompound,
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct BlockEntityData {
     #[serde(rename = "id")]
-    pub kind: EntityKind,
-    #[serde(flatten)]
+    pub kind: BlockEntityKind,
+    #[serde(flatten, serialize_with = "serialize_nbt_compound")]
     pub data: NbtCompound,
 }
 
@@ -791,10 +890,32 @@ pub struct OminousBottleAmplifier {
     pub amplifier: i32,
 }
 
-#[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct Recipes {
     pub recipes: Vec<Identifier>,
+}
+// vanilla sends this one as its codec's NBT: a list of strings
+impl AzBuf for Recipes {
+    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+        let recipes = match NbtTag::azalea_read(buf)? {
+            NbtTag::List(NbtList::String(strings)) => strings
+                .iter()
+                .map(|s| Identifier::from(&*s.to_str()))
+                .collect(),
+            NbtTag::List(NbtList::Empty) => Vec::new(),
+            other => {
+                return Err(BufReadError::Custom(format!(
+                    "expected a list of strings for recipes, got {other:?}"
+                )));
+            }
+        };
+        Ok(Self { recipes })
+    }
+    fn azalea_write(&self, buf: &mut impl io::Write) -> io::Result<()> {
+        let strings = self.recipes.iter().map(|r| r.to_string().into()).collect();
+        NbtTag::List(NbtList::String(strings)).azalea_write(buf)
+    }
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
@@ -831,9 +952,13 @@ pub struct FireworkExplosion {
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct Fireworks {
     #[var]
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(
+        skip_serializing_if = "is_default",
+        serialize_with = "serialize_unsigned_byte"
+    )]
     pub flight_duration: i32,
     #[limit(256)]
+    #[serde(skip_serializing_if = "is_default")]
     pub explosions: Vec<FireworkExplosion>,
 }
 
@@ -859,10 +984,14 @@ pub struct NoteBlockSound {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct BannerPattern {
-    #[var]
-    pub pattern: i32,
-    #[var]
-    pub color: i32,
+    pub pattern: Holder<data::BannerPattern, DirectBannerPattern>,
+    pub color: DyeColor,
+}
+
+#[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+pub struct DirectBannerPattern {
+    pub asset_id: Identifier,
+    pub translation_key: String,
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
@@ -907,7 +1036,29 @@ pub struct PotDecorations {
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct Container {
+    #[serde(serialize_with = "serialize_container_slots")]
     pub items: Vec<ItemStack>,
+}
+// Vanilla `ItemContainerContents#CODEC` is a list of the non-empty slots with
+// their index.
+fn serialize_container_slots<S: Serializer>(
+    items: &[ItemStack],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    #[derive(Serialize)]
+    struct Slot<'a> {
+        slot: i32,
+        item: &'a ItemStack,
+    }
+    let slots = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| !item.is_empty())
+        .map(|(slot, item)| Slot {
+            slot: slot as i32,
+            item,
+        });
+    serializer.collect_seq(slots)
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
@@ -918,8 +1069,7 @@ pub struct BlockState {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct BeehiveOccupant {
-    #[serde(skip_serializing_if = "is_default")]
-    pub entity_data: NbtCompound,
+    pub entity_data: EntityData,
     #[var]
     pub ticks_in_hive: i32,
     #[var]
@@ -933,12 +1083,17 @@ pub struct Bees {
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+#[serde(transparent)]
 pub struct Lock {
-    pub key: String,
+    /// An item predicate. Vanilla sends it as NBT.
+    #[serde(serialize_with = "serialize_nbt_compound")]
+    pub predicate: NbtCompound,
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+#[serde(transparent)]
 pub struct ContainerLoot {
+    #[serde(serialize_with = "serialize_nbt_compound")]
     pub loot_table: NbtCompound,
 }
 
@@ -960,16 +1115,24 @@ pub struct JukeboxSongData {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct Consumable {
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(skip_serializing_if = "is_default_consume_seconds")]
     pub consume_seconds: f32,
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(skip_serializing_if = "is_default_animation")]
     pub animation: ItemUseAnimation,
     #[serde(skip_serializing_if = "is_default_eat_sound")]
     pub sound: azalea_registry::Holder<SoundEvent, CustomSound>,
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(skip_serializing_if = "is_true")]
     pub has_consume_particles: bool,
     #[serde(skip_serializing_if = "is_default")]
     pub on_consume_effects: Vec<ConsumeEffect>,
+}
+// Vanilla `Consumable#CODEC` leaves out a field equal to its default: 1.6, eat
+// and true.
+fn is_default_consume_seconds(value: &f32) -> bool {
+    *value == 1.6
+}
+fn is_default_animation(value: &ItemUseAnimation) -> bool {
+    matches!(value, ItemUseAnimation::Eat)
 }
 fn is_default_eat_sound(sound: &azalea_registry::Holder<SoundEvent, CustomSound>) -> bool {
     matches!(
@@ -1057,7 +1220,8 @@ pub struct ItemModel {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct DamageResistant {
-    /// A damage type tag key, without the '#' its JSON form has (the network form).
+    /// A damage type tag key, without the '#' its JSON form has (the network
+    /// form).
     #[serde(serialize_with = "azalea_registry::identifier::serialize_tag_key")]
     pub types: Identifier,
 }
@@ -1066,7 +1230,7 @@ pub struct DamageResistant {
 pub struct Equippable {
     pub slot: EquipmentSlot,
     #[serde(skip_serializing_if = "is_default_equip_sound")]
-    pub equip_sound: SoundEvent,
+    pub equip_sound: azalea_registry::Holder<SoundEvent, CustomSound>,
     #[serde(skip_serializing_if = "is_default")]
     pub asset_id: Option<Identifier>,
     #[serde(skip_serializing_if = "is_default")]
@@ -1084,20 +1248,26 @@ pub struct Equippable {
     #[serde(skip_serializing_if = "is_default")]
     pub can_be_sheared: bool,
     #[serde(skip_serializing_if = "is_default_shearing_sound")]
-    pub shearing_sound: SoundEvent,
+    pub shearing_sound: azalea_registry::Holder<SoundEvent, CustomSound>,
 }
-fn is_default_equip_sound(sound: &SoundEvent) -> bool {
-    matches!(sound, SoundEvent::ItemArmorEquipGeneric)
+fn is_default_equip_sound(sound: &azalea_registry::Holder<SoundEvent, CustomSound>) -> bool {
+    matches!(
+        sound,
+        azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipGeneric)
+    )
 }
-fn is_default_shearing_sound(sound: &SoundEvent) -> bool {
-    matches!(sound, SoundEvent::ItemShearsSnip)
+fn is_default_shearing_sound(sound: &azalea_registry::Holder<SoundEvent, CustomSound>) -> bool {
+    matches!(
+        sound,
+        azalea_registry::Holder::Reference(SoundEvent::ItemShearsSnip)
+    )
 }
 
 impl Equippable {
     pub const fn new() -> Self {
         Self {
             slot: EquipmentSlot::Body,
-            equip_sound: SoundEvent::ItemArmorEquipGeneric,
+            equip_sound: azalea_registry::Holder::Reference(SoundEvent::ItemArmorEquipGeneric),
             asset_id: None,
             camera_overlay: None,
             allowed_entities: None,
@@ -1106,7 +1276,7 @@ impl Equippable {
             damage_on_hurt: true,
             equip_on_interact: false,
             can_be_sheared: false,
-            shearing_sound: SoundEvent::ItemShearsSnip,
+            shearing_sound: azalea_registry::Holder::Reference(SoundEvent::ItemShearsSnip),
         }
     }
 }
@@ -1117,7 +1287,7 @@ impl Default for Equippable {
 }
 
 /// An enum that represents inventory slots that can hold items.
-#[derive(AzBuf, Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EquipmentSlot {
     Mainhand,
@@ -1129,6 +1299,38 @@ pub enum EquipmentSlot {
     /// This is for animal armor, use [`Self::Chest`] for the chestplate slot.
     Body,
     Saddle,
+}
+// Vanilla `EquipmentSlot#STREAM_CODEC` writes `EquipmentSlot#getId`, which is
+// not the ordinal: the offhand is 5 and the armor slots start at 1.
+impl AzBuf for EquipmentSlot {
+    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+        let id = u32::azalea_read_var(buf)?;
+        // out of range reads as the first value, like
+        // `ByIdMap.OutOfBoundsStrategy.ZERO`
+        Ok(match id {
+            1 => Self::Feet,
+            2 => Self::Legs,
+            3 => Self::Chest,
+            4 => Self::Head,
+            5 => Self::Offhand,
+            6 => Self::Body,
+            7 => Self::Saddle,
+            _ => Self::Mainhand,
+        })
+    }
+    fn azalea_write(&self, buf: &mut impl io::Write) -> io::Result<()> {
+        let id: u32 = match self {
+            Self::Mainhand => 0,
+            Self::Feet => 1,
+            Self::Legs => 2,
+            Self::Chest => 3,
+            Self::Head => 4,
+            Self::Offhand => 5,
+            Self::Body => 6,
+            Self::Saddle => 7,
+        };
+        id.azalea_write_var(buf)
+    }
 }
 impl EquipmentSlot {
     #[must_use]
@@ -1189,6 +1391,7 @@ pub struct TooltipStyle {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct DeathProtection {
+    #[serde(skip_serializing_if = "is_default")]
     pub death_effects: Vec<ConsumeEffect>,
 }
 
@@ -1248,7 +1451,8 @@ pub struct FoxVariant {
     pub variant: FoxVariantKind,
 }
 
-#[derive(AzBuf, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(AzBuf, Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FoxVariantKind {
     #[default]
     Red,
@@ -1260,14 +1464,6 @@ impl Display for FoxVariantKind {
             Self::Red => write!(f, "minecraft:red"),
             Self::Snow => write!(f, "minecraft:snow"),
         }
-    }
-}
-impl Serialize for FoxVariantKind {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
     }
 }
 
@@ -1284,7 +1480,8 @@ pub enum SalmonSize {
 pub struct ParrotVariant {
     pub variant: ParrotVariantKind,
 }
-#[derive(AzBuf, Clone, Copy, Debug, PartialEq)]
+#[derive(AzBuf, Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ParrotVariantKind {
     RedBlue,
     Blue,
@@ -1301,14 +1498,6 @@ impl Display for ParrotVariantKind {
             Self::YellowBlue => write!(f, "minecraft:yellow_blue"),
             Self::Gray => write!(f, "minecraft:gray"),
         }
-    }
-}
-impl Serialize for ParrotVariantKind {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
     }
 }
 
@@ -1346,7 +1535,8 @@ pub struct TropicalFishPatternColor {
 pub struct MooshroomVariant {
     pub variant: MooshroomVariantKind,
 }
-#[derive(AzBuf, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(AzBuf, Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MooshroomVariantKind {
     #[default]
     Red,
@@ -1360,21 +1550,14 @@ impl Display for MooshroomVariantKind {
         }
     }
 }
-impl Serialize for MooshroomVariantKind {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct RabbitVariant {
     pub variant: RabbitVariantKind,
 }
-#[derive(AzBuf, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RabbitVariantKind {
     #[default]
     Brown,
@@ -1384,6 +1567,32 @@ pub enum RabbitVariantKind {
     Gold,
     Salt,
     Evil,
+}
+// Vanilla `Rabbit.Variant#id`: the evil rabbit is 99 rather than 6.
+impl AzBuf for RabbitVariantKind {
+    fn azalea_read(buf: &mut Cursor<&[u8]>) -> Result<Self, BufReadError> {
+        Ok(match u32::azalea_read_var(buf)? {
+            1 => Self::White,
+            2 => Self::Black,
+            3 => Self::WhiteSplotched,
+            4 => Self::Gold,
+            5 => Self::Salt,
+            99 => Self::Evil,
+            _ => Self::Brown,
+        })
+    }
+    fn azalea_write(&self, buf: &mut impl io::Write) -> io::Result<()> {
+        let id: u32 = match self {
+            Self::Brown => 0,
+            Self::White => 1,
+            Self::Black => 2,
+            Self::WhiteSplotched => 3,
+            Self::Gold => 4,
+            Self::Salt => 5,
+            Self::Evil => 99,
+        };
+        id.azalea_write_var(buf)
+    }
 }
 impl Display for RabbitVariantKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1396,14 +1605,6 @@ impl Display for RabbitVariantKind {
             Self::Salt => write!(f, "minecraft:salt"),
             Self::Evil => write!(f, "minecraft:evil"),
         }
-    }
-}
-impl Serialize for RabbitVariantKind {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
     }
 }
 
@@ -1424,7 +1625,8 @@ pub struct FrogVariant {
 pub struct HorseVariant {
     pub variant: HorseVariantKind,
 }
-#[derive(AzBuf, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(AzBuf, Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HorseVariantKind {
     #[default]
     White,
@@ -1446,14 +1648,6 @@ impl Display for HorseVariantKind {
             Self::Gray => write!(f, "minecraft:gray"),
             Self::DarkBrown => write!(f, "minecraft:dark_brown"),
         }
-    }
-}
-impl Serialize for HorseVariantKind {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
     }
 }
 
@@ -1481,7 +1675,8 @@ pub struct PaintingVariantData {
 pub struct LlamaVariant {
     pub variant: LlamaVariantKind,
 }
-#[derive(AzBuf, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(AzBuf, Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LlamaVariantKind {
     #[default]
     Creamy,
@@ -1499,21 +1694,14 @@ impl Display for LlamaVariantKind {
         }
     }
 }
-impl Serialize for LlamaVariantKind {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct AxolotlVariant {
     pub variant: AxolotlVariantKind,
 }
-#[derive(AzBuf, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(AzBuf, Clone, Copy, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AxolotlVariantKind {
     #[default]
     Lucy,
@@ -1531,14 +1719,6 @@ impl Display for AxolotlVariantKind {
             Self::Cyan => write!(f, "minecraft:cyan"),
             Self::Blue => write!(f, "minecraft:blue"),
         }
-    }
-}
-impl Serialize for AxolotlVariantKind {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
     }
 }
 
@@ -1677,17 +1857,34 @@ pub enum ProvidesTrimMaterial {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct DirectTrimMaterial {
+    #[serde(flatten)]
     pub assets: MaterialAssetGroup,
     pub description: FormattedText,
 }
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct MaterialAssetGroup {
+    #[serde(rename = "asset_name")]
     pub base: AssetInfo,
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(
+        rename = "override_armor_assets",
+        skip_serializing_if = "is_default",
+        serialize_with = "serialize_pairs_as_map"
+    )]
     pub overrides: Vec<(Identifier, AssetInfo)>,
+}
+fn serialize_pairs_as_map<S: Serializer>(
+    pairs: &[(Identifier, AssetInfo)],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut map = serializer.serialize_map(Some(pairs.len()))?;
+    for (key, value) in pairs {
+        map.serialize_entry(key, value)?;
+    }
+    map.end()
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+#[serde(transparent)]
 pub struct AssetInfo {
     pub suffix: String,
 }
@@ -1726,6 +1923,7 @@ pub enum ChickenVariant {
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
+#[serde(transparent)]
 pub struct ChickenVariantData {
     pub registry: azalea_registry::data::ChickenVariant,
 }
@@ -1744,9 +1942,17 @@ pub struct ZombieNautilusVariantData {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct UseEffects {
+    #[serde(skip_serializing_if = "is_default")]
     pub can_sprint: bool,
+    #[serde(skip_serializing_if = "is_true")]
     pub interact_vibrations: bool,
+    #[serde(skip_serializing_if = "is_default_speed_multiplier")]
     pub speed_multiplier: f32,
+}
+// Vanilla `UseEffects#CODEC` leaves out a field equal to its default: false,
+// true and 0.2.
+fn is_default_speed_multiplier(value: &f32) -> bool {
+    *value == 0.2
 }
 impl UseEffects {
     pub const fn new() -> Self {
@@ -1769,19 +1975,23 @@ pub struct MinimumAttackCharge {
     pub value: f32,
 }
 
-// TODO: this is probably wrong, check in-game
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum DamageType {
     Registry(DamageKind),
-    Holder(Holder<DamageKind, DamageTypeElement>),
+    // `DamageType.STREAM_CODEC` is `ByteBufCodecs.holderRegistry`: the plain id, no direct form.
+    Holder(DamageKind),
 }
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct PiercingWeapon {
+    #[serde(skip_serializing_if = "is_true")]
     pub deals_knockback: bool,
+    #[serde(skip_serializing_if = "is_default")]
     pub dismounts: bool,
+    #[serde(skip_serializing_if = "is_default")]
     pub sound: Option<Holder<SoundEvent, azalea_core::sound::CustomSound>>,
+    #[serde(skip_serializing_if = "is_default")]
     pub hit_sound: Option<Holder<SoundEvent, azalea_core::sound::CustomSound>>,
 }
 impl PiercingWeapon {
@@ -1803,16 +2013,33 @@ impl Default for PiercingWeapon {
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct KineticWeapon {
     #[var]
+    #[serde(skip_serializing_if = "is_default_contact_cooldown_ticks")]
     pub contact_cooldown_ticks: i32,
     #[var]
+    #[serde(skip_serializing_if = "is_default")]
     pub delay_ticks: i32,
+    #[serde(skip_serializing_if = "is_default")]
     pub dismount_conditions: Option<KineticWeaponCondition>,
+    #[serde(skip_serializing_if = "is_default")]
     pub knockback_conditions: Option<KineticWeaponCondition>,
+    #[serde(skip_serializing_if = "is_default")]
     pub damage_conditions: Option<KineticWeaponCondition>,
+    #[serde(skip_serializing_if = "is_default")]
     pub forward_movement: f32,
+    #[serde(skip_serializing_if = "is_default_damage_multiplier")]
     pub damage_multiplier: f32,
+    #[serde(skip_serializing_if = "is_default")]
     pub sound: Option<Holder<SoundEvent, azalea_core::sound::CustomSound>>,
+    #[serde(skip_serializing_if = "is_default")]
     pub hit_sound: Option<Holder<SoundEvent, azalea_core::sound::CustomSound>>,
+}
+// Vanilla `KineticWeapon#CODEC` leaves out a field equal to its default: 10 and
+// 1.0.
+fn is_default_contact_cooldown_ticks(value: &i32) -> bool {
+    *value == 10
+}
+fn is_default_damage_multiplier(value: &f32) -> bool {
+    *value == 1.
 }
 impl KineticWeapon {
     pub const fn new() -> Self {
@@ -1839,7 +2066,9 @@ impl Default for KineticWeapon {
 pub struct KineticWeaponCondition {
     #[var]
     pub max_duration_ticks: i32,
+    #[serde(skip_serializing_if = "is_default")]
     pub min_speed: f32,
+    #[serde(skip_serializing_if = "is_default")]
     pub min_relative_speed: f32,
 }
 impl KineticWeaponCondition {
@@ -1859,10 +2088,19 @@ impl Default for KineticWeaponCondition {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct SwingAnimation {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", skip_serializing_if = "is_default_swing_kind")]
     pub kind: SwingAnimationKind,
     #[var]
+    #[serde(skip_serializing_if = "is_default_swing_duration")]
     pub duration: i32,
+}
+// Vanilla `SwingAnimation#CODEC` leaves out a field equal to its default: whack
+// and 6.
+fn is_default_swing_kind(value: &SwingAnimationKind) -> bool {
+    matches!(value, SwingAnimationKind::Whack)
+}
+fn is_default_swing_duration(value: &i32) -> bool {
+    *value == 6
 }
 impl SwingAnimation {
     pub const fn new() -> Self {
@@ -1888,12 +2126,32 @@ pub enum SwingAnimationKind {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct AttackRange {
+    #[serde(skip_serializing_if = "is_default")]
     pub min_reach: f32,
+    #[serde(skip_serializing_if = "is_default_max_reach")]
     pub max_reach: f32,
+    #[serde(skip_serializing_if = "is_default")]
     pub min_creative_reach: f32,
+    #[serde(skip_serializing_if = "is_default_max_creative_reach")]
     pub max_creative_reach: f32,
+    #[serde(skip_serializing_if = "is_default_hitbox_margin")]
     pub hitbox_margin: f32,
+    #[serde(skip_serializing_if = "is_default_mob_factor")]
     pub mob_factor: f32,
+}
+// Vanilla `AttackRange#CODEC` leaves out a field equal to its default: 0, 3, 0,
+// 5, 0.3 and 1.
+fn is_default_max_reach(value: &f32) -> bool {
+    *value == 3.
+}
+fn is_default_max_creative_reach(value: &f32) -> bool {
+    *value == 5.
+}
+fn is_default_hitbox_margin(value: &f32) -> bool {
+    *value == 0.3
+}
+fn is_default_mob_factor(value: &f32) -> bool {
+    *value == 1.
 }
 impl AttackRange {
     pub const fn new() -> Self {
