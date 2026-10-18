@@ -589,15 +589,22 @@ impl Default for ToolRule {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct Tool {
-    #[serde(serialize_with = "flatten_array")]
+    // Vanilla's codec is a plain list here, even for one rule.
     pub rules: Vec<ToolRule>,
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(skip_serializing_if = "is_default_mining_speed")]
     pub default_mining_speed: f32,
     #[var]
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(skip_serializing_if = "is_default_damage_per_block")]
     pub damage_per_block: i32,
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(skip_serializing_if = "is_true")]
     pub can_destroy_blocks_in_creative: bool,
+}
+// Vanilla `Tool#CODEC` leaves out a field equal to its default: 1.0, 1 and true.
+fn is_default_mining_speed(value: &f32) -> bool {
+    *value == 1.
+}
+fn is_default_damage_per_block(value: &i32) -> bool {
+    *value == 1
 }
 
 impl Tool {
@@ -1051,6 +1058,7 @@ pub struct ItemModel {
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct DamageResistant {
     /// A damage type tag key, without the '#' its JSON form has (the network form).
+    #[serde(serialize_with = "azalea_registry::identifier::serialize_tag_key")]
     pub types: Identifier,
 }
 
@@ -1586,11 +1594,14 @@ pub struct BlocksAttacks {
     pub block_delay_seconds: f32,
     #[serde(skip_serializing_if = "is_default_disable_cooldown_scale")]
     pub disable_cooldown_scale: f32,
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(skip_serializing_if = "is_default_damage_reductions")]
     pub damage_reductions: Vec<DamageReduction>,
     #[serde(skip_serializing_if = "is_default")]
     pub item_damage: ItemDamageFunction,
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(
+        skip_serializing_if = "is_default",
+        serialize_with = "azalea_registry::identifier::serialize_optional_tag_key"
+    )]
     pub bypassed_by: Option<Identifier>,
     #[serde(skip_serializing_if = "is_default")]
     pub block_sound: Option<azalea_registry::Holder<SoundEvent, CustomSound>>,
@@ -1599,6 +1610,10 @@ pub struct BlocksAttacks {
 }
 fn is_default_disable_cooldown_scale(value: &f32) -> bool {
     *value == 1.
+}
+// Vanilla's default is one reduction: 90 degrees, every type, base 0, factor 1.
+fn is_default_damage_reductions(value: &[DamageReduction]) -> bool {
+    value == BlocksAttacks::new().damage_reductions
 }
 
 impl BlocksAttacks {
@@ -1629,7 +1644,7 @@ impl Default for BlocksAttacks {
 pub struct DamageReduction {
     #[serde(skip_serializing_if = "is_default_horizontal_blocking_angle")]
     pub horizontal_blocking_angle: f32,
-    #[serde(skip_serializing_if = "is_default")]
+    #[serde(rename = "type", skip_serializing_if = "is_default")]
     pub kind: Option<HolderSet<DamageKind, Identifier>>,
     pub base: f32,
     pub factor: f32,
@@ -1680,6 +1695,8 @@ pub struct AssetInfo {
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct ProvidesBannerPatterns {
+    /// A banner pattern tag key, without the '#'.
+    #[serde(serialize_with = "azalea_registry::identifier::serialize_tag_key")]
     pub key: Identifier,
 }
 

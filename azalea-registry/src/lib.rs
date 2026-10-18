@@ -178,7 +178,7 @@ impl<D: Registry, Identifier: AzBuf> From<Vec<D>> for HolderSet<D, Identifier> {
     }
 }
 #[cfg(feature = "serde")]
-impl<D: Registry + Serialize, Identifier: AzBuf + Serialize> Serialize
+impl<D: Registry + Serialize, Identifier: AzBuf + Serialize + fmt::Display> Serialize
     for HolderSet<D, Identifier>
 {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -193,7 +193,8 @@ impl<D: Registry + Serialize, Identifier: AzBuf + Serialize> Serialize
                     contents.serialize(serializer)
                 }
             }
-            Self::Named { key, contents: _ } => key.serialize(serializer),
+            // A tag, as vanilla's codec writes it (`HolderSetCodec`, `TagKey#hashedCodec`).
+            Self::Named { key, contents: _ } => serializer.serialize_str(&format!("#{key}")),
         }
     }
 }

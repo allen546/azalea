@@ -118,6 +118,25 @@ impl AzBuf for Identifier {
     }
 }
 
+/// Serializes a tag key the way vanilla's codec writes it: `#namespace:path` (vanilla
+/// `TagKey#hashedCodec`). Item hashes depend on it; the network form has no `#`.
+#[cfg(feature = "serde")]
+pub fn serialize_tag_key<S: Serializer>(key: &Identifier, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&format!("#{key}"))
+}
+
+/// [`serialize_tag_key`] for an optional field.
+#[cfg(feature = "serde")]
+pub fn serialize_optional_tag_key<S: Serializer>(
+    key: &Option<Identifier>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match key {
+        Some(key) => serialize_tag_key(key, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
 #[cfg(feature = "serde")]
 impl Serialize for Identifier {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
