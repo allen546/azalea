@@ -8,9 +8,11 @@ use crate::{
     EnchantmentMenuLocation, FurnaceMenuLocation, Generic3x3MenuLocation, Generic9x1MenuLocation,
     Generic9x2MenuLocation, Generic9x3MenuLocation, Generic9x4MenuLocation, Generic9x5MenuLocation,
     Generic9x6MenuLocation, GrindstoneMenuLocation, HopperMenuLocation, ItemStack, ItemStackData,
-    LecternMenuLocation, LoomMenuLocation, Menu, MenuLocation, MerchantMenuLocation, Player,
-    PlayerMenuLocation, ShulkerBoxMenuLocation, SmithingMenuLocation, SmokerMenuLocation,
-    StonecutterMenuLocation, item::MaxStackSizeExt,
+    LecternMenuLocation, LoomMenuLocation, Menu, MenuLocation, MerchantMenuLocation,
+    ShulkerBoxMenuLocation, SmithingMenuLocation, SmokerMenuLocation,
+    StonecutterMenuLocation,
+    components::{EquipmentSlot, Equippable},
+    item::MaxStackSizeExt,
 };
 
 /// A type of click in a Minecraft inventory.
@@ -283,125 +285,105 @@ impl Menu {
             .location_for_slot(slot_index)
             .expect("we just checked to make sure the slot is Some above, so this shouldn't be able to error");
         match slot_location {
-            MenuLocation::Player(l) => match l {
-                PlayerMenuLocation::CraftResult => {
-                    self.try_move_item_to_slots(slot_index, Player::INVENTORY_SLOTS);
-                }
-                PlayerMenuLocation::Craft => {
-                    self.try_move_item_to_slots(slot_index, Player::INVENTORY_SLOTS);
-                }
-                PlayerMenuLocation::Armor => {
-                    self.try_move_item_to_slots(slot_index, Player::INVENTORY_SLOTS);
+            // Null fork: vanilla `InventoryMenu#quickMoveStack`, armour and offhand included.
+            MenuLocation::Player(_) => {
+                let equip = self
+                    .slot(slot_index)
+                    .and_then(|s| s.as_present())
+                    .and_then(|s| s.get_component::<Equippable>().map(|e| e.slot));
+                let armor_slot = match equip {
+                    Some(EquipmentSlot::Head) => Some(5),
+                    Some(EquipmentSlot::Chest) => Some(6),
+                    Some(EquipmentSlot::Legs) => Some(7),
+                    Some(EquipmentSlot::Feet) => Some(8),
+                    _ => None,
+                };
+                let empty = |m: &Self, i: usize| m.slot(i).is_some_and(|s| s.is_empty());
+                match slot_index {
+                    0 => self.move_item_stack_to(slot_index, 9..=44, true),
+                    1..=8 => self.move_item_stack_to(slot_index, 9..=44, false),
+                    _ if armor_slot.is_some_and(|j| empty(self, j)) => {
+                        let j = armor_slot.unwrap();
+                        self.move_item_stack_to(slot_index, j..=j, false)
+                    }
+                    _ if equip == Some(EquipmentSlot::Offhand) && empty(self, 45) => {
+                        self.move_item_stack_to(slot_index, 45..=45, false)
+                    }
+                    9..=35 => self.move_item_stack_to(slot_index, 36..=44, false),
+                    36..=44 => self.move_item_stack_to(slot_index, 9..=35, false),
+                    _ => self.move_item_stack_to(slot_index, 9..=44, false),
+                };
+            }
+            MenuLocation::Generic9x1(l) => match l {
+                Generic9x1MenuLocation::Player => {
+                    self.move_item_stack_to(slot_index, Menu::GENERIC9X1_CONTENTS_SLOTS, false);
                 }
                 _ => {
-                    // TODO: armor handling (see quickMoveStack in
-                    // InventoryMenu.java)
-
-                    // if slot.kind().is_armor() &&
-
-                    // also offhand handling
-
-                    if l == PlayerMenuLocation::Inventory {
-                        // shift-clicking in hotbar moves to inventory, and vice versa
-                        if Player::is_hotbar_slot(slot_index) {
-                            self.try_move_item_to_slots(
-                                slot_index,
-                                Player::INVENTORY_WITHOUT_HOTBAR_SLOTS,
-                            );
-                        } else {
-                            self.try_move_item_to_slots(slot_index, Player::HOTBAR_SLOTS);
-                        }
-                    } else {
-                        self.try_move_item_to_slots(slot_index, self.player_slots_range());
-                    }
-                }
-            },
-            MenuLocation::Generic9x1(l) => match l {
-                Generic9x1MenuLocation::Contents => {
-                    self.try_move_item_to_slots(slot_index, self.player_slots_range());
-                }
-                Generic9x1MenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::GENERIC9X1_CONTENTS_SLOTS,
-                    );
+                    let player = self.player_slots_range();
+                    self.move_item_stack_to(slot_index, player, true);
                 }
             },
             MenuLocation::Generic9x2(l) => match l {
-                Generic9x2MenuLocation::Contents => {
-                    self.try_move_item_to_slots(slot_index, self.player_slots_range());
-                }
                 Generic9x2MenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::GENERIC9X2_CONTENTS_SLOTS,
-                    );
+                    self.move_item_stack_to(slot_index, Menu::GENERIC9X2_CONTENTS_SLOTS, false);
+                }
+                _ => {
+                    let player = self.player_slots_range();
+                    self.move_item_stack_to(slot_index, player, true);
                 }
             },
             MenuLocation::Generic9x3(l) => match l {
-                Generic9x3MenuLocation::Contents => {
-                    self.try_move_item_to_slots(slot_index, self.player_slots_range());
-                }
                 Generic9x3MenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::GENERIC9X3_CONTENTS_SLOTS,
-                    );
+                    self.move_item_stack_to(slot_index, Menu::GENERIC9X3_CONTENTS_SLOTS, false);
+                }
+                _ => {
+                    let player = self.player_slots_range();
+                    self.move_item_stack_to(slot_index, player, true);
                 }
             },
             MenuLocation::Generic9x4(l) => match l {
-                Generic9x4MenuLocation::Contents => {
-                    self.try_move_item_to_slots(slot_index, self.player_slots_range());
-                }
                 Generic9x4MenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::GENERIC9X4_CONTENTS_SLOTS,
-                    );
+                    self.move_item_stack_to(slot_index, Menu::GENERIC9X4_CONTENTS_SLOTS, false);
+                }
+                _ => {
+                    let player = self.player_slots_range();
+                    self.move_item_stack_to(slot_index, player, true);
                 }
             },
             MenuLocation::Generic9x5(l) => match l {
-                Generic9x5MenuLocation::Contents => {
-                    self.try_move_item_to_slots(slot_index, self.player_slots_range());
-                }
                 Generic9x5MenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::GENERIC9X5_CONTENTS_SLOTS,
-                    );
+                    self.move_item_stack_to(slot_index, Menu::GENERIC9X5_CONTENTS_SLOTS, false);
+                }
+                _ => {
+                    let player = self.player_slots_range();
+                    self.move_item_stack_to(slot_index, player, true);
                 }
             },
             MenuLocation::Generic9x6(l) => match l {
-                Generic9x6MenuLocation::Contents => {
-                    self.try_move_item_to_slots(slot_index, self.player_slots_range());
-                }
                 Generic9x6MenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::GENERIC9X6_CONTENTS_SLOTS,
-                    );
+                    self.move_item_stack_to(slot_index, Menu::GENERIC9X6_CONTENTS_SLOTS, false);
+                }
+                _ => {
+                    let player = self.player_slots_range();
+                    self.move_item_stack_to(slot_index, player, true);
                 }
             },
             MenuLocation::Generic3x3(l) => match l {
-                Generic3x3MenuLocation::Contents => {
-                    self.try_move_item_to_slots(slot_index, self.player_slots_range());
-                }
                 Generic3x3MenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::GENERIC3X3_CONTENTS_SLOTS,
-                    );
+                    self.move_item_stack_to(slot_index, Menu::GENERIC3X3_CONTENTS_SLOTS, false);
+                }
+                _ => {
+                    let player = self.player_slots_range();
+                    self.move_item_stack_to(slot_index, player, true);
                 }
             },
             MenuLocation::Crafter3x3(l) => match l {
-                Crafter3x3MenuLocation::Contents => {
-                    self.try_move_item_to_slots(slot_index, self.player_slots_range());
-                }
                 Crafter3x3MenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::GENERIC3X3_CONTENTS_SLOTS,
-                    );
+                    self.move_item_stack_to(slot_index, Menu::GENERIC3X3_CONTENTS_SLOTS, false);
+                }
+                _ => {
+                    let player = self.player_slots_range();
+                    self.move_item_stack_to(slot_index, player, true);
                 }
             },
             MenuLocation::Anvil(l) => match l {
@@ -495,13 +477,11 @@ impl Menu {
             },
             MenuLocation::Hopper(l) => match l {
                 HopperMenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::HOPPER_CONTENTS_SLOTS,
-                    );
+                    self.move_item_stack_to(slot_index, Menu::HOPPER_CONTENTS_SLOTS, false);
                 }
                 _ => {
-                    self.try_move_item_to_slots(slot_index, self.player_slots_range());
+                    let player = self.player_slots_range();
+                    self.move_item_stack_to(slot_index, player, true);
                 }
             },
             MenuLocation::Lectern(l) => match l {
@@ -539,13 +519,11 @@ impl Menu {
             },
             MenuLocation::ShulkerBox(l) => match l {
                 ShulkerBoxMenuLocation::Player => {
-                    self.try_move_item_to_slots_or_toggle_hotbar(
-                        slot_index,
-                        Menu::SHULKER_BOX_CONTENTS_SLOTS,
-                    );
+                    self.move_item_stack_to(slot_index, Menu::SHULKER_BOX_CONTENTS_SLOTS, false);
                 }
                 _ => {
-                    self.try_move_item_to_slots(slot_index, self.player_slots_range());
+                    let player = self.player_slots_range();
+                    self.move_item_stack_to(slot_index, player, true);
                 }
             },
             MenuLocation::Smithing(l) => match l {
@@ -614,11 +592,24 @@ impl Menu {
         }
     }
 
-    /// Whether the given item could be placed in this menu.
+    /// Whether the given item could be placed in this slot.
     ///
-    /// TODO: right now this always returns true
-    pub fn may_place(&self, _target_slot_index: usize, _item: &ItemStackData) -> bool {
-        true
+    /// Null fork: result slots take nothing and armour slots only matching armour (vanilla
+    /// `ResultSlot#mayPlace`, `ArmorSlot#mayPlace`); other slots still return true.
+    pub fn may_place(&self, target_slot_index: usize, item: &ItemStackData) -> bool {
+        match self {
+            Menu::Player(_) => match target_slot_index {
+                0 => false,
+                5..=8 => {
+                    let want = [EquipmentSlot::Head, EquipmentSlot::Chest, EquipmentSlot::Legs, EquipmentSlot::Feet]
+                        [target_slot_index - 5];
+                    item.get_component::<Equippable>().is_some_and(|e| e.slot == want)
+                }
+                _ => true,
+            },
+            Menu::Crafting { .. } => target_slot_index != 0,
+            _ => true,
+        }
     }
 
     /// Whether the item in the given slot could be clicked and picked up.
@@ -641,8 +632,67 @@ impl Menu {
     }
 
     /// Get the maximum number of items that can be placed in this slot.
-    pub fn max_stack_size(&self, _target_slot_index: usize) -> i32 {
-        64
+    ///
+    /// Null fork: vanilla containers allow 99 (`Container#getMaxStackSize`) and armour slots 1;
+    /// the item's own limit applies on top (see [`Self::max_stack_size_for`]).
+    pub fn max_stack_size(&self, target_slot_index: usize) -> i32 {
+        match self {
+            Menu::Player(_) if (5..=8).contains(&target_slot_index) => 1,
+            _ => 99,
+        }
+    }
+
+    /// Vanilla `Slot#getMaxStackSize(ItemStack)`: the slot's limit and the item's.
+    pub fn max_stack_size_for(&self, target_slot_index: usize, item: &ItemStackData) -> i32 {
+        self.max_stack_size(target_slot_index).min(item.max_stack_size())
+    }
+
+    // Null fork: vanilla `AbstractContainerMenu#moveItemStackTo`. Merge into matching stacks,
+    // then put the rest in the first empty slot that takes it; `reverse` walks the range backwards.
+    fn move_item_stack_to(&mut self, from: usize, range: RangeInclusive<usize>, reverse: bool) -> bool {
+        let Some(ItemStack::Present(mut item)) = self.slot(from).cloned() else {
+            return false;
+        };
+        let order: Vec<usize> = if reverse { range.rev().collect() } else { range.collect() };
+        let mut moved = false;
+        if item.max_stack_size() > 1 {
+            for &i in &order {
+                if item.count <= 0 {
+                    break;
+                }
+                let max = match self.slot(i) {
+                    Some(ItemStack::Present(t)) if i != from && t.is_same_item_and_components(&item) => {
+                        self.max_stack_size_for(i, t)
+                    }
+                    _ => continue,
+                };
+                let ItemStack::Present(target) = self.slot_mut(i).unwrap() else { unreachable!() };
+                if target.count + item.count <= max {
+                    target.count += item.count;
+                    item.count = 0;
+                    moved = true;
+                } else if target.count < max {
+                    item.count -= max - target.count;
+                    target.count = max;
+                    moved = true;
+                }
+            }
+        }
+        if item.count > 0 {
+            for &i in &order {
+                if self.slot(i).is_some_and(|s| s.is_empty()) && self.may_place(i, &item) {
+                    let n = item.count.min(self.max_stack_size_for(i, &item));
+                    let mut part = item.clone();
+                    part.count = n;
+                    *self.slot_mut(i).unwrap() = ItemStack::Present(part);
+                    item.count -= n;
+                    moved = true;
+                    break;
+                }
+            }
+        }
+        *self.slot_mut(from).unwrap() = if item.count > 0 { ItemStack::Present(item) } else { ItemStack::Empty };
+        moved
     }
 
     /// Try moving an item to a set of slots in this menu.

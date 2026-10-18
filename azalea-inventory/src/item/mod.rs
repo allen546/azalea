@@ -26,3 +26,11 @@ impl MaxStackSizeExt for ItemKind {
         get_default_component::<MaxStackSize>(*self).map_or(64, |s| s.count)
     }
 }
+
+/// Null fork: an item's own `max_stack_size` wins over its kind's, as vanilla
+/// `ItemStack#getMaxStackSize` reads the component.
+impl MaxStackSizeExt for crate::ItemStackData {
+    fn max_stack_size(&self) -> i32 {
+        self.get_component::<MaxStackSize>().map_or(64, |s| s.count)
+    }
+}

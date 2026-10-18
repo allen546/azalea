@@ -38,7 +38,7 @@ use crate::{
     cookies::{RequestCookieEvent, StoreCookieEvent},
     disconnect::DisconnectEvent,
     interact::BlockStatePredictionHandler,
-    inventory::{ClientsideCloseContainerEvent, MenuOpenedEvent, SetContainerContentEvent},
+    inventory::{ClickResults, ClientsideCloseContainerEvent, MenuOpenedEvent, SetContainerContentEvent},
     local_player::{Experience, Hunger, LocalGameMode, TabList, WorldHolder},
     movement::{KnockbackData, KnockbackEvent},
     packet::{
@@ -389,8 +389,17 @@ impl GamePacketHandler<'_> {
         });
     }
 
+    // Null fork: vanilla `ClientPacketListener#handleSetCursorItem` sets the carried item.
     pub fn set_cursor_item(&mut self, p: &ClientboundSetCursorItem) {
         debug!("Got set cursor item packet {p:?}");
+
+        as_system::<Query<(&mut Inventory, Option<&mut ClickResults>)>>(self.ecs, |mut query| {
+            let (mut inventory, results) = query.get_mut(self.player).unwrap();
+            inventory.carried = p.contents.clone();
+            if let Some(mut r) = results {
+                r.note_server_update(Some(-1));
+            }
+        });
     }
 
     pub fn update_tags(&mut self, p: &ClientboundUpdateTags) {
@@ -1152,28 +1161,42 @@ impl GamePacketHandler<'_> {
 
     pub fn command_suggestions(&mut self, _p: &ClientboundCommandSuggestions) {}
 
+    // Null fork: vanilla `ClientPacketListener#handleContainerContent` also takes the state id
+    // and the cursor (`AbstractContainerMenu#initializeContents`).
     pub fn container_set_content(&mut self, p: &ClientboundContainerSetContent) {
         debug!("Got container set content packet {p:?}");
 
-        as_system::<(Commands, Query<&mut Inventory>)>(self.ecs, |(mut commands, mut query)| {
-            let mut inventory = query.get_mut(self.player).unwrap();
+        as_system::<(Commands, Query<(&mut Inventory, Option<&mut ClickResults>)>)>(
+            self.ecs,
+            |(mut commands, mut query)| {
+                let (mut inventory, results) = query.get_mut(self.player).unwrap();
 
-            // container id 0 is always the player's inventory
-            if p.container_id == 0 {
-                // this is just so it has the same type as the `else` block
-                for (i, slot) in p.items.iter().enumerate() {
-                    if let Some(slot_mut) = inventory.inventory_menu.slot_mut(i) {
-                        *slot_mut = slot.clone();
+                if p.container_id == 0 {
+                    for (i, slot) in p.items.iter().enumerate() {
+                        if let Some(slot_mut) = inventory.inventory_menu.slot_mut(i) {
+                            *slot_mut = slot.clone();
+                        }
                     }
+                    if inventory.id == 0 {
+                        inventory.state_id = p.state_id;
+                        inventory.carried = p.carried_item.clone();
+                    }
+                } else if p.container_id == inventory.id {
+                    inventory.state_id = p.state_id;
+                    inventory.carried = p.carried_item.clone();
+                    commands.trigger(SetContainerContentEvent {
+                        entity: self.player,
+                        slots: p.items.clone(),
+                        container_id: p.container_id,
+                    });
                 }
-            } else {
-                commands.trigger(SetContainerContentEvent {
-                    entity: self.player,
-                    slots: p.items.clone(),
-                    container_id: p.container_id,
-                });
-            }
-        });
+                if let Some(mut r) = results
+                    && r.last.as_ref().is_some_and(|l| l.window_id == p.container_id)
+                {
+                    r.note_server_update(None);
+                }
+            },
+        );
     }
 
     pub fn container_set_data(&mut self, p: &ClientboundContainerSetData) {
@@ -1189,38 +1212,40 @@ impl GamePacketHandler<'_> {
         // });
     }
 
+    // Null fork: vanilla 1.21.11 `ClientPacketListener#handleContainerSetSlot`. Window 0 always
+    // updates the player menu (with its state id), even with a container open; the cursor (-1)
+    // and the -2 window came out in 1.21.2 (`ClientboundSetCursorItem`, `SetPlayerInventory`).
     pub fn container_set_slot(&mut self, p: &ClientboundContainerSetSlot) {
         debug!("Got container set slot packet {p:?}");
 
-        as_system::<Query<&mut Inventory>>(self.ecs, |mut query| {
-            let mut inventory = query.get_mut(self.player).unwrap();
+        as_system::<Query<(&mut Inventory, Option<&mut ClickResults>)>>(self.ecs, |mut query| {
+            let (mut inventory, results) = query.get_mut(self.player).unwrap();
+            let slot = p.slot as usize;
 
-            if p.container_id == -1 {
-                // -1 means carried item
-                inventory.carried = p.item_stack.clone();
-            } else if p.container_id == -2 {
-                if let Some(slot) = inventory.inventory_menu.slot_mut(p.slot.into()) {
-                    *slot = p.item_stack.clone();
+            if p.container_id == 0 {
+                if let Some(slot_mut) = inventory.inventory_menu.slot_mut(slot) {
+                    *slot_mut = p.item_stack.clone();
                 }
-            } else {
-                let is_creative_mode_and_inventory_closed = false;
-                // technically minecraft has slightly different behavior here if you're in
-                // creative mode and have your inventory open
-                if p.container_id == 0 && azalea_inventory::Player::is_hotbar_slot(p.slot.into()) {
-                    // minecraft also sets a "pop time" here which is used for an animation
-                    // but that's not really necessary
-                    if let Some(slot) = inventory.inventory_menu.slot_mut(p.slot.into()) {
-                        *slot = p.item_stack.clone();
-                    }
-                } else if p.container_id == inventory.id
-                    && (p.container_id != 0 || !is_creative_mode_and_inventory_closed)
-                {
-                    // var2.containerMenu.setItem(var4, var1.getStateId(), var3);
-                    if let Some(slot) = inventory.menu_mut().slot_mut(p.slot.into()) {
-                        *slot = p.item_stack.clone();
-                        inventory.state_id = p.state_id;
+                if inventory.id == 0 {
+                    inventory.state_id = p.state_id;
+                } else if (9..=44).contains(&slot) {
+                    // the open container shows the same inventory slot
+                    let i = if slot >= 36 { slot - 36 } else { slot };
+                    if let Some(s) = inventory.player_slot_mut(i) {
+                        *s = p.item_stack.clone();
                     }
                 }
+            } else if p.container_id == inventory.id {
+                if let Some(slot_mut) = inventory.menu_mut().slot_mut(slot) {
+                    *slot_mut = p.item_stack.clone();
+                    inventory.state_id = p.state_id;
+                }
+                inventory.sync_player_slots_from_container();
+            }
+            if let Some(mut r) = results
+                && r.last.as_ref().is_some_and(|l| l.window_id == p.container_id)
+            {
+                r.note_server_update(Some(p.slot as i16));
             }
         });
     }
@@ -1638,7 +1663,27 @@ impl GamePacketHandler<'_> {
             }
         });
     }
-    pub fn set_player_inventory(&mut self, _p: &ClientboundSetPlayerInventory) {}
+    // Null fork: vanilla `ClientPacketListener#handleSetPlayerInventory` sets one slot in the
+    // player inventory's own numbering (0-8 hotbar, 9-35 main, 36-39 armour, 40 offhand).
+    pub fn set_player_inventory(&mut self, p: &ClientboundSetPlayerInventory) {
+        debug!("Got set player inventory packet {p:?}");
+
+        as_system::<Query<&mut Inventory>>(self.ecs, |mut query| {
+            let mut inventory = query.get_mut(self.player).unwrap();
+            let i = p.slot as usize;
+            if let Some(menu_index) = Inventory::player_menu_index(i)
+                && let Some(s) = inventory.inventory_menu.slot_mut(menu_index)
+            {
+                *s = p.contents.clone();
+            }
+            if inventory.container_menu.is_some()
+                && i <= 35
+                && let Some(s) = inventory.player_slot_mut(i)
+            {
+                *s = p.contents.clone();
+            }
+        });
+    }
     pub fn projectile_power(&mut self, _p: &ClientboundProjectilePower) {}
     pub fn custom_report_details(&mut self, _p: &ClientboundCustomReportDetails) {}
     pub fn server_links(&mut self, _p: &ClientboundServerLinks) {}

@@ -142,6 +142,8 @@ impl Client {
     pub fn open_inventory(&self) -> AzaleaResult<Option<ContainerHandle>> {
         let inventory = self.component::<Inventory>()?;
         Ok(if inventory.id == 0 {
+            // Null fork: open the screen first; clicks wait a tick after it (`OpenScreen`).
+            self.ecs.write().trigger(azalea_client::inventory::OpenInventoryEvent { entity: self.entity });
             Some(ContainerHandle::new(0, self.clone()))
         } else {
             None

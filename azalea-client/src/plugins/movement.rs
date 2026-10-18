@@ -57,7 +57,8 @@ impl Plugin for MovementPlugin {
             .add_systems(
                 GameTick,
                 (
-                    (tick_controls, local_player_ai_step, update_pose)
+                    // Null fork: a screen holds the bot still before input is read.
+                    (super::inventory::hold_still_while_screen_open, tick_controls, local_player_ai_step, update_pose)
                         .chain()
                         .in_set(PhysicsSystems)
                         .before(ai_step)
