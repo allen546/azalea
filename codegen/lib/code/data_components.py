@@ -428,7 +428,9 @@ use crate::{
                 return f"azalea_registry::Holder::Reference({inner_type})"
             elif target_rust_type == "Identifier":
                 # convert minecraft:air into Identifier::from_static("minecraft:air")
-                return f'"{python_value}".into()'
+                # A tag key's JSON form starts with '#'; its network form, which is what we
+                # compare against, does not.
+                return f'"{python_value.removeprefix("#")}".into()'
             elif target_rust_type == "DamageType":
                 # TODO: this is intentionally incorrect, see the comment in
                 # azalea-registry/src/data.rs to see how to fix this properly

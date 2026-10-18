@@ -2475,23 +2475,23 @@ impl DefaultableComponent for ProvidesTrimMaterial {
 impl DefaultableComponent for DamageResistant {
     fn default_for_item(item: ItemKind) -> Option<Self> {
         let value = match item {
-            ItemKind::AncientDebris => "#minecraft:is_fire".into(),
-            ItemKind::NetherStar => "#minecraft:is_explosion".into(),
-            ItemKind::NetheriteAxe => "#minecraft:is_fire".into(),
-            ItemKind::NetheriteBlock => "#minecraft:is_fire".into(),
-            ItemKind::NetheriteBoots => "#minecraft:is_fire".into(),
-            ItemKind::NetheriteChestplate => "#minecraft:is_fire".into(),
-            ItemKind::NetheriteHelmet => "#minecraft:is_fire".into(),
-            ItemKind::NetheriteHoe => "#minecraft:is_fire".into(),
-            ItemKind::NetheriteHorseArmor => "#minecraft:is_fire".into(),
-            ItemKind::NetheriteIngot => "#minecraft:is_fire".into(),
-            ItemKind::NetheriteLeggings => "#minecraft:is_fire".into(),
-            ItemKind::NetheriteNautilusArmor => "#minecraft:is_fire".into(),
-            ItemKind::NetheritePickaxe => "#minecraft:is_fire".into(),
-            ItemKind::NetheriteScrap => "#minecraft:is_fire".into(),
-            ItemKind::NetheriteShovel => "#minecraft:is_fire".into(),
-            ItemKind::NetheriteSpear => "#minecraft:is_fire".into(),
-            ItemKind::NetheriteSword => "#minecraft:is_fire".into(),
+            ItemKind::AncientDebris => "minecraft:is_fire".into(),
+            ItemKind::NetherStar => "minecraft:is_explosion".into(),
+            ItemKind::NetheriteAxe => "minecraft:is_fire".into(),
+            ItemKind::NetheriteBlock => "minecraft:is_fire".into(),
+            ItemKind::NetheriteBoots => "minecraft:is_fire".into(),
+            ItemKind::NetheriteChestplate => "minecraft:is_fire".into(),
+            ItemKind::NetheriteHelmet => "minecraft:is_fire".into(),
+            ItemKind::NetheriteHoe => "minecraft:is_fire".into(),
+            ItemKind::NetheriteHorseArmor => "minecraft:is_fire".into(),
+            ItemKind::NetheriteIngot => "minecraft:is_fire".into(),
+            ItemKind::NetheriteLeggings => "minecraft:is_fire".into(),
+            ItemKind::NetheriteNautilusArmor => "minecraft:is_fire".into(),
+            ItemKind::NetheritePickaxe => "minecraft:is_fire".into(),
+            ItemKind::NetheriteScrap => "minecraft:is_fire".into(),
+            ItemKind::NetheriteShovel => "minecraft:is_fire".into(),
+            ItemKind::NetheriteSpear => "minecraft:is_fire".into(),
+            ItemKind::NetheriteSword => "minecraft:is_fire".into(),
             _ => return None,
         };
         Some(DamageResistant { types: value })
@@ -4035,17 +4035,17 @@ impl DefaultableComponent for ProvidesBannerPatterns {
     fn default_for_item(item: ItemKind) -> Option<Self> {
         let value = match item {
             ItemKind::BordureIndentedBannerPattern => {
-                "#minecraft:pattern_item/bordure_indented".into()
+                "minecraft:pattern_item/bordure_indented".into()
             }
-            ItemKind::CreeperBannerPattern => "#minecraft:pattern_item/creeper".into(),
-            ItemKind::FieldMasonedBannerPattern => "#minecraft:pattern_item/field_masoned".into(),
-            ItemKind::FlowBannerPattern => "#minecraft:pattern_item/flow".into(),
-            ItemKind::FlowerBannerPattern => "#minecraft:pattern_item/flower".into(),
-            ItemKind::GlobeBannerPattern => "#minecraft:pattern_item/globe".into(),
-            ItemKind::GusterBannerPattern => "#minecraft:pattern_item/guster".into(),
-            ItemKind::MojangBannerPattern => "#minecraft:pattern_item/mojang".into(),
-            ItemKind::PiglinBannerPattern => "#minecraft:pattern_item/piglin".into(),
-            ItemKind::SkullBannerPattern => "#minecraft:pattern_item/skull".into(),
+            ItemKind::CreeperBannerPattern => "minecraft:pattern_item/creeper".into(),
+            ItemKind::FieldMasonedBannerPattern => "minecraft:pattern_item/field_masoned".into(),
+            ItemKind::FlowBannerPattern => "minecraft:pattern_item/flow".into(),
+            ItemKind::FlowerBannerPattern => "minecraft:pattern_item/flower".into(),
+            ItemKind::GlobeBannerPattern => "minecraft:pattern_item/globe".into(),
+            ItemKind::GusterBannerPattern => "minecraft:pattern_item/guster".into(),
+            ItemKind::MojangBannerPattern => "minecraft:pattern_item/mojang".into(),
+            ItemKind::PiglinBannerPattern => "minecraft:pattern_item/piglin".into(),
+            ItemKind::SkullBannerPattern => "minecraft:pattern_item/skull".into(),
             _ => return None,
         };
         Some(ProvidesBannerPatterns { key: value })
@@ -6373,7 +6373,7 @@ impl DefaultableComponent for BlocksAttacks {
                 block_sound: Some(azalea_registry::Holder::Reference(
                     SoundEvent::ItemShieldBlock,
                 )),
-                bypassed_by: Some("#minecraft:bypasses_shield".into()),
+                bypassed_by: Some("minecraft:bypasses_shield".into()),
                 disabled_sound: Some(azalea_registry::Holder::Reference(
                     SoundEvent::ItemShieldBreak,
                 )),

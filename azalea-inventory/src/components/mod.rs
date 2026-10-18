@@ -1050,7 +1050,7 @@ pub struct ItemModel {
 
 #[derive(AzBuf, Clone, Debug, PartialEq, Serialize)]
 pub struct DamageResistant {
-    /// In vanilla this only allows tag keys, i.e. it must start with '#'
+    /// A damage type tag key, without the '#' its JSON form has (the network form).
     pub types: Identifier,
 }
 
