@@ -393,8 +393,9 @@ impl GamePacketHandler<'_> {
         debug!("Got set cursor item packet {p:?}");
     }
 
-    pub fn update_tags(&mut self, _p: &ClientboundUpdateTags) {
+    pub fn update_tags(&mut self, p: &ClientboundUpdateTags) {
         debug!("Got update tags packet");
+        crate::tags::handle_update_tags(self.ecs, self.player, &p.tags);
     }
 
     pub fn disconnect(&mut self, p: &ClientboundDisconnect) {

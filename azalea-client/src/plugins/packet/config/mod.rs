@@ -174,8 +174,9 @@ impl ConfigPacketHandler<'_> {
         debug!("Got update enabled features packet {p:?}");
     }
 
-    pub fn update_tags(&mut self, _p: &ClientboundUpdateTags) {
+    pub fn update_tags(&mut self, p: &ClientboundUpdateTags) {
         debug!("Got update tags packet");
+        crate::tags::handle_update_tags(self.ecs, self.player, &p.tags);
     }
 
     pub fn cookie_request(&mut self, p: &ClientboundCookieRequest) {
