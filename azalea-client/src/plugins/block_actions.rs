@@ -40,6 +40,8 @@ use azalea_registry::{
     tags,
 };
 use azalea_world::ChunkStorage;
+use std::collections::VecDeque;
+
 use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::*;
 
@@ -139,7 +141,7 @@ pub fn refuse_block_actions_while_dead(
             results.next_id += 1;
             let result = refused(results.next_id, q.position);
             finished.write(BlockActionFinished { entity, is_break: true, result });
-            results.last_break = Some(result);
+            results.set_break(result);
             log.refuse(DeadAction::BreakBlock);
             commands.entity(entity).remove::<BreakBlockQueued>();
         }
@@ -147,13 +149,13 @@ pub fn refuse_block_actions_while_dead(
             results.next_id += 1;
             let result = refused(results.next_id, q.position.offset_with_direction(q.direction));
             finished.write(BlockActionFinished { entity, is_break: false, result });
-            results.last_place = Some(result);
+            results.set_place(result);
             log.refuse(DeadAction::PlaceBlock);
             commands.entity(entity).remove::<PlaceBlockQueued>();
         }
         if let Some(q) = use_q {
             results.next_id += 1;
-            results.last_use = Some(UseBlockResult {
+            let refused_use = UseBlockResult {
                 id: results.next_id,
                 position: q.position,
                 outcome: UseBlockOutcome::Refused,
@@ -162,7 +164,8 @@ pub fn refuse_block_actions_while_dead(
                 elapsed_ticks: 0,
                 open_ticks: None,
                 ack_tick: None,
-            });
+            };
+            results.set_use(refused_use);
             log.refuse(DeadAction::UseBlock);
             commands.entity(entity).remove::<UseBlockQueued>();
         }
@@ -260,7 +263,88 @@ pub struct BlockActionResults {
     pub last_place: Option<BlockActionResult>,
     pub last_break: Option<BlockActionResult>,
     pub last_use: Option<UseBlockResult>,
+    /// Earlier results a newer action of the same kind replaced in `last_*`, oldest first. Those
+    /// still pending are settled by the cumulative ack like any other (patch 25); read any of them
+    /// by id with [`Self::block_result`] and [`Self::use_result`].
+    older_blocks: VecDeque<(bool, BlockActionResult)>,
+    older_uses: VecDeque<UseBlockResult>,
     next_id: u32,
+}
+
+/// How many replaced results are kept for reading by id. A result lives at most 60 ticks pending,
+/// so this is far more than a reader that looks every tick can miss.
+const OLDER_KEPT: usize = 256;
+
+impl BlockActionResults {
+    // Spec: specs/B6-placement-breaking.md §4.6 (the result of every action by id)
+    /// The result of the place or break with this id: the latest of its kind or an older one.
+    pub fn block_result(&self, id: u32) -> Option<BlockActionResult> {
+        [self.last_place, self.last_break]
+            .into_iter()
+            .flatten()
+            .chain(self.older_blocks.iter().map(|(_, r)| *r))
+            .find(|r| r.id == id)
+    }
+
+    /// The result of the block use with this id.
+    pub fn use_result(&self, id: u32) -> Option<UseBlockResult> {
+        self.last_use.into_iter().chain(self.older_uses.iter().copied()).find(|r| r.id == id)
+    }
+
+    /// Every place (`is_break` false) or break result with an id above `after`, oldest first. A
+    /// reader that polls each tick keeps the highest id it saw and never misses one, even when
+    /// several actions of a kind came between two polls.
+    pub fn blocks_after(&self, is_break: bool, after: u32) -> Vec<BlockActionResult> {
+        let last = if is_break { self.last_break } else { self.last_place };
+        let mut v: Vec<_> = self
+            .older_blocks
+            .iter()
+            .filter(|(b, _)| *b == is_break)
+            .map(|(_, r)| *r)
+            .chain(last)
+            .filter(|r| r.id > after)
+            .collect();
+        v.sort_by_key(|r| r.id);
+        v
+    }
+
+    /// Every block-use result with an id above `after`, oldest first.
+    pub fn uses_after(&self, after: u32) -> Vec<UseBlockResult> {
+        self.older_uses.iter().copied().chain(self.last_use).filter(|r| r.id > after).collect()
+    }
+
+    // Spec: specs/B6-placement-breaking.md §4.6 (keep a replaced result, settle it by sequence)
+    fn set_place(&mut self, r: BlockActionResult) {
+        if let Some(old) = self.last_place.replace(r) {
+            self.keep_older(false, old);
+        }
+    }
+
+    fn set_break(&mut self, r: BlockActionResult) {
+        if let Some(old) = self.last_break.replace(r) {
+            self.keep_older(true, old);
+        }
+    }
+
+    fn set_use(&mut self, r: UseBlockResult) {
+        if let Some(old) = self.last_use.replace(r) {
+            self.older_uses.push_back(old);
+            if self.older_uses.len() > OLDER_KEPT {
+                self.older_uses.pop_front();
+            }
+        }
+    }
+
+    fn keep_older(&mut self, is_break: bool, mut old: BlockActionResult) {
+        // Not sent yet: nothing will ever settle it.
+        if old.outcome == BlockActionOutcome::Pending && old.seq.is_none() {
+            old.outcome = BlockActionOutcome::Cancelled;
+        }
+        self.older_blocks.push_back((is_break, old));
+        if self.older_blocks.len() > OLDER_KEPT {
+            self.older_blocks.pop_front();
+        }
+    }
 }
 
 // Spec: specs/B6-placement-breaking.md §4.6 (acknowledgement and readback)
@@ -610,7 +694,7 @@ pub fn handle_place_block_queued(
                 before: clicked,
             };
             finished.write(BlockActionFinished { entity, is_break: false, result });
-            results.last_place = Some(result);
+            results.set_place(result);
             continue;
         }
         commands.entity(entity).remove::<PlaceBlockQueued>();
@@ -669,7 +753,7 @@ pub fn handle_place_block_queued(
                 commands.trigger(SwingArmEvent { entity });
             }
         }
-        results.last_place = Some(result);
+        results.set_place(result);
     }
 }
 
@@ -789,39 +873,9 @@ pub fn handle_use_block_queued(
                 commands.trigger(SwingArmEvent { entity });
             }
         }
-        results.last_use = Some(result);
+        results.set_use(result);
     }
 }
-
-// Spec: specs/B3-inventory-crafting.md §4.7 (a screen opening, or not, after a use)
-/// Settles a pending use: opened when the server's open-screen arrives; no screen when the ack is
-/// in and a few ticks passed without one (or the ack never came).
-pub fn settle_use_blocks(
-    mut query: Query<(&mut BlockActionResults, &BlockStatePredictionHandler, &Inventory, Option<&OpenScreen>)>,
-) {
-    /// The open-screen packet follows the use within the server tick that handled it; this many
-    /// ticks after the ack is ample.
-    const GRACE_TICKS: u32 = 4;
-    for (mut results, prediction, inv, screen) in &mut query {
-        let Some(r) = results.last_use.as_mut().filter(|r| r.outcome == UseBlockOutcome::Pending)
-        else {
-            continue;
-        };
-        r.elapsed_ticks += 1;
-        if let (Some(kind), true) = (screen.and_then(|s| s.kind), inv.id != 0) {
-            r.outcome = UseBlockOutcome::Opened { window_id: inv.id, menu: kind };
-            r.open_ticks = Some(r.elapsed_ticks);
-            continue;
-        }
-        if r.seq.is_some_and(|s| prediction.acked_seq() >= s) && r.ack_tick.is_none() {
-            r.ack_tick = Some(r.elapsed_ticks);
-        }
-        if r.ack_tick.is_some_and(|a| r.elapsed_ticks >= a + GRACE_TICKS) || r.elapsed_ticks > ACK_TIMEOUT_TICKS {
-            r.outcome = UseBlockOutcome::NoScreen;
-        }
-    }
-}
-
 // Spec: specs/B6-placement-breaking.md §4.4 (break: refused clicks and game modes, result opened here)
 /// Opens a break result when mining is queued on a block (not again for the block already being
 /// mined). A block we could not click as a vanilla client, or may not break in this game mode, is
@@ -885,7 +939,7 @@ pub fn begin_break_result(
             commands.entity(entity).remove::<MiningQueued>();
             finished.write(BlockActionFinished { entity, is_break: true, result });
         }
-        results.last_break = Some(result);
+        results.set_break(result);
     }
 }
 
@@ -893,10 +947,12 @@ pub fn begin_break_result(
 /// The finishing packet of a break went out: remember its sequence number.
 pub fn record_break_sent(sent: On<BlockBreakSent>, mut query: Query<&mut BlockActionResults>) {
     let Ok(mut results) = query.get_mut(sent.entity) else { return };
-    if let Some(b) = results.last_break.as_mut()
-        && b.outcome == BlockActionOutcome::Pending
-        && b.position == sent.position
-    {
+    let results = &mut *results;
+    // The break whose finishing packet this is: pending, not sent yet, at that block.
+    let unsent = |b: &BlockActionResult| {
+        b.outcome == BlockActionOutcome::Pending && b.seq.is_none() && b.position == sent.position
+    };
+    if let Some(b) = results.last_break.as_mut().filter(|b| unsent(b)) {
         b.seq = Some(sent.seq);
         b.finish_ticks = Some(b.elapsed_ticks);
         // the timeout counts from here
@@ -936,7 +992,75 @@ pub fn handle_stop_mining_queued(
 }
 
 // Spec: specs/B6-placement-breaking.md §4.6 (settle from the ack and the block left behind)
-/// Counts ticks and settles pending actions from the ack and the block the server left behind.
+/// One tick for a pending place or break that has been sent: counts, and settles it when the ack
+/// covers its sequence number (vanilla `BlockStatePredictionHandler#endPredictionsUpTo` settles
+/// every prediction up to the acked number at once) or the timeout passed. True when it settled.
+fn settle_sent_block(
+    r: &mut BlockActionResult,
+    acked_seq: u32,
+    block_at: &dyn Fn(BlockPos) -> BlockState,
+) -> bool {
+    let Some(seq) = r.seq else { return false };
+    r.elapsed_ticks += 1;
+    let acked = acked_seq >= seq;
+    if acked && r.ack_ticks.is_none() {
+        r.ack_ticks = Some(r.elapsed_ticks);
+    }
+    if !(acked || r.elapsed_ticks > ACK_TIMEOUT_TICKS) {
+        return false;
+    }
+    r.outcome = if block_at(r.position) != r.before {
+        BlockActionOutcome::Accepted
+    } else {
+        // a timeout is not the server saying no
+        if !acked {
+            r.refusal = Some(BlockActionRefusal::NoAck);
+        }
+        BlockActionOutcome::Refused
+    };
+    true
+}
+
+impl BlockActionResults {
+    // Spec: specs/B6-placement-breaking.md §4.6 (settle from the ack and the block left behind)
+    /// One tick: counts and settles every pending place and break, the latest of each kind and
+    /// each older one in flight, from the cumulative ack. `mining`: mining is under way or queued
+    /// (a break that sent nothing and is not mining was aborted). Returns what settled now.
+    fn settle(
+        &mut self,
+        acked_seq: u32,
+        mining: bool,
+        block_at: &dyn Fn(BlockPos) -> BlockState,
+    ) -> Vec<(bool, BlockActionResult)> {
+        let mut done = Vec::new();
+        // Older results first: they were sent first.
+        for (is_break, r) in self.older_blocks.iter_mut() {
+            if r.outcome == BlockActionOutcome::Pending && settle_sent_block(r, acked_seq, block_at) {
+                done.push((*is_break, *r));
+            }
+        }
+        for (is_break, slot) in [(false, &mut self.last_place), (true, &mut self.last_break)] {
+            let Some(r) = slot.as_mut().filter(|r| r.outcome == BlockActionOutcome::Pending) else {
+                continue;
+            };
+            if r.seq.is_none() {
+                r.elapsed_ticks += 1;
+                // A break whose mining ended without a finishing packet was aborted (we looked
+                // away, the block changed under us).
+                if is_break && !mining {
+                    r.outcome = BlockActionOutcome::Cancelled;
+                    done.push((is_break, *r));
+                }
+            } else if settle_sent_block(r, acked_seq, block_at) {
+                done.push((is_break, *r));
+            }
+        }
+        done
+    }
+}
+
+// Spec: specs/B6-placement-breaking.md §4.6 (settle from the ack and the block left behind)
+/// Settles pending places and breaks every tick (see [`BlockActionResults::settle`]).
 pub fn settle_block_actions(
     mut query: Query<(
         Entity,
@@ -949,37 +1073,65 @@ pub fn settle_block_actions(
     mut finished: MessageWriter<BlockActionFinished>,
 ) {
     for (entity, mut results, prediction, world, mining, queued) in &mut query {
+        let block_at = |p: BlockPos| world.shared.read().get_block_state(p).unwrap_or_default();
+        for (is_break, result) in results.settle(prediction.acked_seq(), mining || queued, &block_at) {
+            finished.write(BlockActionFinished { entity, is_break, result });
+        }
+    }
+}
+
+/// One tick for a pending block use: opened, or no screen once the ack and a grace passed.
+/// `may_open`: the open screen (if any) belongs to this use, the oldest one in flight.
+fn settle_one_use(
+    r: &mut UseBlockResult,
+    acked_seq: u32,
+    open: Option<(i32, MenuKind)>,
+    may_open: bool,
+) -> bool {
+    /// The open-screen packet follows the use within the server tick that handled it; this many
+    /// ticks after the ack is ample.
+    const GRACE_TICKS: u32 = 4;
+    if r.outcome != UseBlockOutcome::Pending || r.seq.is_none() {
+        return false;
+    }
+    r.elapsed_ticks += 1;
+    if let (Some((window_id, menu)), true) = (open, may_open) {
+        r.outcome = UseBlockOutcome::Opened { window_id, menu };
+        r.open_ticks = Some(r.elapsed_ticks);
+        return true;
+    }
+    if r.seq.is_some_and(|s| acked_seq >= s) && r.ack_tick.is_none() {
+        r.ack_tick = Some(r.elapsed_ticks);
+    }
+    if r.ack_tick.is_some_and(|a| r.elapsed_ticks >= a + GRACE_TICKS) || r.elapsed_ticks > ACK_TIMEOUT_TICKS {
+        r.outcome = UseBlockOutcome::NoScreen;
+        return true;
+    }
+    false
+}
+
+// Spec: specs/B3-inventory-crafting.md §4.7 (a screen opening, or not, after a use)
+/// Settles pending uses: opened when the server's open-screen arrives (the server handles uses in
+/// order, so the oldest one in flight gets it); no screen when the ack is in and a few ticks
+/// passed without one (or the ack never came).
+pub fn settle_use_blocks(
+    mut query: Query<(&mut BlockActionResults, &BlockStatePredictionHandler, &Inventory, Option<&OpenScreen>)>,
+) {
+    for (mut results, prediction, inv, screen) in &mut query {
         let results = &mut *results;
-        for (is_break, slot) in [(false, &mut results.last_place), (true, &mut results.last_break)] {
-            let Some(r) = slot.as_mut().filter(|r| r.outcome == BlockActionOutcome::Pending) else {
-                continue;
-            };
-            r.elapsed_ticks += 1;
-            let Some(seq) = r.seq else {
-                // A break whose mining ended without a finishing packet was aborted (we looked
-                // away, the block changed under us).
-                if is_break && !mining && !queued {
-                    r.outcome = BlockActionOutcome::Cancelled;
-                    finished.write(BlockActionFinished { entity, is_break, result: *r });
-                }
-                continue;
-            };
-            let acked = prediction.acked_seq() >= seq;
-            if acked && r.ack_ticks.is_none() {
-                r.ack_ticks = Some(r.elapsed_ticks);
-            }
-            if acked || r.elapsed_ticks > ACK_TIMEOUT_TICKS {
-                let now = world.shared.read().get_block_state(r.position).unwrap_or_default();
-                r.outcome = if now != r.before {
-                    BlockActionOutcome::Accepted
-                } else {
-                    // a timeout is not the server saying no
-                    if !acked {
-                        r.refusal = Some(BlockActionRefusal::NoAck);
-                    }
-                    BlockActionOutcome::Refused
-                };
-                finished.write(BlockActionFinished { entity, is_break, result: *r });
+        let acked = prediction.acked_seq();
+        let open = match (screen.and_then(|s| s.kind), inv.id != 0) {
+            (Some(kind), true) => Some((inv.id, kind)),
+            _ => None,
+        };
+        let mut may_open = true;
+        let pending = |r: &UseBlockResult| r.outcome == UseBlockOutcome::Pending && r.seq.is_some();
+        for r in results.older_uses.iter_mut().chain(results.last_use.as_mut()) {
+            let was = pending(r);
+            settle_one_use(r, acked, open, may_open);
+            // Only the first use that was in flight takes the screen.
+            if was && open.is_some() {
+                may_open = false;
             }
         }
     }
@@ -1028,5 +1180,132 @@ mod tests {
         assert!(!click_replaces(slab(properties::SlabKind::Double), "minecraft:oak_slab", Direction::Up, 0.5));
         assert!(click_replaces(BlockState::from(BlockKind::ShortGrass), "minecraft:stone", Direction::Up, 0.5));
         assert!(!click_replaces(BlockState::from(BlockKind::ShortGrass), "minecraft:short_grass", Direction::Up, 0.5));
+    }
+
+    fn sent(results: &mut BlockActionResults, is_break: bool, seq: u32, x: i32) -> u32 {
+        results.next_id += 1;
+        let r = BlockActionResult {
+            id: results.next_id,
+            position: BlockPos::new(x, 64, 0),
+            outcome: BlockActionOutcome::Pending,
+            refusal: None,
+            seq: Some(seq),
+            finish_ticks: None,
+            ack_ticks: None,
+            elapsed_ticks: 0,
+            before: BlockState::from(BlockKind::Netherrack),
+        };
+        if is_break { results.set_break(r) } else { results.set_place(r) }
+        r.id
+    }
+
+    fn outcome(results: &BlockActionResults, id: u32) -> BlockActionOutcome {
+        results.block_result(id).unwrap().outcome
+    }
+
+    #[test]
+    fn one_ack_settles_every_older_in_flight_break() {
+        let air = |_: BlockPos| BlockState::AIR;
+        let mut results = BlockActionResults::default();
+        // Three instant breaks on consecutive ticks, none acked: each replaces the last record.
+        let ids: Vec<u32> = (1..=3).map(|n| sent(&mut results, true, n, n as i32)).collect();
+        assert!(results.settle(0, false, &air).is_empty());
+        assert!(ids.iter().all(|&i| outcome(&results, i) == BlockActionOutcome::Pending));
+        // The ack for 2 settles the first two at once; the third stays pending.
+        let done = results.settle(2, false, &air);
+        assert_eq!(done.len(), 2);
+        assert_eq!(outcome(&results, ids[0]), BlockActionOutcome::Accepted);
+        assert_eq!(outcome(&results, ids[1]), BlockActionOutcome::Accepted);
+        assert_eq!(outcome(&results, ids[2]), BlockActionOutcome::Pending);
+        // A repeated ack, and an older ack arriving late (the handler keeps the maximum), change nothing.
+        assert!(results.settle(2, false, &air).is_empty());
+        assert!(results.settle(2, false, &air).is_empty());
+        assert_eq!(outcome(&results, ids[2]), BlockActionOutcome::Pending);
+        // Ack 3 settles the last.
+        assert_eq!(results.settle(3, false, &air).len(), 1);
+        assert_eq!(outcome(&results, ids[2]), BlockActionOutcome::Accepted);
+        assert_eq!(results.last_break.unwrap().id, ids[2]);
+    }
+
+    #[test]
+    fn a_cumulative_ack_covers_places_and_breaks_together_and_judges_each_block() {
+        // Place at x=1 stays unchanged (server refused), break at x=2 changes.
+        let world = |p: BlockPos| {
+            if p.x == 2 { BlockState::AIR } else { BlockState::from(BlockKind::Netherrack) }
+        };
+        let mut results = BlockActionResults::default();
+        let p1 = sent(&mut results, false, 1, 1);
+        let b = sent(&mut results, true, 2, 2);
+        let p2 = sent(&mut results, false, 3, 3);
+        // A single ack for 3 arrives (acks can skip numbers).
+        assert_eq!(results.settle(3, false, &world).len(), 3);
+        assert_eq!(outcome(&results, p1), BlockActionOutcome::Refused);
+        assert_eq!(results.block_result(p1).unwrap().refusal, None);
+        assert_eq!(outcome(&results, b), BlockActionOutcome::Accepted);
+        assert_eq!(outcome(&results, p2), BlockActionOutcome::Refused);
+    }
+
+    #[test]
+    fn a_replaced_in_flight_result_times_out_without_an_ack() {
+        let same = |_: BlockPos| BlockState::from(BlockKind::Netherrack);
+        let mut results = BlockActionResults::default();
+        let a = sent(&mut results, false, 1, 1);
+        let _b = sent(&mut results, false, 2, 2);
+        for _ in 0..=ACK_TIMEOUT_TICKS {
+            results.settle(0, false, &same);
+        }
+        let r = results.block_result(a).unwrap();
+        assert_eq!(r.outcome, BlockActionOutcome::Refused);
+        assert_eq!(r.refusal, Some(BlockActionRefusal::NoAck));
+    }
+
+    #[test]
+    fn a_break_replaced_before_it_sent_is_cancelled() {
+        let same = |_: BlockPos| BlockState::from(BlockKind::Netherrack);
+        let mut results = BlockActionResults::default();
+        results.next_id += 1;
+        let unsent = BlockActionResult {
+            id: results.next_id,
+            position: BlockPos::new(0, 64, 0),
+            outcome: BlockActionOutcome::Pending,
+            refusal: None,
+            seq: None,
+            finish_ticks: None,
+            ack_ticks: None,
+            elapsed_ticks: 0,
+            before: BlockState::AIR,
+        };
+        results.set_break(unsent);
+        let b = sent(&mut results, true, 1, 1);
+        assert_eq!(outcome(&results, unsent.id), BlockActionOutcome::Cancelled);
+        assert_eq!(results.settle(1, true, &same).len(), 1);
+        assert_eq!(outcome(&results, b), BlockActionOutcome::Refused);
+    }
+
+    #[test]
+    fn older_block_uses_are_kept_by_id() {
+        let mut results = BlockActionResults::default();
+        let mk = |id, seq| UseBlockResult {
+            id,
+            position: BlockPos::new(0, 64, 0),
+            outcome: UseBlockOutcome::Pending,
+            refusal: None,
+            seq: Some(seq),
+            elapsed_ticks: 0,
+            open_ticks: None,
+            ack_tick: None,
+        };
+        results.set_use(mk(1, 1));
+        results.set_use(mk(2, 2));
+        // No screen: the ack plus the grace settles both, the older first.
+        let mut older = results.use_result(1).unwrap();
+        let mut newer = results.use_result(2).unwrap();
+        for _ in 0..8 {
+            settle_one_use(&mut older, 2, None, true);
+            settle_one_use(&mut newer, 2, None, true);
+        }
+        assert_eq!(older.outcome, UseBlockOutcome::NoScreen);
+        assert_eq!(newer.outcome, UseBlockOutcome::NoScreen);
+        assert!(results.use_result(1).is_some() && results.use_result(2).is_some());
     }
 }
