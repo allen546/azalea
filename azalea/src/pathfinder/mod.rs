@@ -94,10 +94,14 @@ impl Plugin for PathfinderPlugin {
                     goto_listener,
                     handle_tasks,
                     stop_pathfinding_on_world_change,
+                    stop_pathfinding_while_dead,
                     path_found_listener,
                     handle_stop_pathfinding_event,
                 )
                     .chain()
+                    // They share `RespawnLog` with the goto refusal; their writes are separate fields.
+                    .ambiguous_with(azalea_client::respawn::perform_respawn)
+                    .ambiguous_with(azalea_client::packet::death_event_on_0_health)
                     .before(MoveEventsSystems)
                     .before(InventorySystems)
                     .in_set(PathfinderSystems),
@@ -312,12 +316,18 @@ pub fn goto_listener(
         &Inventory,
         Option<&CustomPathfinderState>,
     )>,
+    mut dead: Query<&mut azalea_client::respawn::RespawnLog, With<azalea_client::respawn::DeathScreen>>,
     worlds: Res<Worlds>,
 ) {
     let _bt = azalea_client::bench_metrics::Timer::new(azalea_client::bench_metrics::Kind::PfGotoListener);
     let thread_pool = AsyncComputeTaskPool::get();
 
     for event in events.read() {
+        // Patch 22: a dead client has no keys to walk with.
+        if let Ok(mut log) = dead.get_mut(event.entity) {
+            log.refuse(azalea_client::respawn::DeadAction::Goto);
+            continue;
+        }
         let Ok((
             mut pathfinder,
             executing_path,
@@ -842,6 +852,20 @@ pub fn handle_stop_pathfinding_event(
                 direction: WalkDirection::None,
             });
             commands.entity(event.entity).remove::<ExecutingPath>();
+        }
+    }
+}
+
+/// Stops a goal, a search or a path at once while the death screen is open (patch 22): a dead
+/// client has released every key, and its goal does not survive the death (F1 §4.4).
+// Spec: specs/F1-swarm-runtime.md §4.4
+pub fn stop_pathfinding_while_dead(
+    query: Query<(Entity, &Pathfinder, Has<ExecutingPath>), With<azalea_client::respawn::DeathScreen>>,
+    mut stop_pathfinding_events: MessageWriter<StopPathfindingEvent>,
+) {
+    for (entity, pathfinder, executing) in &query {
+        if executing || pathfinder.goal.is_some() || pathfinder.is_calculating {
+            stop_pathfinding_events.write(StopPathfindingEvent { entity, force: true });
         }
     }
 }

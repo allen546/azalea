@@ -11,7 +11,12 @@ use parking_lot::RwLock;
 use tracing::{error, trace};
 use uuid::Uuid;
 
-use crate::{client::InGameState, connection::RawConnection, player::PlayerInfo};
+use crate::{
+    client::InGameState,
+    connection::RawConnection,
+    player::PlayerInfo,
+    respawn::{DeathScreen, RespawnLog},
+};
 
 /// An event that's sent when we receive a packet.
 /// ```
@@ -55,6 +60,7 @@ impl SendGamePacketEvent {
 pub fn handle_outgoing_packets_observer(
     trigger: On<SendGamePacketEvent>,
     mut query: Query<(&mut RawConnection, Option<&InGameState>)>,
+    mut dead: Query<&mut RespawnLog, With<DeathScreen>>,
 ) {
     let event = trigger.event();
 
@@ -68,6 +74,11 @@ pub fn handle_outgoing_packets_observer(
         }
 
         trace!("Sending game packet: {:?}", event.packet);
+        // Patch 22: count what goes out while the death screen is open (the variant's name).
+        if let Ok(mut log) = dead.get_mut(event.sent_by) {
+            let text = format!("{:?}", event.packet);
+            log.note_sent(text.split(['(', ' ', '{']).next().unwrap_or(""));
+        }
         if let Err(e) = raw_connection.write(event.packet.clone()) {
             error!("Failed to send packet: {e}");
         }

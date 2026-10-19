@@ -433,14 +433,19 @@ impl GamePacketHandler<'_> {
 
         as_system::<(
             Query<(&mut Physics, &mut LookDirection, &mut Position)>,
+            Query<&mut crate::respawn::DeathScreen>,
             Commands,
-        )>(self.ecs, |(mut query, mut commands)| {
+        )>(self.ecs, |(mut query, mut screens, mut commands)| {
             let Ok((mut physics, mut direction, mut position)) = query.get_mut(self.player) else {
                 return;
             };
 
             p.relative
                 .apply(&p.change, &mut position, &mut direction, &mut physics);
+            // The server may turn a dead player; that is not our input (patch 22).
+            if let Ok(mut screen) = screens.get_mut(self.player) {
+                screen.locked_look = *direction;
+            }
             // old_pos is set to the current position when we're teleported
             physics.set_old_pos(*position);
 
@@ -1359,12 +1364,13 @@ impl GamePacketHandler<'_> {
                 &mut crate::respawn::RespawnLog,
                 &TicksConnected,
                 &Position,
+                &LookDirection,
                 &WorldName,
                 &Inventory,
             )>,
             MessageWriter<_>,
         )>(self.ecs, |(mut commands, mut query, mut events)| {
-            let (entity_id, has_screen, show, mut log, ticks, position, world_name, inventory) =
+            let (entity_id, has_screen, show, mut log, ticks, position, look, world_name, inventory) =
                 query.get_mut(self.player).unwrap();
 
             if *entity_id == p.player_id {
@@ -1374,10 +1380,12 @@ impl GamePacketHandler<'_> {
                     self.player,
                     first,
                     show.0,
+                    true,
                     p.message.to_string(),
                     ticks.0,
                     &mut log,
                     **position,
+                    *look,
                     world_name,
                     inventory,
                 );
@@ -1466,8 +1474,10 @@ impl GamePacketHandler<'_> {
                 ));
                 commands.trigger(ClientsideCloseContainerEvent { entity: self.player });
             }
+            // Vanilla builds a new `LocalPlayer` for every respawn packet (death or dimension
+            // change), so the inventory is new each time; the server resends its contents.
+            *inventory = Inventory::default();
             if was_dead {
-                *inventory = Inventory::default();
                 if let Ok(mut log) = logs.get_mut(self.player) {
                     log.respawns += 1;
                     if let Some(r) = log.last_respawn.as_mut() {
@@ -1722,12 +1732,19 @@ impl GamePacketHandler<'_> {
     pub fn set_held_slot(&mut self, p: &ClientboundSetHeldSlot) {
         debug!("Got set held slot packet {p:?}");
 
-        as_system::<Query<&mut Inventory>>(self.ecs, |mut query| {
-            let mut inventory = query.get_mut(self.player).unwrap();
-            if p.slot <= 8 {
-                inventory.selected_hotbar_slot = p.slot as u8;
-            }
-        });
+        as_system::<(Query<&mut Inventory>, Query<&mut crate::respawn::DeathScreen>)>(
+            self.ecs,
+            |(mut query, mut screens)| {
+                let mut inventory = query.get_mut(self.player).unwrap();
+                if p.slot <= 8 {
+                    inventory.selected_hotbar_slot = p.slot as u8;
+                    // The server may change a dead player's slot; that is not our input.
+                    if let Ok(mut screen) = screens.get_mut(self.player) {
+                        screen.locked_slot = p.slot as u8;
+                    }
+                }
+            },
+        );
     }
     // Null fork: vanilla `ClientPacketListener#handleSetPlayerInventory` sets one slot in the
     // player inventory's own numbering (0-8 hotbar, 9-35 main, 36-39 armour, 40 offhand).

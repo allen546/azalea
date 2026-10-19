@@ -71,6 +71,13 @@ pub struct BlockActionsPlugin;
 impl Plugin for BlockActionsPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<BlockActionFinished>()
+            .add_systems(
+                GameTick,
+                refuse_block_actions_while_dead
+                    .after(crate::respawn::tick_death_screen)
+                    .before(handle_look_at_block_queued)
+                    .before(handle_break_block_queued),
+            )
             .add_systems(GameTick, handle_look_at_block_queued.before(handle_break_block_queued))
             .add_systems(
                 GameTick,
@@ -93,6 +100,72 @@ impl Plugin for BlockActionsPlugin {
                     .before(PhysicsSystems),
             )
             .add_observer(record_break_sent);
+    }
+}
+
+// Spec: specs/F1-swarm-runtime.md §4.4 (a dead bot sends nothing a death screen cannot)
+/// Answers break, place and use commands that arrive with the death screen open with a refused
+/// result and sends nothing (`Minecraft#handleKeybinds` does not run then).
+#[allow(clippy::type_complexity)]
+pub fn refuse_block_actions_while_dead(
+    mut commands: Commands,
+    mut query: Query<
+        (
+            Entity,
+            &mut BlockActionResults,
+            &mut crate::respawn::RespawnLog,
+            Option<&BreakBlockQueued>,
+            Option<&PlaceBlockQueued>,
+            Option<&UseBlockQueued>,
+        ),
+        With<crate::respawn::DeathScreen>,
+    >,
+    mut finished: MessageWriter<BlockActionFinished>,
+) {
+    use crate::respawn::DeadAction;
+    for (entity, mut results, mut log, break_q, place_q, use_q) in &mut query {
+        let refused = |id: u32, position: BlockPos| BlockActionResult {
+            id,
+            position,
+            outcome: BlockActionOutcome::Refused,
+            refusal: Some(BlockActionRefusal::Dead),
+            seq: None,
+            finish_ticks: None,
+            ack_ticks: None,
+            elapsed_ticks: 0,
+            before: BlockState::default(),
+        };
+        if let Some(q) = break_q {
+            results.next_id += 1;
+            let result = refused(results.next_id, q.position);
+            finished.write(BlockActionFinished { entity, is_break: true, result });
+            results.last_break = Some(result);
+            log.refuse(DeadAction::BreakBlock);
+            commands.entity(entity).remove::<BreakBlockQueued>();
+        }
+        if let Some(q) = place_q {
+            results.next_id += 1;
+            let result = refused(results.next_id, q.position.offset_with_direction(q.direction));
+            finished.write(BlockActionFinished { entity, is_break: false, result });
+            results.last_place = Some(result);
+            log.refuse(DeadAction::PlaceBlock);
+            commands.entity(entity).remove::<PlaceBlockQueued>();
+        }
+        if let Some(q) = use_q {
+            results.next_id += 1;
+            results.last_use = Some(UseBlockResult {
+                id: results.next_id,
+                position: q.position,
+                outcome: UseBlockOutcome::Refused,
+                refusal: Some(BlockActionRefusal::Dead),
+                seq: None,
+                elapsed_ticks: 0,
+                open_ticks: None,
+                ack_tick: None,
+            });
+            log.refuse(DeadAction::UseBlock);
+            commands.entity(entity).remove::<UseBlockQueued>();
+        }
     }
 }
 
@@ -132,6 +205,8 @@ pub enum BlockActionRefusal {
     /// The clicked block runs its own action on a right-click (opens, toggles), and the bot is not
     /// crouching: a vanilla client crouches to place instead. Crouch first, or set `auto_crouch`.
     BlockUsesClick,
+    /// The death screen is open: a vanilla client has no mouse then (patch 22).
+    Dead,
 }
 
 impl BlockActionRefusal {
@@ -146,6 +221,7 @@ impl BlockActionRefusal {
             Self::ScreenOpen => "a screen is open",
             Self::Busy => "mining or using an item",
             Self::BlockUsesClick => "block uses the click: crouch first (or auto_crouch) to place",
+            Self::Dead => "the death screen is open: a vanilla client has no mouse then",
         }
     }
 }

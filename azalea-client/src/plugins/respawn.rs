@@ -6,9 +6,18 @@
 //! (`DeathScreen#tick`), and a click sends `PERFORM_RESPAWN` (`LocalPlayer#respawn`). With the
 //! "immediate respawn" rule the client sends it at once and shows no screen. The screen replaces
 //! any open container screen, so all keys are released while dead.
+//!
+//! Patch 22 (nothing while dead). With a screen open `Minecraft#tick` skips `handleKeybinds` and
+//! `setScreen` releases the mouse and every key (`KeyMapping#releaseAll`), so a dead client makes
+//! no movement, look change, slot select, swap, drop, attack, use, break or place. What it still
+//! sends each tick is the position packet (`LocalPlayer#sendPosition`, falls and slides included),
+//! the client tick end, a sprint stop and one input packet for the released keys, answers to the
+//! server (keep-alive, pong, teleport), and the respawn packet. [`DeadAction`] lists what the fork
+//! refuses; [`RespawnLog::sent_while_dead`] counts what it sent.
 
 use azalea_core::{position::Vec3, tick::GameTick};
-use azalea_entity::inventory::Inventory;
+use azalea_entity::{Jumping, LookDirection, inventory::Inventory};
+use azalea_physics::client_movement::{ClientMovementState, WalkDirection};
 use azalea_inventory::ItemStack;
 use azalea_protocol::packets::game::s_client_command::{self, ServerboundClientCommand};
 use azalea_world::WorldName;
@@ -16,7 +25,19 @@ use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
 use tracing::debug;
 
-use crate::{packet::game::SendGamePacketEvent, tick_counter::TicksConnected};
+use crate::{
+    attack::{AttackQueued, handle_attack_queued},
+    block_actions::{
+        AutoCrouchHold, LookAtBlockQueued, StopMiningQueued, handle_break_block_queued,
+        handle_look_at_block_queued,
+    },
+    interact::{StartUseItemQueued, handle_start_use_item_queued},
+    inventory::{ensure_has_sent_carried_item, hold_still_while_screen_open},
+    item_use::{ReleaseUseItemQueued, SwapOffhandQueued, UseItemQueued, handle_use_item_queued},
+    mining::{LeftClickMine, Mining, MiningQueued, MiningSystems},
+    packet::game::SendGamePacketEvent,
+    tick_counter::TicksConnected,
+};
 
 /// The respawn button is active from this screen tick (`DeathScreen#tick`: `delayTicker == 20`).
 pub const RESPAWN_BUTTON_TICKS: u32 = 20;
@@ -61,6 +82,10 @@ pub struct DeathScreen {
     /// A request came before the button was active and waits for it.
     pub held_request: bool,
     pub opened_tick: u64,
+    /// The look and held slot when the screen opened: a vanilla client cannot change them now.
+    /// Server updates (teleport, held slot packet) replace them.
+    pub locked_look: LookDirection,
+    pub locked_slot: u8,
 }
 
 /// What we remember of a death. `tick` counts like [`TicksConnected`].
@@ -83,6 +108,62 @@ pub struct RespawnRecord {
     pub immediate: bool,
     /// The tick the server's respawn packet arrived.
     pub completed_tick: Option<u64>,
+    /// Respawn packets sent for this death. With immediate respawn a vanilla client sends one in
+    /// the kill packet's handler and one per tick after, until the respawn arrives
+    /// (`Minecraft#tick` -> `setScreen(null)` -> `LocalPlayer#respawn`).
+    pub sends: u32,
+}
+
+/// An input-driven action that a vanilla client cannot make while the death screen is open.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeadAction {
+    Walk,
+    Sprint,
+    Sneak,
+    Jump,
+    Look,
+    SelectSlot,
+    SwapOffhand,
+    Attack,
+    UseItem,
+    ReleaseUse,
+    BreakBlock,
+    StopBreak,
+    PlaceBlock,
+    UseBlock,
+    LookAtBlock,
+    InteractEntity,
+    Swing,
+    Goto,
+}
+
+impl DeadAction {
+    pub fn name(self) -> &'static str {
+        match self {
+            DeadAction::Walk => "walk",
+            DeadAction::Sprint => "sprint",
+            DeadAction::Sneak => "sneak",
+            DeadAction::Jump => "jump",
+            DeadAction::Look => "look",
+            DeadAction::SelectSlot => "select_slot",
+            DeadAction::SwapOffhand => "swap_offhand",
+            DeadAction::Attack => "attack",
+            DeadAction::UseItem => "use_item",
+            DeadAction::ReleaseUse => "release_use",
+            DeadAction::BreakBlock => "break_block",
+            DeadAction::StopBreak => "stop_break",
+            DeadAction::PlaceBlock => "place_block",
+            DeadAction::UseBlock => "use_block",
+            DeadAction::LookAtBlock => "look_at_block",
+            DeadAction::InteractEntity => "interact_entity",
+            DeadAction::Swing => "swing",
+            DeadAction::Goto => "goto",
+        }
+    }
+
+    pub fn reason(self) -> &'static str {
+        "the death screen is open: a vanilla client has no keys or mouse then"
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,6 +191,29 @@ pub struct RespawnLog {
     pub last_death: Option<DeathRecord>,
     pub last_respawn: Option<RespawnRecord>,
     pub last_refusal: Option<RespawnRefusal>,
+    /// Actions refused since the last death began, with how many times (patch 22).
+    pub refused_while_dead: Vec<(DeadAction, u32)>,
+    /// Game packets sent since the last death began, by name, up to the respawn packet.
+    pub sent_while_dead: Vec<(String, u32)>,
+}
+
+impl RespawnLog {
+    /// Notes a refused action (nothing was sent).
+    pub fn refuse(&mut self, action: DeadAction) {
+        debug!("{} refused on the client: {}", action.name(), action.reason());
+        match self.refused_while_dead.iter_mut().find(|(a, _)| *a == action) {
+            Some((_, n)) => *n += 1,
+            None => self.refused_while_dead.push((action, 1)),
+        }
+    }
+
+    /// Notes a packet sent while the death screen was open.
+    pub fn note_sent(&mut self, name: &str) {
+        match self.sent_while_dead.iter_mut().find(|(n, _)| n == name) {
+            Some((_, n)) => *n += 1,
+            None => self.sent_while_dead.push((name.to_string(), 1)),
+        }
+    }
 }
 
 /// Whether a request may go out, and whether it must wait (pure; the tests cover it).
@@ -132,28 +236,43 @@ pub fn check_respawn_request(
 impl DeathScreen {
     /// `shown` follows [`ShowDeathScreen`].
     pub fn open(shown: bool, message: String, tick: u64) -> Self {
-        Self { ticks: 0, shown, message, respawn_sent: false, held_request: false, opened_tick: tick }
+        Self {
+            ticks: 0,
+            shown,
+            message,
+            respawn_sent: false,
+            held_request: false,
+            opened_tick: tick,
+            locked_look: LookDirection::default(),
+            locked_slot: 0,
+        }
     }
 }
 
 /// Opens the death state: the first death is recorded, a repeat only resets the screen.
 /// Returns true when this is the first of the death. Shared by the packet handler and the
-/// 0-health tick.
+/// 0-health tick. `from_packet`: the kill packet's handler sends the respawn itself when the rules
+/// show no screen (`ClientPacketListener#handlePlayerCombatKill`); the 0-health path leaves it to
+/// the tick (`Minecraft#tick`).
 // Spec: specs/B2-survival-upkeep.md §4.7
 pub fn begin_death(
     commands: &mut Commands,
     entity: Entity,
     first: bool,
     show: bool,
+    from_packet: bool,
     message: String,
     tick: u64,
     log: &mut RespawnLog,
     position: Vec3,
+    look: LookDirection,
     dimension: &WorldName,
     inventory: &Inventory,
 ) {
     if first {
         log.deaths += 1;
+        log.refused_while_dead.clear();
+        log.sent_while_dead.clear();
         log.last_death = Some(DeathRecord {
             tick,
             position,
@@ -161,9 +280,22 @@ pub fn begin_death(
             message: message.clone(),
             slots: inventory.inventory_menu.slots(),
         });
+        // The screen releases every key (`KeyMapping#releaseAll`); that is not a refusal.
+        commands.entity(entity).queue(|mut e: EntityWorldMut| {
+            if let Some(mut mv) = e.get_mut::<ClientMovementState>() {
+                mv.move_direction = WalkDirection::None;
+                mv.trying_to_sprint = false;
+                mv.trying_to_crouch = false;
+            }
+            if let Some(mut jumping) = e.get_mut::<Jumping>() {
+                **jumping = false;
+            }
+        });
     }
     let mut screen = DeathScreen::open(show, message, tick);
-    if !show {
+    screen.locked_look = look;
+    screen.locked_slot = inventory.selected_hotbar_slot;
+    if !show && from_packet {
         // No screen: the client respawns at once (`LocalPlayer#respawn`).
         send_respawn(commands, entity, &mut screen, log, tick);
     }
@@ -182,6 +314,10 @@ fn send_respawn(
         entity,
         ServerboundClientCommand { action: s_client_command::Action::PerformRespawn },
     ));
+    if screen.respawn_sent && let Some(r) = log.last_respawn.as_mut() {
+        r.sends += 1;
+        return;
+    }
     screen.respawn_sent = true;
     screen.held_request = false;
     log.last_respawn = Some(RespawnRecord {
@@ -189,6 +325,7 @@ fn send_respawn(
         screen_ticks: screen.ticks,
         immediate: !screen.shown,
         completed_tick: None,
+        sends: 1,
     });
 }
 
@@ -202,6 +339,21 @@ impl Plugin for RespawnPlugin {
             .add_systems(
                 GameTick,
                 tick_death_screen.after(crate::tick_counter::increment_counter),
+            )
+            // After whatever sets input (the host, the pathfinder), before everything that acts on it.
+            .add_systems(
+                GameTick,
+                refuse_input_while_dead
+                    .after(tick_death_screen)
+                    .after(crate::block_actions::refuse_block_actions_while_dead)
+                    .before(handle_attack_queued)
+                    .before(handle_use_item_queued)
+                    .before(handle_start_use_item_queued)
+                    .before(handle_break_block_queued)
+                    .before(handle_look_at_block_queued)
+                    .before(ensure_has_sent_carried_item)
+                    .before(hold_still_while_screen_open)
+                    .before(MiningSystems),
             );
     }
 }
@@ -239,8 +391,94 @@ pub fn tick_death_screen(
 ) {
     for (entity, mut screen, mut log, ticks) in &mut query {
         screen.ticks = screen.ticks.saturating_add(1);
-        if screen.held_request && !screen.respawn_sent && screen.ticks >= RESPAWN_BUTTON_TICKS {
+        if !screen.shown {
+            // `Minecraft#tick`: dead with no screen -> `setScreen(null)` -> `respawn()`, every tick
+            // until the respawn packet replaces the player.
             send_respawn(&mut commands, entity, &mut screen, &mut log, ticks.0);
+        } else if screen.held_request && !screen.respawn_sent && screen.ticks >= RESPAWN_BUTTON_TICKS {
+            send_respawn(&mut commands, entity, &mut screen, &mut log, ticks.0);
+        }
+    }
+}
+
+/// Refuses what a vanilla client cannot do with the death screen open: `handleKeybinds` does not
+/// run and the keys and mouse are released, so no movement, look, slot select, swap, attack, use,
+/// break or place. Queued actions are dropped, input written by the caller is undone, and each
+/// refusal is noted in [`RespawnLog::refused_while_dead`]. Block commands are refused in
+/// `block_actions.rs` (they carry a result); the pathfinder stops itself (`azalea` crate).
+// Spec: specs/F1-swarm-runtime.md §4.4 (a dead bot sends only what the death screen sends)
+#[allow(clippy::type_complexity)]
+pub fn refuse_input_while_dead(
+    mut commands: Commands,
+    mut query: Query<(
+        Entity,
+        &DeathScreen,
+        &mut RespawnLog,
+        (&mut ClientMovementState, &mut Jumping, &mut LookDirection, &mut Inventory),
+        (
+            Has<AttackQueued>,
+            Has<UseItemQueued>,
+            Has<ReleaseUseItemQueued>,
+            Has<SwapOffhandQueued>,
+            Has<StartUseItemQueued>,
+            Has<MiningQueued>,
+            Has<StopMiningQueued>,
+            Has<LookAtBlockQueued>,
+        ),
+        (Has<Mining>, Has<LeftClickMine>, Has<AutoCrouchHold>),
+    )>,
+) {
+    for (
+        entity,
+        screen,
+        mut log,
+        (mut mv, mut jumping, mut look, mut inventory),
+        (attack, use_item, release, swap, start_use, mine, stop_mine, look_at),
+        (mining, left_click, auto_crouch),
+    ) in &mut query
+    {
+        for (is_set, action) in [
+            (attack, DeadAction::Attack),
+            (use_item || start_use, DeadAction::UseItem),
+            (release, DeadAction::ReleaseUse),
+            (swap, DeadAction::SwapOffhand),
+            (mine, DeadAction::BreakBlock),
+            (stop_mine, DeadAction::StopBreak),
+            (look_at, DeadAction::LookAtBlock),
+            (mv.move_direction != WalkDirection::None, DeadAction::Walk),
+            (mv.trying_to_sprint, DeadAction::Sprint),
+            (mv.trying_to_crouch, DeadAction::Sneak),
+            (**jumping, DeadAction::Jump),
+            (*look != screen.locked_look, DeadAction::Look),
+            (inventory.selected_hotbar_slot != screen.locked_slot, DeadAction::SelectSlot),
+        ] {
+            if is_set {
+                log.refuse(action);
+            }
+        }
+        mv.move_direction = WalkDirection::None;
+        mv.trying_to_sprint = false;
+        mv.trying_to_crouch = false;
+        **jumping = false;
+        *look = screen.locked_look;
+        inventory.selected_hotbar_slot = screen.locked_slot;
+        // A mining in progress ends without a packet (no `handleKeybinds` to continue or stop it).
+        if attack || use_item || release || swap || start_use || mine || stop_mine || look_at || mining
+            || left_click || auto_crouch
+        {
+            commands.entity(entity).remove::<(
+                AttackQueued,
+                UseItemQueued,
+                ReleaseUseItemQueued,
+                SwapOffhandQueued,
+                StartUseItemQueued,
+                MiningQueued,
+                StopMiningQueued,
+                LookAtBlockQueued,
+                Mining,
+                LeftClickMine,
+                AutoCrouchHold,
+            )>();
         }
     }
 }

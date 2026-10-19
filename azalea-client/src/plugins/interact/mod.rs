@@ -331,7 +331,13 @@ pub fn handle_entity_interact(
     mut commands: Commands,
     client_query: Query<(&ClientMovementState, &EntityIdIndex, &HitResultComponent)>,
     target_query: Query<&Position>,
+    mut dead: Query<&mut crate::respawn::RespawnLog, With<crate::respawn::DeathScreen>>,
 ) {
+    // Patch 22: no mouse while the death screen is open.
+    if let Ok(mut log) = dead.get_mut(trigger.client) {
+        log.refuse(crate::respawn::DeadAction::InteractEntity);
+        return;
+    }
     let Some((physics_state, entity_id_index, hit_result)) = client_query.get(trigger.client).ok()
     else {
         warn!(
@@ -462,7 +468,16 @@ pub fn can_use_game_master_blocks(
 pub struct SwingArmEvent {
     pub entity: Entity,
 }
-pub fn handle_swing_arm_trigger(swing_arm: On<SwingArmEvent>, mut commands: Commands) {
+pub fn handle_swing_arm_trigger(
+    swing_arm: On<SwingArmEvent>,
+    mut commands: Commands,
+    mut dead: Query<&mut crate::respawn::RespawnLog, With<crate::respawn::DeathScreen>>,
+) {
+    // Patch 22: no mouse while the death screen is open.
+    if let Ok(mut log) = dead.get_mut(swing_arm.entity) {
+        log.refuse(crate::respawn::DeadAction::Swing);
+        return;
+    }
     commands.trigger(SendGamePacketEvent::new(
         swing_arm.entity,
         ServerboundSwing {

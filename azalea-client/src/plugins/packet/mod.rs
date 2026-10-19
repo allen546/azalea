@@ -1,4 +1,4 @@
-use azalea_entity::{LocalEntity, Position, inventory::Inventory, metadata::Health};
+use azalea_entity::{LocalEntity, LookDirection, Position, inventory::Inventory, metadata::Health};
 use azalea_world::WorldName;
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::{
@@ -9,6 +9,7 @@ use bevy_ecs::{
 use self::game::DeathEvent;
 use crate::{
     client_chat::ChatReceivedEvent,
+    inventory::{CloseContainerEvent, OpenScreen},
     respawn::{DeathScreen, RespawnLog, ShowDeathScreen, begin_death},
     tick_counter::TicksConnected,
 };
@@ -21,7 +22,10 @@ pub mod relative_updates;
 pub struct PacketPlugin;
 
 /// Health at or below 0 on a local player opens the death screen when no kill packet did
-/// (`Minecraft#tick` -> `setScreen(null)`); other entities just get the event.
+/// (`Minecraft#tick` -> `setScreen(null)`); other entities just get the event. `Minecraft#tick`
+/// leaves a screen that is open alone; a container screen then closes itself on its own tick
+/// (`AbstractContainerScreen#tick` -> `LocalPlayer#closeContainer`, which sends the close) and
+/// the death screen follows in that same tick.
 // Spec: specs/B2-survival-upkeep.md §4.7
 #[allow(clippy::type_complexity)]
 pub fn death_event_on_0_health(
@@ -32,8 +36,10 @@ pub fn death_event_on_0_health(
         &mut RespawnLog,
         &TicksConnected,
         &Position,
+        &LookDirection,
         &WorldName,
         &Inventory,
+        Has<OpenScreen>,
     )>,
     mut death_events: MessageWriter<DeathEvent>,
 ) {
@@ -41,16 +47,24 @@ pub fn death_event_on_0_health(
         if **health > 0. {
             continue;
         }
-        if is_local && let Ok((show, mut log, ticks, position, world_name, inventory)) = local.get_mut(entity) {
+        if is_local
+            && let Ok((show, mut log, ticks, position, look, world_name, inventory, screen_open)) =
+                local.get_mut(entity)
+        {
+            if screen_open {
+                commands.trigger(CloseContainerEvent { entity, id: inventory.id });
+            }
             begin_death(
                 &mut commands,
                 entity,
                 true,
                 show.0,
+                false,
                 String::new(),
                 ticks.0,
                 &mut log,
                 **position,
+                *look,
                 world_name,
                 inventory,
             );
@@ -71,7 +85,10 @@ impl Plugin for PacketPlugin {
         .add_observer(game::handle_outgoing_packets_observer)
         .add_observer(config::handle_outgoing_packets_observer)
         .add_observer(login::handle_outgoing_packets_observer)
-        .add_systems(Update, death_event_on_0_health)
+        .add_systems(
+            Update,
+            death_event_on_0_health.after(azalea_entity::clamp_look_direction),
+        )
         .add_message::<game::ReceiveGamePacketEvent>()
         .add_message::<config::ReceiveConfigPacketEvent>()
         .add_message::<login::ReceiveLoginPacketEvent>()
