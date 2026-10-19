@@ -312,6 +312,8 @@ impl GamePacketHandler<'_> {
                     },
                     entity_bundle,
                     TicksConnected(0),
+                    crate::respawn::ShowDeathScreen(p.show_death_screen),
+                    crate::respawn::IsHardcore(p.hardcore),
                 ));
 
                 azalea_entity::indexing::add_entity_to_indexes(
@@ -1075,13 +1077,20 @@ impl GamePacketHandler<'_> {
 
         debug!("Got game event packet {p:?}");
 
-        #[allow(clippy::single_match)]
         match p.event {
             EventType::ChangeGameMode => {
                 as_system::<Query<&mut LocalGameMode>>(self.ecs, |mut query| {
                     let mut local_game_mode = query.get_mut(self.player).unwrap();
                     if let Some(new_game_mode) = GameMode::from_id(p.param as u8) {
                         local_game_mode.current = new_game_mode;
+                    }
+                });
+            }
+            // `ClientPacketListener#handleGameEvent`: a parameter of 0 shows the death screen.
+            EventType::ImmediateRespawn => {
+                as_system::<Query<&mut crate::respawn::ShowDeathScreen>>(self.ecs, |mut query| {
+                    if let Ok(mut show) = query.get_mut(self.player) {
+                        show.0 = p.param == 0.0;
                     }
                 });
             }
@@ -1336,22 +1345,49 @@ impl GamePacketHandler<'_> {
 
     pub fn player_combat_enter(&mut self, _p: &ClientboundPlayerCombatEnter) {}
 
+    // Null fork (patch 21): `ClientPacketListener#handlePlayerCombatKill`. Opens the death screen
+    // (or respawns at once when the rules show none); a repeat while dead opens a new screen.
     pub fn player_combat_kill(&mut self, p: &ClientboundPlayerCombatKill) {
         debug!("Got player kill packet {p:?}");
 
         as_system::<(
             Commands,
-            Query<(&MinecraftEntityId, Option<&Dead>)>,
+            Query<(
+                &MinecraftEntityId,
+                Has<crate::respawn::DeathScreen>,
+                &crate::respawn::ShowDeathScreen,
+                &mut crate::respawn::RespawnLog,
+                &TicksConnected,
+                &Position,
+                &WorldName,
+                &Inventory,
+            )>,
             MessageWriter<_>,
         )>(self.ecs, |(mut commands, mut query, mut events)| {
-            let (entity_id, dead) = query.get_mut(self.player).unwrap();
+            let (entity_id, has_screen, show, mut log, ticks, position, world_name, inventory) =
+                query.get_mut(self.player).unwrap();
 
-            if *entity_id == p.player_id && dead.is_none() {
+            if *entity_id == p.player_id {
+                let first = !has_screen;
+                crate::respawn::begin_death(
+                    &mut commands,
+                    self.player,
+                    first,
+                    show.0,
+                    p.message.to_string(),
+                    ticks.0,
+                    &mut log,
+                    **position,
+                    world_name,
+                    inventory,
+                );
                 commands.entity(self.player).insert(Dead);
-                events.write(DeathEvent {
-                    entity: self.player,
-                    packet: Some(p.clone()),
-                });
+                if first {
+                    events.write(DeathEvent {
+                        entity: self.player,
+                        packet: Some(p.clone()),
+                    });
+                }
             }
         });
     }
@@ -1411,6 +1447,36 @@ impl GamePacketHandler<'_> {
 
     pub fn respawn(&mut self, p: &ClientboundRespawn) {
         debug!("Got respawn packet {p:?}");
+
+        // Null fork (patch 21), `ClientPacketListener#handleRespawn`: an open container is
+        // closed first (this is the close a vanilla client sends after a death, not the death
+        // screen), and the new player has a fresh player window and nothing in hand.
+        as_system::<(
+            Commands,
+            Query<(&mut Inventory, Has<crate::respawn::DeathScreen>, &TicksConnected)>,
+            Query<&mut crate::respawn::RespawnLog>,
+        )>(self.ecs, |(mut commands, mut query, mut logs)| {
+            let Ok((mut inventory, was_dead, ticks)) = query.get_mut(self.player) else {
+                return;
+            };
+            if inventory.id != 0 {
+                commands.trigger(SendGamePacketEvent::new(
+                    self.player,
+                    ServerboundContainerClose { container_id: inventory.id },
+                ));
+                commands.trigger(ClientsideCloseContainerEvent { entity: self.player });
+            }
+            if was_dead {
+                *inventory = Inventory::default();
+                if let Ok(mut log) = logs.get_mut(self.player) {
+                    log.respawns += 1;
+                    if let Some(r) = log.last_respawn.as_mut() {
+                        r.completed_tick = Some(ticks.0);
+                    }
+                }
+                commands.entity(self.player).remove::<crate::respawn::DeathScreen>();
+            }
+        });
 
         as_system::<(
             Commands,

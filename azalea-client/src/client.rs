@@ -32,6 +32,7 @@ use crate::{
     local_player::{Experience, Hunger, PermissionLevel, TabList, WorldHolder},
     mining,
     movement::LastSentLookDirection,
+    respawn,
     player::retroactively_add_game_profile_component,
 };
 /// A bundle of components that's inserted right when we switch to the `login`
@@ -75,6 +76,9 @@ pub struct JoinedClientBundle {
     pub mining: mining::MineBundle,
     pub attack: attack::AttackBundle,
     pub recent_attackers: attackers::RecentAttackers,
+    pub respawn_log: respawn::RespawnLog,
+    pub show_death_screen: respawn::ShowDeathScreen,
+    pub is_hardcore: respawn::IsHardcore,
 
     pub in_game_state: InGameState,
 }

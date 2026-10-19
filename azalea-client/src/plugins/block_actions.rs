@@ -652,7 +652,7 @@ pub fn handle_use_block_queued(
         &Attributes,
         &Inventory,
         (&ClientMovementState, Option<&Crouching>),
-        (Has<OpenScreen>, Has<Mining>, Has<ItemInUse>),
+        (Has<OpenScreen>, Has<Mining>, Has<ItemInUse>, Has<crate::respawn::DeathScreen>),
     )>,
 ) {
     for (
@@ -667,7 +667,7 @@ pub fn handle_use_block_queued(
         attrs,
         inv,
         (mv, crouching),
-        (screen, mining, using),
+        (screen, mining, using, dead),
     ) in &mut query
     {
         commands.entity(entity).remove::<UseBlockQueued>();
@@ -678,7 +678,7 @@ pub fn handle_use_block_queued(
         // Vanilla places the held item instead of using the block when crouching with either hand
         // loaded (`isSecondaryUseActive`); a bot that wants the container must stand up first.
         let places_instead = is_crouching(mv, crouching) && hands_loaded(inv);
-        let checked = if screen || inv.id != 0 {
+        let checked = if screen || dead || inv.id != 0 {
             Err(BlockActionRefusal::ScreenOpen)
         } else if mining || using {
             Err(BlockActionRefusal::Busy)

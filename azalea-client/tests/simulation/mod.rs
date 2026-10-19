@@ -23,6 +23,7 @@ mod packet_order_set_carried_item;
 mod receive_spawn_entity_and_start_config_packet;
 mod receive_start_config_packet;
 mod reply_to_ping_with_pong;
+mod respawn_like_vanilla;
 mod set_health_before_login;
 mod teleport_movement;
 mod ticks_alive;

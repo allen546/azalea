@@ -1,4 +1,5 @@
-use azalea_entity::metadata::Health;
+use azalea_entity::{LocalEntity, Position, inventory::Inventory, metadata::Health};
+use azalea_world::WorldName;
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::{
     prelude::*,
@@ -6,7 +7,11 @@ use bevy_ecs::{
 };
 
 use self::game::DeathEvent;
-use crate::client_chat::ChatReceivedEvent;
+use crate::{
+    client_chat::ChatReceivedEvent,
+    respawn::{DeathScreen, RespawnLog, ShowDeathScreen, begin_death},
+    tick_counter::TicksConnected,
+};
 
 pub mod config;
 pub mod game;
@@ -15,17 +20,45 @@ pub mod relative_updates;
 
 pub struct PacketPlugin;
 
+/// Health at or below 0 on a local player opens the death screen when no kill packet did
+/// (`Minecraft#tick` -> `setScreen(null)`); other entities just get the event.
+// Spec: specs/B2-survival-upkeep.md §4.7
+#[allow(clippy::type_complexity)]
 pub fn death_event_on_0_health(
-    query: Query<(Entity, &Health), Changed<Health>>,
+    mut commands: Commands,
+    query: Query<(Entity, &Health, Has<LocalEntity>), (Changed<Health>, Without<DeathScreen>)>,
+    mut local: Query<(
+        &ShowDeathScreen,
+        &mut RespawnLog,
+        &TicksConnected,
+        &Position,
+        &WorldName,
+        &Inventory,
+    )>,
     mut death_events: MessageWriter<DeathEvent>,
 ) {
-    for (entity, health) in query.iter() {
-        if **health == 0. {
-            death_events.write(DeathEvent {
-                entity,
-                packet: None,
-            });
+    for (entity, health, is_local) in query.iter() {
+        if **health > 0. {
+            continue;
         }
+        if is_local && let Ok((show, mut log, ticks, position, world_name, inventory)) = local.get_mut(entity) {
+            begin_death(
+                &mut commands,
+                entity,
+                true,
+                show.0,
+                String::new(),
+                ticks.0,
+                &mut log,
+                **position,
+                world_name,
+                inventory,
+            );
+        }
+        death_events.write(DeathEvent {
+            entity,
+            packet: None,
+        });
     }
 }
 

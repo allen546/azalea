@@ -25,6 +25,7 @@ use crate::{
     mining::Mining,
     movement::ItemInUse,
     packet::game::SendGamePacketEvent,
+    respawn::DeathScreen,
 };
 
 // TODO: when this is removed, remove the Inv alias above (which just exists to
@@ -124,6 +125,8 @@ pub enum ClickRefusal {
     AlreadyOpen,
     /// Mining a block or using an item (for an open).
     Busy,
+    /// Dead: the death screen replaced every other screen.
+    Dead,
 }
 
 impl ClickRefusal {
@@ -135,6 +138,7 @@ impl ClickRefusal {
             ClickRefusal::WrongWindow => "another window is open",
             ClickRefusal::AlreadyOpen => "a screen is already open",
             ClickRefusal::Busy => "mining or using an item",
+            ClickRefusal::Dead => "dead",
         }
     }
 }
@@ -183,12 +187,14 @@ impl ClickResults {
 fn handle_open_inventory_event(
     event: On<OpenInventoryEvent>,
     mut commands: Commands,
-    mut query: Query<(&Inv, Has<OpenScreen>, Has<Mining>, Has<ItemInUse>, Option<&mut ClickResults>)>,
+    mut query: Query<(&Inv, Has<OpenScreen>, Has<Mining>, Has<ItemInUse>, Has<DeathScreen>, Option<&mut ClickResults>)>,
 ) {
-    let Ok((inventory, open, mining, using, results)) = query.get_mut(event.entity) else {
+    let Ok((inventory, open, mining, using, dead, results)) = query.get_mut(event.entity) else {
         return;
     };
-    let refusal = if open || inventory.id != 0 {
+    let refusal = if dead {
+        Some(ClickRefusal::Dead)
+    } else if open || inventory.id != 0 {
         Some(ClickRefusal::AlreadyOpen)
     } else if mining || using {
         Some(ClickRefusal::Busy)
@@ -209,7 +215,10 @@ fn handle_open_inventory_event(
 /// Null fork: no movement, sprint, sneak or jump input while a screen is open (see
 /// [`OpenScreen`]). Runs first in the physics tick, after everything that sets input.
 pub fn hold_still_while_screen_open(
-    mut query: Query<(&mut ClientMovementState, &mut Jumping), With<OpenScreen>>,
+    mut query: Query<
+        (&mut ClientMovementState, &mut Jumping),
+        Or<(With<OpenScreen>, With<super::respawn::DeathScreen>)>,
+    >,
 ) {
     for (mut mv, mut jumping) in &mut query {
         mv.move_direction = WalkDirection::None;
@@ -344,14 +353,17 @@ pub fn handle_container_click_event(
         Option<&Sprinting>,
         Option<&Crouching>,
         Option<&mut ClickResults>,
+        Has<DeathScreen>,
     )>,
     worlds: Res<Worlds>,
 ) {
-    let (entity, mut inventory, player_abilities, world_name, screen, sprinting, crouching, results) =
+    let (entity, mut inventory, player_abilities, world_name, screen, sprinting, crouching, results, dead) =
         query.get_mut(container_click.entity).unwrap();
     let slot_num = container_click.operation.slot_num().map(|n| n as i16).unwrap_or(-999);
     // Null fork: refuse what a vanilla client couldn't send (see `OpenScreen`).
-    let refusal = if inventory.id != container_click.window_id {
+    let refusal = if dead {
+        Some(ClickRefusal::Dead)
+    } else if inventory.id != container_click.window_id {
         Some(ClickRefusal::WrongWindow)
     } else if screen.is_none() {
         Some(ClickRefusal::NoScreen)
