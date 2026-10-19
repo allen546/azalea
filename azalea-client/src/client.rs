@@ -162,23 +162,23 @@ pub fn start_ecs_runner(
     (ecs, start_running_systems, appexit_rx)
 }
 
-/// Runs the `Update` schedule 60 times per second and the `GameTick` schedule
-/// 20 times per second.
+/// Runs the `Update` schedule at most 60 times per second, and after each update the `GameTick`
+/// schedule as many times as the vanilla client would (`Minecraft#runTick`): the ticks due from
+/// the elapsed time, at most 10 back to back, the rest dropped. See [`crate::tick_clock`].
 ///
 /// Exits when we receive an `AppExit` event.
+// Spec: specs/F5-version-layer.md §4.6 (tick catch-up like vanilla)
 async fn run_schedule_loop(
     ecs: Arc<RwLock<World>>,
     outer_schedule_label: InternedScheduleLabel,
 ) -> AppExit {
     let mut last_update: Option<Instant> = None;
-    let mut last_tick: Option<Instant> = None;
+    let mut clock = crate::tick_clock::TickClock::default();
 
     // azalea runs the Update schedule at most 60 times per second to simulate
     // framerate. unlike vanilla though, we also only handle packets during Updates
     // due to everything running in ecs systems.
     const UPDATE_DURATION_TARGET: Duration = Duration::from_micros(1_000_000 / 60);
-    // minecraft runs at 20 tps
-    const GAME_TICK_DURATION_TARGET: Duration = Duration::from_micros(1_000_000 / 20);
 
     loop {
         // sleep until the next update if necessary
@@ -193,37 +193,35 @@ async fn run_schedule_loop(
 
         let mut ecs = ecs.write();
 
-        // if last tick is None or more than 50ms ago, run the GameTick schedule
+        // The frame time is read once the ECS is ours, so a stall that held the lock counts as
+        // elapsed time, like a slow frame in vanilla.
+        let tick_ms = ecs
+            .get_resource::<crate::tick_clock::ServerTickRate>()
+            .map_or(crate::tick_clock::DEFAULT_TICK_MS, |r| r.tick_length_ms());
+        let due = clock.advance(Instant::now(), tick_ms);
+
+        // packets and the other Update systems first, then the ticks (vanilla processes queued
+        // packets before it ticks)
         {
             let _c0 = crate::bench_metrics::thread_cpu_ns();
             let _t = crate::bench_metrics::Timer::new(crate::bench_metrics::Kind::UpdateLoop);
             ecs.run_schedule(outer_schedule_label);
             crate::bench_metrics::ECS_CPU_NS.fetch_add(crate::bench_metrics::thread_cpu_ns() - _c0, std::sync::atomic::Ordering::Relaxed);
         }
-        if last_tick
-            .map(|last_tick| last_tick.elapsed() > GAME_TICK_DURATION_TARGET)
-            .unwrap_or(true)
-        {
-            if let Some(last_tick) = &mut last_tick {
-                *last_tick += GAME_TICK_DURATION_TARGET;
-
-                // if we're more than 10 ticks behind, set last_tick to now.
-                // vanilla doesn't do it in exactly the same way but it shouldn't really matter
-                if (now - *last_tick) > GAME_TICK_DURATION_TARGET * 10 {
-                    warn!(
-                        "GameTick is more than 10 ticks behind, skipping ticks so we don't have to burst too much"
-                    );
-                    *last_tick = now;
-                }
-            } else {
-                last_tick = Some(now);
+        let ran = crate::tick_clock::ticks_to_run(due);
+        let ends_before = crate::tick_clock::CLIENT_TICK_ENDS.load(std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..ran {
+            let _c0 = crate::bench_metrics::thread_cpu_ns();
+            let _t = crate::bench_metrics::Timer::new(crate::bench_metrics::Kind::GameTick);
+            ecs.run_schedule(GameTick);
+            crate::bench_metrics::ECS_CPU_NS.fetch_add(crate::bench_metrics::thread_cpu_ns() - _c0, std::sync::atomic::Ordering::Relaxed);
+        }
+        if due > 0 {
+            if due > ran {
+                warn!("{due} ticks due, running {ran} and dropping {} like the vanilla client", due - ran);
             }
-            {
-                let _c0 = crate::bench_metrics::thread_cpu_ns();
-                let _t = crate::bench_metrics::Timer::new(crate::bench_metrics::Kind::GameTick);
-                ecs.run_schedule(GameTick);
-                crate::bench_metrics::ECS_CPU_NS.fetch_add(crate::bench_metrics::thread_cpu_ns() - _c0, std::sync::atomic::Ordering::Relaxed);
-            }
+            let ends = crate::tick_clock::CLIENT_TICK_ENDS.load(std::sync::atomic::Ordering::Relaxed) - ends_before;
+            crate::tick_clock::note_update(due, ran, ends);
         }
 
         ecs.clear_trackers();

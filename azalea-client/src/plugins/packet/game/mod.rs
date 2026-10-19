@@ -1703,7 +1703,14 @@ impl GamePacketHandler<'_> {
     pub fn hurt_animation(&mut self, p: &ClientboundHurtAnimation) {
         crate::attackers::handle_hurt_animation(self.ecs, self.player, p);
     }
-    pub fn ticking_state(&mut self, _p: &ClientboundTickingState) {}
+    // Vanilla: `ClientPacketListener#handleTickingState` sets the tick rate manager's rate and frozen flag.
+    // Spec: specs/F5-version-layer.md §4.6 (tick catch-up like vanilla)
+    pub fn ticking_state(&mut self, p: &ClientboundTickingState) {
+        self.ecs.insert_resource(crate::tick_clock::ServerTickRate {
+            tick_rate: p.tick_rate,
+            frozen: p.is_frozen,
+        });
+    }
     pub fn ticking_step(&mut self, _p: &ClientboundTickingStep) {}
     pub fn reset_score(&mut self, _p: &ClientboundResetScore) {}
     pub fn cookie_request(&mut self, p: &ClientboundCookieRequest) {

@@ -31,6 +31,7 @@ pub fn game_tick_packet(
     mut commands: Commands,
 ) {
     for entity in query.iter() {
+        crate::tick_clock::CLIENT_TICK_ENDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         commands.trigger(SendGamePacketEvent::new(entity, ServerboundClientTickEnd));
     }
 }

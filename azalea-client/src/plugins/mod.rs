@@ -27,6 +27,7 @@ pub mod respawn;
 pub mod tags;
 pub mod task_pool;
 pub mod tick_counter;
+pub mod tick_clock;
 pub mod tick_end;
 
 /// This plugin group will add all the default plugins necessary for Azalea to
