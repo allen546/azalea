@@ -317,7 +317,7 @@ pub struct EntityInteractEvent {
     pub client: Entity,
     pub target: Entity,
     /// The position on the entity that we'll tell the server that we clicked
-    /// on.
+    /// on, in world coordinates (the packet carries it relative to the entity).
     ///
     /// This doesn't matter for most entities. If it's set to `None` but we're
     /// looking at the target, it'll use the correct value. If it's `None` and
@@ -372,10 +372,15 @@ pub fn handle_entity_interact(
         }
     };
 
+    // `MultiPlayerGameMode#interactAt` sends the hit point relative to the entity's position.
+    let Ok(target_position) = target_query.get(trigger.target) else {
+        warn!("tried to interact with an entity without the entity having a position");
+        return;
+    };
     let mut interact = ServerboundInteract {
         entity_id,
         action: s_interact::ActionType::InteractAt {
-            location,
+            location: location - **target_position,
             hand: InteractionHand::MainHand,
         },
         using_secondary_action: physics_state.trying_to_crouch,

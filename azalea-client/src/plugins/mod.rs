@@ -3,6 +3,7 @@ use bevy_app::{PluginGroup, PluginGroupBuilder};
 pub mod attack;
 pub mod attackers;
 pub mod block_actions;
+pub mod entity_actions;
 pub mod block_update;
 pub mod brand;
 #[cfg(feature = "online-mode")]
@@ -53,6 +54,7 @@ impl PluginGroup for DefaultPlugins {
             .add(respawn::RespawnPlugin)
             .add(mining::MiningPlugin)
             .add(block_actions::BlockActionsPlugin)
+            .add(entity_actions::EntityActionsPlugin)
             .add(attack::AttackPlugin)
             .add(attackers::AttackersPlugin)
             .add(item_use::ItemUsePlugin)

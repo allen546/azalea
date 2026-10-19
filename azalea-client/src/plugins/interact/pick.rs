@@ -114,15 +114,15 @@ pub type MaybePickableEntityQuery<'world, 'state, 'a> = Query<
 >;
 
 pub struct PickOpts<'world, 'state, 'a, 'b, 'c> {
-    source_entity: Entity,
-    look_direction: LookDirection,
-    eye_position: Vec3,
-    aabb: &'a Aabb,
-    world: &'a World,
-    entity_pick_range: f64,
-    block_pick_range: f64,
-    aabb_query: &'a AabbQuery<'world, 'state, 'b>,
-    pickable_query: &'a MaybePickableEntityQuery<'world, 'state, 'c>,
+    pub source_entity: Entity,
+    pub look_direction: LookDirection,
+    pub eye_position: Vec3,
+    pub aabb: &'a Aabb,
+    pub world: &'a World,
+    pub entity_pick_range: f64,
+    pub block_pick_range: f64,
+    pub aabb_query: &'a AabbQuery<'world, 'state, 'b>,
+    pub pickable_query: &'a MaybePickableEntityQuery<'world, 'state, 'c>,
 }
 
 /// Get the block or entity that a player would be looking at if their eyes were

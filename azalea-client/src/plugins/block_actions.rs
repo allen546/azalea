@@ -61,7 +61,7 @@ use crate::{
 };
 
 /// Eye height while crouching (vanilla 1.21.11 crouching pose), against 1.62 standing.
-const CROUCH_EYE_HEIGHT: f64 = 1.27;
+pub(crate) const CROUCH_EYE_HEIGHT: f64 = 1.27;
 
 /// Without an ack this many ticks after the action was sent, it is judged on the block alone.
 const ACK_TIMEOUT_TICKS: u32 = 60;
@@ -353,7 +353,7 @@ pub struct AutoCrouchHold;
 // Spec: specs/B6-placement-breaking.md §4.2 (crouch handling)
 /// Whether the bot crouches now, as vanilla's `isSecondaryUseActive` sees it. Shared by the place
 /// and use commands so the two agree.
-fn is_crouching(mv: &ClientMovementState, crouching: Option<&Crouching>) -> bool {
+pub(crate) fn is_crouching(mv: &ClientMovementState, crouching: Option<&Crouching>) -> bool {
     mv.trying_to_crouch || crouching.is_some_and(|c| **c)
 }
 
