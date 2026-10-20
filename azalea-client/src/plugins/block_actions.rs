@@ -88,8 +88,8 @@ impl Plugin for BlockActionsPlugin {
                 GameTick,
                 (handle_break_block_queued, begin_break_result, handle_stop_mining_queued)
                     .chain()
-                    // begin_break_result reads the look for its evidence (patch 28)
-                    .before(crate::entity_actions::handle_look_at_entity_queued)
+                    // after the tick's pick (patch 29), which follows both look-at systems
+                    .after(crate::interact::pick::update_hit_result_component)
                     .before(MiningSystems),
             )
             .add_systems(

@@ -28,6 +28,25 @@ use derive_more::{Deref, DerefMut};
 #[derive(Clone, Component, Debug, Deref, DerefMut)]
 pub struct HitResultComponent(HitResult);
 
+/// Cast the crosshair ray once per `GameTick`, at the point where vanilla casts it.
+///
+/// Vanilla 1.21.11 (Mojang names): `Minecraft#tick` calls `GameRenderer#pick(1.0F)` near the top
+/// of every client tick, after this tick's packets and the mouse look are in, and before
+/// `MultiPlayerGameMode#tick` and `Minecraft#handleKeybinds` (`startAttack`, `startUseItem`,
+/// `continueAttack`), so every click of a tick is judged against that tick's ray. The other
+/// `pick` call, in `GameRenderer#renderLevel`, only feeds the frame (outline, debug); Null skips
+/// display, so there is no per-`Update` pick any more. After a stall, one `Update` runs up to 10
+/// `GameTick`s back to back (patch 23); each one picks again, so a click never sees a ray older
+/// than its own tick's look.
+///
+/// Grim checks this must satisfy: `RotationPlace` and `PositionPlace` (scaffolding) test the
+/// placed face against the player's look and eye when the place packet arrives, and
+/// `Reach` / `Hitboxes` (combat) do the same for entity interaction, so the click has to come
+/// from a look whose ray really hits the target at that tick.
+///
+/// Ordered after the systems that turn the look (`handle_look_at_block_queued`,
+/// `handle_look_at_entity_queued`) and before every system that checks a click against the hit.
+// Spec: specs/F5-version-layer.md §4.6 (What Null computes); specs/B6-placement-breaking.md §4.2
 #[allow(clippy::type_complexity)]
 pub fn update_hit_result_component(
     mut commands: Commands,
@@ -48,38 +67,23 @@ pub fn update_hit_result_component(
     aabb_query: AabbQuery,
     pickable_query: MaybePickableEntityQuery,
 ) {
-    for (
-        entity,
-        hit_result_ref,
-        position,
-        dimensions,
-        look_direction,
-        world_name,
-        physics,
-        attributes,
-    ) in &mut query
+    for (entity, hit_result_ref, position, dimensions, look_direction, world_name, physics, attributes) in
+        &mut query
     {
-        let block_pick_range = attributes.block_interaction_range.calculate();
-        let entity_pick_range = attributes.entity_interaction_range.calculate();
-
-        let eye_position = position.up(dimensions.eye_height.into());
-
-        let Some(world_lock) = worlds.get(world_name) else {
+        let Some(hit_result) = cast_hit_result(
+            entity,
+            position,
+            dimensions,
+            look_direction,
+            world_name,
+            physics,
+            attributes,
+            &worlds,
+            &aabb_query,
+            &pickable_query,
+        ) else {
             continue;
         };
-        let world = world_lock.read();
-
-        let hit_result = pick(PickOpts {
-            source_entity: entity,
-            look_direction: *look_direction,
-            eye_position,
-            aabb: &physics.bounding_box,
-            world: &world,
-            entity_pick_range,
-            block_pick_range,
-            aabb_query: &aabb_query,
-            pickable_query: &pickable_query,
-        });
         if let Some(mut hit_result_ref) = hit_result_ref {
             **hit_result_ref = hit_result;
         } else {
@@ -88,6 +92,80 @@ pub fn update_hit_result_component(
                 .insert(HitResultComponent(hit_result));
         }
     }
+}
+
+/// Give a client its first [`HitResultComponent`] in `Update`, so code that reads it before the
+/// first `GameTick` (the `Update`-side mining event handler) finds one. Later updates are made by
+/// [`update_hit_result_component`] in `GameTick`.
+// Spec: specs/F5-version-layer.md §4.6 (What Null computes)
+#[allow(clippy::type_complexity)]
+pub fn insert_initial_hit_result_component(
+    mut commands: Commands,
+    query: Query<
+        (
+            Entity,
+            &Position,
+            &EntityDimensions,
+            &LookDirection,
+            &WorldName,
+            &Physics,
+            &Attributes,
+        ),
+        (With<LocalEntity>, Without<HitResultComponent>),
+    >,
+    worlds: Res<Worlds>,
+    aabb_query: AabbQuery,
+    pickable_query: MaybePickableEntityQuery,
+) {
+    for (entity, position, dimensions, look_direction, world_name, physics, attributes) in &query {
+        if let Some(hit_result) = cast_hit_result(
+            entity,
+            position,
+            dimensions,
+            look_direction,
+            world_name,
+            physics,
+            attributes,
+            &worlds,
+            &aabb_query,
+            &pickable_query,
+        ) {
+            commands
+                .entity(entity)
+                .insert(HitResultComponent(hit_result));
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cast_hit_result(
+    entity: Entity,
+    position: &Position,
+    dimensions: &EntityDimensions,
+    look_direction: &LookDirection,
+    world_name: &WorldName,
+    physics: &Physics,
+    attributes: &Attributes,
+    worlds: &Worlds,
+    aabb_query: &AabbQuery,
+    pickable_query: &MaybePickableEntityQuery,
+) -> Option<HitResult> {
+    let block_pick_range = attributes.block_interaction_range.calculate();
+    let entity_pick_range = attributes.entity_interaction_range.calculate();
+    let eye_position = position.up(dimensions.eye_height.into());
+    let world_lock = worlds.get(world_name)?;
+    let world = world_lock.read();
+    Some(pick(PickOpts {
+        source_entity: entity,
+        look_direction: *look_direction,
+        eye_position,
+        aabb: &physics.bounding_box,
+        world: &world,
+        entity_pick_range,
+        block_pick_range,
+        aabb_query,
+        pickable_query,
+    }))
 }
 
 pub type MaybePickableEntityQuery<'world, 'state, 'a> = Query<

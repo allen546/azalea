@@ -59,7 +59,7 @@ impl Plugin for MiningPlugin {
                     .in_set(MiningSystems)
                     .after(InventorySystems)
                     .after(MoveEventsSystems)
-                    .after(crate::interact::pick::update_hit_result_component)
+                    .after(crate::interact::pick::insert_initial_hit_result_component)
                     .after(crate::attack::handle_attack_event),
             )
             .add_observer(handle_finish_mining_block_observer);

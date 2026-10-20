@@ -38,7 +38,9 @@ use tracing::warn;
 use super::mining::Mining;
 use crate::{
     attack::handle_attack_event,
-    interact::pick::{HitResultComponent, update_hit_result_component},
+    interact::pick::{
+        HitResultComponent, insert_initial_hit_result_component, update_hit_result_component,
+    },
     inventory::InventorySystems,
     local_player::{LocalGameMode, PermissionLevel},
     movement::MoveEventsSystems,
@@ -56,7 +58,7 @@ impl Plugin for InteractPlugin {
                 (
                     update_attributes_for_gamemode,
                     handle_start_use_item_event,
-                    update_hit_result_component
+                    insert_initial_hit_result_component
                         .after(clamp_look_direction)
                         .after(update_last_bounding_box),
                 )
@@ -69,6 +71,21 @@ impl Plugin for InteractPlugin {
             .add_systems(
                 GameTick,
                 handle_start_use_item_queued.before(PhysicsSystems),
+            )
+            // Patch 29: `Minecraft#tick` -> `GameRenderer#pick`, once per tick after the look is
+            // turned and before any click is checked.
+            .add_systems(
+                GameTick,
+                update_hit_result_component
+                    .after(crate::block_actions::handle_look_at_block_queued)
+                    .after(crate::entity_actions::handle_look_at_entity_queued)
+                    .before(crate::block_actions::handle_break_block_queued)
+                    .before(crate::block_actions::handle_place_block_queued)
+                    .before(crate::block_actions::handle_use_block_queued)
+                    .before(crate::entity_actions::handle_use_entity_queued)
+                    .before(handle_start_use_item_queued)
+                    .before(crate::mining::MiningSystems)
+                    .before(PhysicsSystems),
             )
             .add_observer(handle_entity_interact)
             .add_observer(handle_swing_arm_trigger);
