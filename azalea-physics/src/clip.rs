@@ -250,24 +250,27 @@ pub fn traverse_blocks<C, T>(
     }
 }
 
+/// The blocks a box passes through moving from `from` to `to` (the box is the
+/// one at `to`).
+///
+/// In Mojmap, this is `BlockGetter#forEachBlockIntersectedBetween`: the blocks of
+/// the box at the start, those along the way, and those of the box at the end.
+// Spec: specs/B1-movement.md §4.2
 pub fn box_traverse_blocks(from: Vec3, to: Vec3, aabb: &Aabb) -> HashSet<BlockPos> {
     let delta = to - from;
-    let traversed_blocks = BlockPos::between_closed_aabb(aabb);
-    if delta.length_squared() < (0.99999_f32 * 0.99999) as f64 {
-        return traversed_blocks.into_iter().collect();
+    let mut traversed_blocks: HashSet<BlockPos> =
+        BlockPos::between_closed_aabb(aabb).into_iter().collect();
+    if delta.length_squared() < 1.0E-5_f32 as f64 * 1.0E-5_f32 as f64 {
+        return traversed_blocks;
     }
 
-    let mut traversed_and_collided_blocks = HashSet::new();
-    let target_min_pos = aabb.min;
-    let from_min_pos = target_min_pos - delta;
-    add_collisions_along_travel(
-        &mut traversed_and_collided_blocks,
-        from_min_pos,
-        target_min_pos,
-        *aabb,
-    );
-    traversed_and_collided_blocks.extend(traversed_blocks);
-    traversed_and_collided_blocks
+    traversed_blocks.extend(BlockPos::between_closed_aabb(&aabb.move_relative(Vec3::ZERO - delta)));
+    if delta.length_squared() >= (0.99999_f32 * 0.99999) as f64 {
+        let target_min_pos = aabb.min;
+        let from_min_pos = target_min_pos - delta;
+        add_collisions_along_travel(&mut traversed_blocks, from_min_pos, target_min_pos, *aabb);
+    }
+    traversed_blocks
 }
 
 pub fn add_collisions_along_travel(

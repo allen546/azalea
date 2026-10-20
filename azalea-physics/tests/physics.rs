@@ -75,7 +75,8 @@ fn test_gravity() {
     app.update();
     {
         let entity_pos = *app.world_mut().get::<Position>(entity).unwrap();
-        // delta is applied before gravity, so the first tick only sets the delta
+        // delta is applied before gravity, so the first tick only sets the
+        // delta
         assert_eq!(entity_pos.y, 70.);
         let entity_physics = app.world_mut().get::<Physics>(entity).unwrap();
         assert!(entity_physics.velocity.y < 0.);
@@ -84,7 +85,8 @@ fn test_gravity() {
     app.update();
     {
         let entity_pos = *app.world_mut().get::<Position>(entity).unwrap();
-        // the second tick applies the delta to the position, so now it should go down
+        // the second tick applies the delta to the position, so now it should
+        // go down
         assert!(
             entity_pos.y < 70.,
             "Entity y ({}) didn't go down after physics steps",
@@ -144,7 +146,8 @@ fn test_collision() {
     app.update();
     {
         let entity_pos = *app.world_mut().get::<Position>(entity).unwrap();
-        // the second tick applies the delta to the position, but it also does collision
+        // the second tick applies the delta to the position, but it also does
+        // collision
         assert_eq!(entity_pos.y, 70.);
     }
 }
@@ -555,4 +558,161 @@ fn test_afk_pool() {
         ]
     );
     assert_eq!(loops_done, 1);
+}
+
+// Block movement effects (patch 26). Expected values come from the vanilla
+// formulas, worked out by hand: full forward input on the ground gives a
+// velocity of 0.1 (speed 0.1, stone friction 0.6); a tick on stone keeps
+// 0.6 * 0.91 = 0.546 of the velocity. Each test settles the bot on the floor,
+// then walks it.
+mod block_effects {
+    use azalea_entity::{Jumping, inventory::Inventory};
+    use azalea_inventory::ItemStack;
+    use azalea_registry::builtin::ItemKind;
+
+    use super::*;
+
+    const SPEED: f64 = 0.1; // walking speed on the ground, full input
+    const KEEP: f64 = 0.546; // 0.6 block friction times 0.91
+
+    /// A floor of `floor` at y=69 and `feet` at the bot's feet (y=70), the bot
+    /// at rest at (0.5, 70, 0.5), forward input held on every tick.
+    fn setup(
+        floor: BlockKind,
+        feet: BlockKind,
+        jumping: bool,
+        boots: bool,
+    ) -> (App, bevy_ecs::entity::Entity, (Arc<RwLock<World>>, PartialWorld)) {
+        let mut app = make_test_app();
+        let world_lock = insert_overworld(&mut app);
+        let mut partial_world = PartialWorld::default();
+        partial_world.chunks.set(
+            &ChunkPos { x: 0, z: 0 },
+            Some(Chunk::default()),
+            &mut world_lock.write().chunks,
+        );
+        for x in 0..=3 {
+            for z in 0..=6 {
+                partial_world.chunks.set_block_state(
+                    BlockPos { x, y: 69, z },
+                    floor.into(),
+                    &world_lock.write().chunks,
+                );
+            }
+        }
+        // the feet block is a whole row so the bot stays inside it for the test
+        for z in 0..=6 {
+            partial_world.chunks.set_block_state(
+                BlockPos { x: 0, y: 70, z },
+                feet.into(),
+                &world_lock.write().chunks,
+            );
+        }
+        let mut e = app.world_mut().spawn((
+            EntityBundle::new(
+                Uuid::nil(),
+                Vec3 {
+                    x: 0.5,
+                    y: 70.,
+                    z: 0.5,
+                },
+                EntityKind::Player,
+                WorldName::new("minecraft:overworld"),
+            ),
+            MinecraftEntityId(0),
+            LocalEntity,
+            HasClientLoaded,
+        ));
+        e.insert((Jumping(jumping), azalea_physics::client_movement::ClientMovementState::default()));
+        if boots {
+            let mut inv = Inventory::default();
+            *inv.inventory_menu.as_player_mut().armor.get_mut(3).unwrap() =
+                ItemStack::from(ItemKind::LeatherBoots);
+            e.insert(inv);
+        }
+        let id = e.id();
+        // the world only holds weak chunk references, so the caller keeps both
+        (app, id, (world_lock, partial_world))
+    }
+
+    fn tick(app: &mut App, entity: bevy_ecs::entity::Entity, input: f32) {
+        app.world_mut()
+            .get_mut::<Physics>(entity)
+            .unwrap()
+            .z_acceleration = input;
+        app.update();
+        app.world_mut().run_schedule(GameTick);
+        app.update();
+    }
+
+    /// Three ticks with no input, so the bot is on the ground and any block
+    /// effect has taken hold.
+    fn settle(app: &mut App, entity: bevy_ecs::entity::Entity) {
+        for _ in 0..3 {
+            tick(app, entity, 0.);
+        }
+    }
+
+    /// One tick with full forward input; returns the z displacement.
+    fn walk_dz(app: &mut App, entity: bevy_ecs::entity::Entity) -> f64 {
+        let before = app.world_mut().get::<Position>(entity).unwrap().z;
+        tick(app, entity, 1.);
+        app.world_mut().get::<Position>(entity).unwrap().z - before
+    }
+
+    // Inside a web every move is scaled by 0.25 and the velocity is zeroed, so
+    // each walking tick moves 0.25 * 0.1 (speed on stone, full input).
+    // (Entity#move, WebBlock#entityInside)
+    #[test]
+    fn cobweb_scales_every_move() {
+        let (mut app, e, _world) = setup(BlockKind::Stone, BlockKind::Cobweb, false, false);
+        settle(&mut app, e);
+        for _ in 0..2 {
+            let dz = walk_dz(&mut app, e);
+            assert!((dz - 0.25 * SPEED).abs() < 1e-6, "dz {dz}");
+        }
+    }
+
+    // SweetBerryBushBlock#entityInside: 0.8 (a float constant)
+    #[test]
+    fn sweet_berry_bush_scales_every_move() {
+        let (mut app, e, _world) = setup(BlockKind::Stone, BlockKind::SweetBerryBush, false, false);
+        settle(&mut app, e);
+        for _ in 0..2 {
+            let dz = walk_dz(&mut app, e);
+            assert!((dz - 0.8 * SPEED).abs() < 1e-6, "dz {dz}");
+        }
+    }
+
+    // The factor scales the velocity after the move. Tick 1 moves 0.1 and
+    // keeps 0.4 * 0.546 of it; tick 2 adds a fresh 0.1.
+    // (Entity#getBlockSpeedFactor)
+    #[test]
+    fn soul_sand_and_honey_scale_velocity_after_move() {
+        for floor in [BlockKind::SoulSand, BlockKind::HoneyBlock] {
+            let (mut app, e, _world) = setup(floor, BlockKind::Air, false, false);
+            settle(&mut app, e);
+            let dz1 = walk_dz(&mut app, e);
+            assert!((dz1 - SPEED).abs() < 1e-6, "{floor:?}: dz1 {dz1}");
+            let dz2 = walk_dz(&mut app, e);
+            let want = 0.4 * SPEED * KEEP + SPEED;
+            assert!((dz2 - want).abs() < 1e-6, "{floor:?}: dz2 {dz2} want {want}");
+        }
+    }
+
+    // Without leather boots the bot does not climb powdered snow. With them it
+    // gets the 0.2 climb velocity, then gravity: (0.2 - 0.08) * 0.98.
+    // (PowderSnowBlock#canEntityWalkOnPowderSnow)
+    #[test]
+    fn powder_snow_climb_needs_leather_boots() {
+        let (mut app, e, _world) = setup(BlockKind::Stone, BlockKind::PowderSnow, true, false);
+        tick(&mut app, e, 0.);
+        let vy = app.world_mut().get::<Physics>(e).unwrap().velocity.y;
+        assert!(vy < 0., "no boots: vy {vy}");
+
+        let (mut app, e, _world) = setup(BlockKind::Stone, BlockKind::PowderSnow, true, true);
+        tick(&mut app, e, 0.);
+        let vy = app.world_mut().get::<Physics>(e).unwrap().velocity.y;
+        assert!((vy - 0.12 * 0.98).abs() < 1e-4, "boots: vy {vy}");
+    }
 }

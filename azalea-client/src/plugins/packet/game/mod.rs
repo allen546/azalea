@@ -9,7 +9,7 @@ use azalea_core::{
     position::{ChunkPos, Vec3},
 };
 use azalea_entity::{
-    Dead, EntityBundle, EntityKindComponent, HasClientLoaded, LoadedBy, LocalEntity, LookDirection,
+    Attributes, Dead, EntityBundle, EntityKindComponent, HasClientLoaded, LoadedBy, LocalEntity, LookDirection,
     Physics, PlayerAbilities, Position,
     effect_events::{AddEffectEvent, RemoveEffectsEvent},
     indexing::{EntityIdIndex, EntityUuidIndex},
@@ -23,7 +23,7 @@ use azalea_protocol::{
         game::{c_move_entity_pos_rot::CompactLookDirection, *},
     },
 };
-use azalea_registry::builtin::EntityKind;
+use azalea_registry::builtin::{Attribute, EntityKind};
 use azalea_world::{PartialWorld, WorldName, Worlds};
 use bevy_ecs::{prelude::*, system::SystemState};
 pub use events::*;
@@ -754,8 +754,34 @@ impl GamePacketHandler<'_> {
         });
     }
 
-    pub fn update_attributes(&mut self, _p: &ClientboundUpdateAttributes) {
-        // debug!("Got update attributes packet {p:?}");
+    /// Null fork: the server's powdered-snow frost slows the bot's movement speed
+    /// (`LivingEntity#tryAddFrost`, server side) and tells the client through this
+    /// packet. Only that one modifier is taken over; the other speed modifiers
+    /// (sprinting, effects) are still worked out locally.
+    // Spec: specs/B1-movement.md §4.2
+    pub fn update_attributes(&mut self, p: &ClientboundUpdateAttributes) {
+        as_system::<Query<(&MinecraftEntityId, &mut Attributes)>>(self.ecs, |mut query| {
+            let Ok((entity_id, mut attributes)) = query.get_mut(self.player) else {
+                return;
+            };
+            if *entity_id != p.entity_id {
+                return;
+            }
+            let id = azalea_registry::identifier::Identifier::new("powder_snow");
+            for snapshot in &p.values {
+                if snapshot.attribute != Attribute::MovementSpeed {
+                    continue;
+                }
+                match snapshot.modifiers.iter().find(|m| m.id == id) {
+                    Some(modifier) => {
+                        attributes.movement_speed.insert(modifier.clone());
+                    }
+                    None => {
+                        attributes.movement_speed.remove(&id);
+                    }
+                }
+            }
+        });
     }
 
     pub fn set_entity_motion(&mut self, p: &ClientboundSetEntityMotion) {

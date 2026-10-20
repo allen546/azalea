@@ -1,6 +1,7 @@
 use std::f32::consts::SQRT_2;
 
 use azalea_block::{BlockState, properties};
+use azalea_registry::builtin::BlockKind;
 use azalea_client::{SprintDirection, WalkDirection};
 use azalea_core::{
     direction::CardinalDirection,
@@ -393,6 +394,18 @@ pub fn descend_is_reached(
     false
 }
 
+/// Whether the feet or head cell at `pos` is a block that slows the bot without
+/// stopping it (`Entity#makeStuckInBlock` blocks).
+// Spec: specs/B1-movement.md §4.3
+fn has_movement_effect_block(ctx: &MovesCtx, pos: RelBlockPos) -> bool {
+    [pos, pos.up(1)].into_iter().any(|p| {
+        matches!(
+            BlockKind::from(ctx.world.get_block_state(p)),
+            BlockKind::Cobweb | BlockKind::SweetBerryBush | BlockKind::PowderSnow
+        )
+    })
+}
+
 fn diagonal_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
     let mut base_cost = SPRINT_ONE_BLOCK_COST;
 
@@ -435,6 +448,14 @@ fn diagonal_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
             left_passable = ctx.world.is_passable(left_pos);
             right_passable = ctx.world.is_passable(right_pos);
             if !left_passable && !right_passable {
+                continue;
+            }
+            // Null fork: hugging a corner is safe only when the side block stops the
+            // bot. A cobweb, berry bush or powdered snow has no collision, so the
+            // bot's box would end up inside it and its movement effects would apply.
+            if (!left_passable && has_movement_effect_block(ctx, left_pos))
+                || (!right_passable && has_movement_effect_block(ctx, right_pos))
+            {
                 continue;
             }
         }

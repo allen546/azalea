@@ -147,6 +147,12 @@ def generate_blocks(
         if friction is not None:
             behavior_constructor += f".friction({friction})"
 
+        # Null fork: speed and jump factors (vanilla Blocks.java), not in burger
+        if block_id == "honey_block":
+            behavior_constructor += ".speed_factor(0.4).jump_factor(0.5)"
+        elif block_id == "soul_sand":
+            behavior_constructor += ".speed_factor(0.4)"
+
         force_solid = None
         if block_data_burger.get("force_solid_on"):
             force_solid = "true"

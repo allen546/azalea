@@ -29,7 +29,8 @@ use tracing::warn;
 
 use self::world_collisions::get_block_collisions;
 use crate::{
-    client_movement::ClientMovementState, collision::entity_collisions::AabbQuery, travel::no_collision,
+    client_movement::ClientMovementState, collision::entity_collisions::AabbQuery,
+    travel::no_collision,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +109,40 @@ fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
     collided_delta
 }
 
+/// The velocity factor of the block the entity is in or standing on.
+///
+/// In Mojmap, this is `Entity#getBlockSpeedFactor` (with the `Player`
+/// override: no factor while flying).
+// Spec: specs/B1-movement.md §4.2
+pub fn block_speed_factor(
+    world: &World,
+    position: Vec3,
+    abilities: Option<&PlayerAbilities>,
+) -> f32 {
+    if abilities.is_some_and(|a| a.flying) {
+        return 1.;
+    }
+    let block_at = world
+        .chunks
+        .get_block_state(BlockPos::from(position))
+        .unwrap_or_default();
+    let factor = block_at.behavior().speed_factor;
+    let kind = BlockKind::from(block_at);
+    if kind == BlockKind::Water || kind == BlockKind::BubbleColumn {
+        return factor;
+    }
+    if factor != 1. {
+        return factor;
+    }
+    let below = world
+        .chunks
+        .get_block_state(crate::get_block_pos_below_that_affects_movement(
+            Position::new(position),
+        ))
+        .unwrap_or_default();
+    below.behavior().speed_factor
+}
+
 pub struct MoveCtx<'world, 'state, 'a, 'b> {
     pub mover_type: MoverType,
     pub world: &'a World,
@@ -125,6 +160,9 @@ pub struct MoveCtx<'world, 'state, 'a, 'b> {
     pub on_climbable: OnClimbable,
     pub pose: Option<Pose>,
     pub jumping: Jumping,
+    /// Whether the feet slot holds leather boots, for
+    /// `PowderSnowBlock#canEntityWalkOnPowderSnow`.
+    pub wears_leather_boots: bool,
 }
 
 /// Move an entity by a given delta, checking for collisions.
@@ -144,11 +182,17 @@ pub fn move_colliding(ctx: &mut MoveCtx, mut movement: Vec3) {
     //     }
     // }
 
-    // if (this.stuckSpeedMultiplier.lengthSqr() > 1.0E-7D) {
-    //     var2 = var2.multiply(this.stuckSpeedMultiplier);
-    //     this.stuckSpeedMultiplier = Vec3.ZERO;
-    //     this.setDeltaMovement(Vec3.ZERO);
-    // }
+    // Null fork: Entity#move scales the movement by the stuck multiplier a
+    // block set last tick, clears it and zeroes the velocity (not for
+    // pistons). Spec: specs/B1-movement.md §4.2
+    if ctx.physics.stuck_speed_multiplier.length_squared() > 1.0E-7 {
+        if ctx.mover_type != MoverType::Piston {
+            let m = ctx.physics.stuck_speed_multiplier;
+            movement = Vec3::new(movement.x * m.x, movement.y * m.y, movement.z * m.z);
+        }
+        ctx.physics.stuck_speed_multiplier = Vec3::ZERO;
+        ctx.physics.velocity = Vec3::ZERO;
+    }
 
     movement = maybe_back_off_from_edge(ctx, movement);
     let collide_result = collide(ctx, movement);
@@ -169,6 +213,9 @@ pub fn move_colliding(ctx: &mut MoveCtx, mut movement: Vec3) {
                 z: position.z + collide_result.z,
             }
         };
+
+        // Null fork: `Entity#addMovementThisTick`, walked at the end of the tick.
+        physics.movement_this_tick.push((***position, new_pos, movement));
 
         if new_pos != ***position {
             ***position = new_pos;
@@ -210,8 +257,8 @@ pub fn move_colliding(ctx: &mut MoveCtx, mut movement: Vec3) {
 
     if vertical_collision {
         // blockBelow.updateEntityAfterFallOn(this.level, this);
-        // the default implementation of updateEntityAfterFallOn sets the y movement to
-        // 0
+        // the default implementation of updateEntityAfterFallOn sets the y
+        // movement to 0
         physics.velocity.y = 0.;
     }
 
@@ -222,11 +269,12 @@ pub fn move_colliding(ctx: &mut MoveCtx, mut movement: Vec3) {
 
     // sounds
 
-    // this.tryCheckInsideBlocks();
+    // Null fork: Entity#getBlockSpeedFactor scales the velocity after the move.
+    let speed_factor = block_speed_factor(ctx.world, **ctx.position, ctx.abilities) as f64;
+    ctx.physics.velocity.x *= speed_factor;
+    ctx.physics.velocity.z *= speed_factor;
 
-    // float var25 = this.getBlockSpeedFactor();
-    // this.setDeltaMovement(this.getDeltaMovement().multiply((double)var25,
-    // 1.0D, (double)var25)); if (this.level.getBlockStatesIfLoaded(this.
+    // if (this.level.getBlockStatesIfLoaded(this.
     // getBoundingBox().deflate(1.0E-6D)).noneMatch((var0) -> {
     //    return var0.is(BlockTags.FIRE) || var0.is(Blocks.LAVA);
     // })) {

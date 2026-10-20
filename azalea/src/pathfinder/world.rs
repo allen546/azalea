@@ -661,6 +661,12 @@ pub fn is_block_state_passable(block_state: BlockState) -> bool {
         return false;
     }
 
+    if registry_block == BlockKind::Cobweb {
+        // Null fork: a cobweb slows movement to a fraction of normal speed, so
+        // the planned timing would be wrong (`WebBlock#entityInside`).
+        return false;
+    }
+
     if registry_block == BlockKind::SweetBerryBush {
         // these hurt us
         return false;
@@ -757,6 +763,14 @@ mod tests {
         let ctx = CachedWorld::new(Arc::new(RwLock::new(world.into())), BlockPos::default());
         assert!(!ctx.is_block_pos_passable(BlockPos::new(0, 0, 0)));
         assert!(ctx.is_block_pos_passable(BlockPos::new(0, 1, 0)));
+    }
+
+    // A cobweb has no collision but slows the bot to a fraction of its speed, so the
+    // planner treats it as not passable (patch 26).
+    #[test]
+    fn test_cobweb_is_not_passable() {
+        assert!(!is_block_state_passable(BlockKind::Cobweb.into()));
+        assert!(is_block_state_passable(BlockState::AIR));
     }
 
     #[test]

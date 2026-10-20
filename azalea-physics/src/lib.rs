@@ -10,6 +10,7 @@ pub mod travel;
 use std::collections::HashSet;
 
 use azalea_block::{BlockState, fluid_state::FluidState, properties};
+use azalea_core::direction::Axis;
 use azalea_core::{
     math,
     position::{BlockPos, Vec3},
@@ -17,8 +18,8 @@ use azalea_core::{
 };
 use azalea_entity::{
     ActiveEffects, Attributes, EntityKindComponent, HasClientLoaded, Jumping, LocalEntity,
-    LookDirection, OnClimbable, Physics, Pose, Position, dimensions::EntityDimensions,
-    metadata::Sprinting, move_relative,
+    LookDirection, OnClimbable, Physics, PlayerAbilities, Pose, Position,
+    dimensions::EntityDimensions, metadata::Sprinting, move_relative,
 };
 use azalea_registry::builtin::{BlockKind, EntityKind, MobEffect};
 use azalea_world::{World, WorldName, Worlds};
@@ -96,8 +97,8 @@ pub fn ai_step(
     {
         let is_player = **entity_kind == EntityKind::Player;
 
-        // vanilla does movement interpolation here, doesn't really matter much for a
-        // bot though
+        // vanilla does movement interpolation here, doesn't really matter much
+        // for a bot though
 
         if physics.no_jump_delay > 0 {
             physics.no_jump_delay -= 1;
@@ -189,12 +190,19 @@ fn go_down_in_water(physics: &mut Physics) {
 #[allow(clippy::type_complexity)]
 pub fn apply_effects_from_blocks(
     mut query: Query<
-        (&mut Physics, &Position, &EntityDimensions, &WorldName),
+        (
+            &mut Physics,
+            &Position,
+            &EntityDimensions,
+            &WorldName,
+            &ActiveEffects,
+            Option<&PlayerAbilities>,
+        ),
         (With<LocalEntity>, With<HasClientLoaded>),
     >,
     worlds: Res<Worlds>,
 ) {
-    for (mut physics, position, dimensions, world_name) in &mut query {
+    for (mut physics, position, dimensions, world_name, active_effects, abilities) in &mut query {
         let Some(world_lock) = worlds.get(world_name) else {
             continue;
         };
@@ -210,34 +218,106 @@ pub fn apply_effects_from_blocks(
         //     var4.getBlock().stepOn(this.level(), var3, var4, this);
         //  }
 
-        // minecraft adds more entries to the list when the code is running on the
-        // server
-        let movement_this_tick = [EntityMovement {
-            from: physics.old_position,
-            to: **position,
-        }];
+        // minecraft adds more entries to the list when the code is running on
+        // the server
+        // Null fork: `Entity#applyEffectsFromBlocks`. The moves of this tick, plus a
+        // last step if the position changed after the last move (a teleport).
+        let mut movement_this_tick: Vec<EntityMovement> =
+            std::mem::take(&mut physics.movement_this_tick)
+                .into_iter()
+                .map(|(from, to, original)| EntityMovement {
+                    from,
+                    to,
+                    axis_dependent_original_movement: Some(original),
+                })
+                .collect();
+        match movement_this_tick.last() {
+            None => movement_this_tick.push(EntityMovement {
+                from: physics.old_position,
+                to: **position,
+                axis_dependent_original_movement: None,
+            }),
+            Some(last) if last.to.distance_squared_to(**position) > 9.9999994E-11 => {
+                let from = last.to;
+                movement_this_tick.push(EntityMovement {
+                    from,
+                    to: **position,
+                    axis_dependent_original_movement: None,
+                });
+            }
+            Some(_) => {}
+        }
 
-        check_inside_blocks(&mut physics, dimensions, &world, &movement_this_tick);
+        check_inside_blocks(
+            &mut physics,
+            dimensions,
+            &world,
+            &movement_this_tick,
+            active_effects,
+            abilities,
+        );
     }
 }
 
+// Spec: specs/B1-movement.md §4.2
 fn check_inside_blocks(
     physics: &mut Physics,
     dimensions: &EntityDimensions,
     world: &World,
     movements: &[EntityMovement],
+    active_effects: &ActiveEffects,
+    abilities: Option<&PlayerAbilities>,
 ) -> Vec<BlockState> {
     let mut blocks_inside = Vec::new();
-    let mut visited_blocks = HashSet::<BlockState>::new();
+    // Null fork: vanilla dedupes by position (`visitedBlocks` holds block
+    // longs).
+    let mut visited_blocks = HashSet::<BlockPos>::new();
+    let in_block_state = world
+        .chunks
+        .get_block_state(BlockPos::from(
+            movements.last().map_or(Vec3::ZERO, |m| m.to),
+        ))
+        .unwrap_or_default();
 
+    // Null fork: `Entity#checkInsideBlocks`. A move that has its original movement
+    // is walked one axis at a time (Y, then the longer of X and Z), because the
+    // box at a corner of that path can touch a block that neither end does.
+    let mut steps: Vec<(Vec3, Vec3)> = Vec::new();
     for movement in movements {
-        let bounding_box_at_target = dimensions
-            .make_bounding_box(movement.to)
-            .deflate_all(1.0E-5);
+        let delta = movement.to - movement.from;
+        match movement.axis_dependent_original_movement {
+            Some(original) if delta.length_squared() > 0. => {
+                let mut from = movement.from;
+                let axes = if original.x.abs() < original.z.abs() {
+                    [Axis::Y, Axis::Z, Axis::X]
+                } else {
+                    [Axis::Y, Axis::X, Axis::Z]
+                };
+                for axis in axes {
+                    let d = match axis {
+                        Axis::X => delta.x,
+                        Axis::Y => delta.y,
+                        Axis::Z => delta.z,
+                    };
+                    if d != 0. {
+                        let to = match axis {
+                            Axis::X => from.with_x(from.x + d),
+                            Axis::Y => from.with_y(from.y + d),
+                            Axis::Z => from.with_z(from.z + d),
+                        };
+                        steps.push((from, to));
+                        from = to;
+                    }
+                }
+            }
+            _ => steps.push((movement.from, movement.to)),
+        }
+    }
 
-        for traversed_block in
-            box_traverse_blocks(movement.from, movement.to, &bounding_box_at_target)
-        {
+    for (step_from, step_to) in steps {
+        let bounding_box_at_target = dimensions.make_bounding_box(step_to).deflate_all(1.0E-5);
+
+        for traversed_block in box_traverse_blocks(step_from, step_to, &bounding_box_at_target) {
             // if (!this.isAlive()) {
             //     return;
             // }
@@ -246,7 +326,7 @@ fn check_inside_blocks(
             if traversed_block_state.is_air() {
                 continue;
             }
-            if !visited_blocks.insert(traversed_block_state) {
+            if !visited_blocks.insert(traversed_block) {
                 continue;
             }
 
@@ -260,14 +340,14 @@ fn check_inside_blocks(
             this.onInsideBlock(traversedBlockState);
             */
 
-            // this is different for end portal frames and tripwire hooks, i don't think it
-            // actually matters for a client though
+            // this is different for end portal frames and tripwire hooks, i
+            // don't think it actually matters for a client though
             let entity_inside_collision_shape = &*BLOCK_SHAPE;
 
             if entity_inside_collision_shape != &*BLOCK_SHAPE
                 && !collided_with_shape_moving_from(
-                    movement.from,
-                    movement.to,
+                    step_from,
+                    step_to,
                     traversed_block,
                     entity_inside_collision_shape,
                     dimensions,
@@ -276,7 +356,15 @@ fn check_inside_blocks(
                 continue;
             }
 
-            handle_entity_inside_block(world, traversed_block_state, traversed_block, physics);
+            handle_entity_inside_block(
+                world,
+                traversed_block_state,
+                traversed_block,
+                physics,
+                active_effects,
+                abilities,
+                in_block_state,
+            );
 
             blocks_inside.push(traversed_block_state);
         }
@@ -308,10 +396,41 @@ fn handle_entity_inside_block(
     block: BlockState,
     block_pos: BlockPos,
     physics: &mut Physics,
+    active_effects: &ActiveEffects,
+    abilities: Option<&PlayerAbilities>,
+    in_block_state: BlockState,
 ) {
     let registry_block = BlockKind::from(block);
+    // Null fork: `Entity#makeStuckInBlock`, which `Player` skips while flying.
+    // Damage and freezing are the server's decisions, not ours.
+    // Spec: specs/B1-movement.md §4.2
+    let mut make_stuck = |multiplier: Vec3| {
+        if !abilities.is_some_and(|a| a.flying) {
+            physics.reset_fall_distance();
+            physics.stuck_speed_multiplier = multiplier;
+        }
+    };
     #[allow(clippy::single_match)]
     match registry_block {
+        // WebBlock#entityInside (Weaving widens the multiplier)
+        BlockKind::Cobweb => {
+            make_stuck(if active_effects.get_level(MobEffect::Weaving).is_some() {
+                Vec3::new(0.5, 0.25, 0.5)
+            } else {
+                Vec3::new(0.25, 0.05_f32 as f64, 0.25)
+            });
+        }
+        // SweetBerryBushBlock#entityInside
+        BlockKind::SweetBerryBush => {
+            make_stuck(Vec3::new(0.8_f32 as f64, 0.75, 0.8_f32 as f64));
+        }
+        // PowderSnowBlock#entityInside: only when the block the bot's feet are in is
+        // powdered snow
+        BlockKind::PowderSnow => {
+            if BlockKind::from(in_block_state) == BlockKind::PowderSnow {
+                make_stuck(Vec3::new(0.9_f32 as f64, 1.5, 0.9_f32 as f64));
+            }
+        }
         BlockKind::BubbleColumn => {
             let block_above = world.get_block_state(block_pos.up(1)).unwrap_or_default();
             let is_block_above_empty =
@@ -345,6 +464,9 @@ fn handle_entity_inside_block(
 pub struct EntityMovement {
     pub from: Vec3,
     pub to: Vec3,
+    /// The movement asked for before collisions; vanilla then checks the blocks
+    /// one axis at a time (`Direction.axisStepOrder`).
+    pub axis_dependent_original_movement: Option<Vec3>,
 }
 
 pub fn jump_from_ground(
@@ -424,8 +546,8 @@ fn handle_relative_friction_and_calculate_movement(ctx: &mut MoveCtx, block_fric
     move_colliding(ctx, ctx.physics.velocity);
     // let delta_movement = entity.delta;
     // ladders
-    //   if ((entity.horizontalCollision || entity.jumping) && (entity.onClimbable()
-    // || entity.getFeetBlockState().is(Blocks.POWDER_SNOW) &&
+    //   if ((entity.horizontalCollision || entity.jumping) &&
+    // (entity.onClimbable() || entity.getFeetBlockState().is(Blocks.POWDER_SNOW) &&
     // PowderSnowBlock.canEntityWalkOnPowderSnow(entity))) {      var3 = new
     // Vec3(var3.x, 0.2D, var3.z);   }
 
@@ -437,7 +559,10 @@ fn handle_relative_friction_and_calculate_movement(ctx: &mut MoveCtx, block_fric
             .unwrap_or_default()
             .into();
 
-        if *ctx.on_climbable || block_at_feet == BlockKind::PowderSnow {
+        // Null fork: powdered snow only lifts a bot wearing leather boots
+        // (`PowderSnowBlock#canEntityWalkOnPowderSnow`).
+        if *ctx.on_climbable || (block_at_feet == BlockKind::PowderSnow && ctx.wears_leather_boots)
+        {
             ctx.physics.velocity.y = 0.2;
         }
     }

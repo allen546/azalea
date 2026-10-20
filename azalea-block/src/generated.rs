@@ -1798,7 +1798,7 @@ make_block_states! {
             "west": West(false),
         },
         netherrack => BlockBehavior::new().requires_correct_tool_for_drops().strength(0.4, 0.4), {},
-        soul_sand => BlockBehavior::new().strength(0.5, 0.5), {},
+        soul_sand => BlockBehavior::new().strength(0.5, 0.5).speed_factor(0.4), {},
         soul_soil => BlockBehavior::new().strength(0.5, 0.5), {},
         basalt => BlockBehavior::new().requires_correct_tool_for_drops().strength(1.25, 4.2), {
             "axis": Axis::Y,
@@ -3952,7 +3952,7 @@ make_block_states! {
             "facing": FacingCardinal::North,
             "honey_level": HoneyLevel::_0,
         },
-        honey_block => BlockBehavior::new(), {},
+        honey_block => BlockBehavior::new().speed_factor(0.4).jump_factor(0.5), {},
         honeycomb_block => BlockBehavior::new().strength(0.6, 0.6), {},
         netherite_block => BlockBehavior::new().requires_correct_tool_for_drops().strength(50.0, 1200.0), {},
         ancient_debris => BlockBehavior::new().requires_correct_tool_for_drops().strength(30.0, 1200.0), {},

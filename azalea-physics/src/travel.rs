@@ -5,8 +5,10 @@ use azalea_core::{
 };
 use azalea_entity::{
     Attributes, HasClientLoaded, Jumping, LocalEntity, LookDirection, OnClimbable, Physics,
-    PlayerAbilities, Pose, Position, metadata::Sprinting, move_relative,
+    PlayerAbilities, Pose, Position, inventory::Inventory, metadata::Sprinting, move_relative,
 };
+use azalea_inventory::components::EquipmentSlot;
+use azalea_registry::builtin::ItemKind;
 use azalea_world::{World, WorldName, Worlds};
 use bevy_ecs::prelude::*;
 
@@ -36,6 +38,7 @@ pub fn travel(
             Option<&Sprinting>,
             Option<&Pose>,
             Option<&PlayerAbilities>,
+            Option<&Inventory>,
             &mut Physics,
             &mut LookDirection,
             &mut Position,
@@ -56,6 +59,7 @@ pub fn travel(
         sprinting,
         pose,
         abilities,
+        inventory,
         mut physics,
         direction,
         position,
@@ -86,6 +90,10 @@ pub fn travel(
             on_climbable: *on_climbable,
             pose: pose.copied(),
             jumping: *jumping,
+            wears_leather_boots: inventory.is_some_and(|inv| {
+                inv.get_equipment(EquipmentSlot::Feet)
+                    .is_some_and(|s| s.kind() == ItemKind::LeatherBoots)
+            }),
         };
 
         if ctx.physics.is_in_water() || ctx.physics.is_in_lava() {
@@ -308,7 +316,8 @@ pub fn no_collision(
     } else {
         let collision = border_collision(entity_physics, aabb);
         if let Some(collision) = collision {
-            // !Shapes.joinIsNotEmpty(collision, Shapes.create(aabb), BooleanOp.AND);
+            // !Shapes.joinIsNotEmpty(collision, Shapes.create(aabb),
+            // BooleanOp.AND);
             !Shapes::matches_anywhere(&collision.into(), &aabb.into(), |a, b| a && b)
         } else {
             true
@@ -349,8 +358,8 @@ fn get_effective_gravity() -> f64 {
 }
 
 pub fn fluid_jump_threshold() -> f64 {
-    // this is 0.0 for entities with an eye height lower than 0.4, but that's not
-    // implemented since it's usually not relevant for players (unless the player
-    // was shrunk)
+    // this is 0.0 for entities with an eye height lower than 0.4, but that's
+    // not implemented since it's usually not relevant for players (unless
+    // the player was shrunk)
     0.4
 }

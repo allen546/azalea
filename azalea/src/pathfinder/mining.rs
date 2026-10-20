@@ -82,6 +82,12 @@ impl MiningCache {
             return f32::INFINITY;
         };
 
+        // Null fork: the mining model has no shears or sword speed rule for a cobweb,
+        // so the planner goes around instead of breaking it.
+        if BlockKind::from(block) == BlockKind::Cobweb {
+            return f32::INFINITY;
+        }
+
         // SAFETY: mining is single-threaded, so this is safe
         let block_state_id_costs = unsafe { &mut *self.block_state_id_costs.get() };
 

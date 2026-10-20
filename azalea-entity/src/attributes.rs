@@ -72,16 +72,27 @@ impl AttributeInstance {
         }
     }
 
+    /// In Mojmap, this is `AttributeInstance#calculateValue`: all `AddValue`
+    /// modifiers first, then `AddMultipliedBase` (of that sum), then
+    /// `AddMultipliedTotal`, whatever order the modifiers were added in.
+    // Spec: specs/B1-movement.md §4.2
     pub fn calculate(&self) -> f64 {
-        let mut total = self.base;
+        let mut with_adds = self.base;
         for modifier in self.modifiers_by_id.values() {
-            match modifier.operation {
-                AttributeModifierOperation::AddValue => total += modifier.amount,
-                AttributeModifierOperation::AddMultipliedBase => {
-                    total += modifier.amount * self.base
-                }
-                AttributeModifierOperation::AddMultipliedTotal => total *= 1. + modifier.amount,
-            };
+            if let AttributeModifierOperation::AddValue = modifier.operation {
+                with_adds += modifier.amount;
+            }
+        }
+        let mut total = with_adds;
+        for modifier in self.modifiers_by_id.values() {
+            if let AttributeModifierOperation::AddMultipliedBase = modifier.operation {
+                total += with_adds * modifier.amount;
+            }
+        }
+        for modifier in self.modifiers_by_id.values() {
+            if let AttributeModifierOperation::AddMultipliedTotal = modifier.operation {
+                total *= 1. + modifier.amount;
+            }
         }
         total
     }
@@ -138,5 +149,35 @@ pub fn creative_entity_interaction_range_modifier() -> AttributeModifier {
         id: Identifier::new("creative_mode_entity_range"),
         amount: 2.0,
         operation: AttributeModifierOperation::AddValue,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use azalea_inventory::components::AttributeModifier;
+
+    use super::*;
+
+    // `AttributeInstance#calculateValue` adds the flat modifiers first and then
+    // multiplies, whatever order they were inserted in (patch 26).
+    #[test]
+    fn test_modifier_operations_apply_in_vanilla_order() {
+        for sprint_first in [true, false] {
+            let mut speed = AttributeInstance::new(0.1);
+            let frost = AttributeModifier {
+                id: Identifier::new("powder_snow"),
+                amount: -0.0136,
+                operation: AttributeModifierOperation::AddValue,
+            };
+            if sprint_first {
+                speed.insert(sprinting_modifier());
+                speed.insert(frost);
+            } else {
+                speed.insert(frost);
+                speed.insert(sprinting_modifier());
+            }
+            let want = (0.1 - 0.0136) * (1. + 0.3f32 as f64);
+            assert!((speed.calculate() - want).abs() < 1e-12, "{}", speed.calculate());
+        }
     }
 }

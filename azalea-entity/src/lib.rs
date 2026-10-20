@@ -307,6 +307,14 @@ pub struct Physics {
     pub was_touching_water: bool,
 
     pub fall_distance: f64,
+    /// Null fork: `Entity#stuckSpeedMultiplier`. A block we are inside sets
+    /// it after a move. The next move scales its movement by it, then clears
+    /// it. Zero means "not stuck".
+    pub stuck_speed_multiplier: Vec3,
+    /// Null fork: `Entity#movementThisTick`. Each `move` of the tick records
+    /// (position before, position after, the movement asked for). The inside-block
+    /// check of the end of the tick walks them.
+    pub movement_this_tick: Vec<(Vec3, Vec3, Vec3)>,
     // TODO: implement remaining_fire_ticks
     pub remaining_fire_ticks: i32,
 }
@@ -341,6 +349,8 @@ impl Physics {
             was_touching_water: false,
 
             fall_distance: 0.,
+            stuck_speed_multiplier: Vec3::ZERO,
+            movement_this_tick: Vec::new(),
             remaining_fire_ticks: 0,
         }
     }
