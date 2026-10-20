@@ -56,7 +56,7 @@ use bevy_ecs::prelude::*;
 
 use crate::{
     block_actions::{
-        AutoCrouchHold, CROUCH_EYE_HEIGHT, handle_look_at_block_queued, handle_use_block_queued,
+        AutoCrouchHold, CROUCH_EYE_HEIGHT, ClickEvidence, EvidenceEntities, handle_look_at_block_queued, handle_use_block_queued,
         is_crouching, settle_use_blocks,
     },
     interact::{
@@ -69,6 +69,7 @@ use crate::{
     movement::ItemInUse,
     packet::game::SendGamePacketEvent,
     respawn::{DeadAction, DeathScreen, RespawnLog},
+    tick_counter::TicksConnected,
 };
 
 /// Ticks after the click with no screen before the result is `NoScreen`. An entity click has no
@@ -383,6 +384,9 @@ pub struct UseEntityResult {
     pub entity_id: i32,
     pub outcome: UseEntityOutcome,
     pub refusal: Option<EntityUseRefusal>,
+    /// What the crosshair check saw, when it refused after the ray was cast (none for refusals
+    /// decided before: screen, busy, spectator, unknown or unsupported entity, dead).
+    pub evidence: Option<ClickEvidence>,
     /// The hit point sent in INTERACT_AT, relative to the entity (when sent).
     pub sent_location: Option<Vec3>,
     /// Ticks since it was sent; stops counting when settled.
@@ -400,13 +404,20 @@ pub struct EntityUseResults {
 }
 
 impl EntityUseResults {
-    fn finish(&mut self, entity_id: i32, refusal: Option<EntityUseRefusal>, sent: Option<Vec3>) {
+    fn finish(
+        &mut self,
+        entity_id: i32,
+        refusal: Option<EntityUseRefusal>,
+        sent: Option<Vec3>,
+        evidence: Option<ClickEvidence>,
+    ) {
         self.next_id += 1;
         self.last_use = Some(UseEntityResult {
             id: self.next_id,
             entity_id,
             outcome: if refusal.is_some() { UseEntityOutcome::Refused } else { UseEntityOutcome::Pending },
             refusal,
+            evidence,
             sent_location: sent,
             elapsed_ticks: 0,
             open_ticks: None,
@@ -433,7 +444,7 @@ pub fn refuse_entity_actions_while_dead(
 ) {
     for (entity, mut results, mut log, use_q, look_q) in &mut query {
         if let Some(q) = use_q {
-            results.finish(q.entity_id, Some(EntityUseRefusal::Dead), None);
+            results.finish(q.entity_id, Some(EntityUseRefusal::Dead), None, None);
             log.refuse(DeadAction::UseEntity);
             commands.entity(entity).remove::<UseEntityQueued>();
         }
@@ -515,13 +526,14 @@ fn refuse(
     results: &mut EntityUseResults,
     id: i32,
     why: EntityUseRefusal,
+    evidence: Option<ClickEvidence>,
 ) {
     commands.entity(entity).remove::<UseEntityQueued>();
     if holding {
         mv.trying_to_crouch = false;
         commands.entity(entity).remove::<AutoCrouchHold>();
     }
-    results.finish(id, Some(why), None);
+    results.finish(id, Some(why), None, evidence);
 }
 
 // Spec: specs/B3-inventory-crafting.md §4.7 (right-click like `Minecraft#startUseItem`, entity branch)
@@ -542,7 +554,9 @@ pub fn handle_use_entity_queued(
         &mut LookDirection,
         (Has<OpenScreen>, Has<Mining>, Has<ItemInUse>, Has<DeathScreen>),
         (&Inventory, Option<&LocalGameMode>),
+        &TicksConnected,
     )>,
+    entities: EvidenceEntities,
     targets: Query<(&EntityKindComponent, &Position, &LastBoundingBox)>,
     aabb_query: AabbQuery,
     pickable: MaybePickableEntityQuery,
@@ -561,34 +575,35 @@ pub fn handle_use_entity_queued(
         mut look,
         (screen, mining, using, dead),
         (inv, game_mode),
+        connected,
     ) in &mut query
     {
         let id = queued.entity_id;
         // Same states as `UseBlockQueued` (a vanilla client has no crosshair with a screen open,
         // does not start a use while mining or using an item), plus spectators.
         if dead || screen || inv.id != 0 {
-            refuse(&mut commands, entity, holding, &mut mv, &mut results, id, if dead { EntityUseRefusal::Dead } else { EntityUseRefusal::ScreenOpen });
+            refuse(&mut commands, entity, holding, &mut mv, &mut results, id, if dead { EntityUseRefusal::Dead } else { EntityUseRefusal::ScreenOpen }, None);
             continue;
         }
         if mining || using {
-            refuse(&mut commands, entity, holding, &mut mv, &mut results, id, EntityUseRefusal::Busy);
+            refuse(&mut commands, entity, holding, &mut mv, &mut results, id, EntityUseRefusal::Busy, None);
             continue;
         }
         if game_mode.is_some_and(|g| g.current == GameMode::Spectator) {
-            refuse(&mut commands, entity, holding, &mut mv, &mut results, id, EntityUseRefusal::Spectator);
+            refuse(&mut commands, entity, holding, &mut mv, &mut results, id, EntityUseRefusal::Spectator, None);
             continue;
         }
         let Some((target, (kind, target_position, target_box))) = ids
             .get_by_minecraft_entity(MinecraftEntityId(id))
             .and_then(|e| targets.get(e).ok().map(|(k, p, b)| (e, (k.0, **p, b.0))))
         else {
-            refuse(&mut commands, entity, holding, &mut mv, &mut results, id, EntityUseRefusal::UnknownEntity);
+            refuse(&mut commands, entity, holding, &mut mv, &mut results, id, EntityUseRefusal::UnknownEntity, None);
             continue;
         };
         let secondary = is_crouching(&mv, crouching);
         let plan = entity_use_plan(kind, secondary);
         if plan == EntityUsePlan::Unsupported {
-            refuse(&mut commands, entity, holding, &mut mv, &mut results, id, EntityUseRefusal::UnsupportedEntity);
+            refuse(&mut commands, entity, holding, &mut mv, &mut results, id, EntityUseRefusal::UnsupportedEntity, None);
             continue;
         }
         let world = world.shared.read();
@@ -596,10 +611,22 @@ pub fn handle_use_entity_queued(
         let hit = crosshair(entity, *look, eye, &physics.bounding_box, &world, attrs, &aabb_query, &pickable);
         let range = attrs.entity_interaction_range.calculate();
         let checked = check_entity_click(eye, view_vector(*look), range, target, &target_box, &hit);
+        // Patch 28: what this check saw, kept for a refusal. The pick above is fresh, so the hit
+        // cannot be older than the look.
+        let evidence = ClickEvidence::capture(
+            connected.0,
+            eye,
+            dims.eye_height.into(),
+            *look,
+            secondary,
+            &hit,
+            false,
+            &entities,
+        );
         let hit = match checked {
             Ok(h) => h.clone(),
             Err(why) => {
-                refuse(&mut commands, entity, holding, &mut mv, &mut results, id, why);
+                refuse(&mut commands, entity, holding, &mut mv, &mut results, id, why, Some(evidence));
                 continue;
             }
         };
@@ -609,7 +636,7 @@ pub fn handle_use_entity_queued(
             // Holding the crouch and still not crouching: something let go of it; never click
             // standing.
             if holding || plan == EntityUsePlan::WouldMount || !queued.auto_crouch {
-                refuse(&mut commands, entity, holding, &mut mv, &mut results, id, EntityUseRefusal::WouldMount);
+                refuse(&mut commands, entity, holding, &mut mv, &mut results, id, EntityUseRefusal::WouldMount, Some(evidence));
                 continue;
             }
             mv.trying_to_crouch = true;
@@ -633,7 +660,7 @@ pub fn handle_use_entity_queued(
         // `Minecraft#startUseItem` (entity branch): `interactAt` then `interact` for the main hand,
         // then the arm swing for the predicted SUCCESS.
         let packets = interact_packets(MinecraftEntityId(id), secondary, hit.location, target_position);
-        results.finish(id, None, Some(interact_at_location(hit.location, target_position)));
+        results.finish(id, None, Some(interact_at_location(hit.location, target_position)), None);
         for p in packets {
             commands.trigger(SendGamePacketEvent::new(entity, p));
         }

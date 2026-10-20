@@ -20,12 +20,14 @@
 use azalea_block::BlockState;
 use azalea_core::{
     direction::Direction,
+    entity_id::MinecraftEntityId,
     hit_result::{BlockHitResult, HitResult},
     position::{BlockPos, Vec3},
     tick::GameTick,
 };
 use azalea_entity::{
-    Attributes, Crouching, LookDirection, Position, dimensions::EntityDimensions, inventory::Inventory,
+    Attributes, Crouching, EntityKindComponent, LookDirection, Position, dimensions::EntityDimensions,
+    inventory::Inventory,
 };
 use azalea_physics::{PhysicsSystems, collision::{BlockWithShape, VoxelShape}};
 use azalea_protocol::packets::game::{
@@ -43,7 +45,7 @@ use azalea_world::ChunkStorage;
 use std::collections::VecDeque;
 
 use bevy_app::{App, Plugin};
-use bevy_ecs::prelude::*;
+use bevy_ecs::{prelude::*, system::SystemChangeTick};
 
 use crate::{
     interact::{
@@ -58,6 +60,7 @@ use crate::{
         SkipStartTickProgress,
     },
     inventory::OpenScreen,
+    tick_counter::TicksConnected,
     movement::ItemInUse,
     packet::game::SendGamePacketEvent,
 };
@@ -85,6 +88,8 @@ impl Plugin for BlockActionsPlugin {
                 GameTick,
                 (handle_break_block_queued, begin_break_result, handle_stop_mining_queued)
                     .chain()
+                    // begin_break_result reads the look for its evidence (patch 28)
+                    .before(crate::entity_actions::handle_look_at_entity_queued)
                     .before(MiningSystems),
             )
             .add_systems(
@@ -131,6 +136,7 @@ pub fn refuse_block_actions_while_dead(
             position,
             outcome: BlockActionOutcome::Refused,
             refusal: Some(BlockActionRefusal::Dead),
+            evidence: None,
             seq: None,
             finish_ticks: None,
             ack_ticks: None,
@@ -160,6 +166,7 @@ pub fn refuse_block_actions_while_dead(
                 position: q.position,
                 outcome: UseBlockOutcome::Refused,
                 refusal: Some(BlockActionRefusal::Dead),
+                evidence: None,
                 seq: None,
                 elapsed_ticks: 0,
                 open_ticks: None,
@@ -229,6 +236,75 @@ impl BlockActionRefusal {
     }
 }
 
+/// What the crosshair ray hit when a click was checked.
+// Spec: specs/B6-placement-breaking.md §4.1 (refusals carry their evidence)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HitSeen {
+    Miss,
+    Block { pos: BlockPos, face: Direction, point: Vec3 },
+    /// The entity's network id and registry name (`"minecraft:armor_stand"`).
+    Entity { id: i32, kind: &'static str },
+}
+
+/// The values a refused click was checked with, so a refusal can be explained afterwards.
+/// Recorded from the same eye, look and hit the check used; it changes no decision.
+// Spec: specs/B6-placement-breaking.md §4.1 (refusals carry their evidence)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClickEvidence {
+    /// `TicksConnected` when the click was checked.
+    pub tick: u64,
+    pub eye: Vec3,
+    /// The eye height above the feet from the entity's current dimensions (pose included).
+    pub eye_height: f64,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub crouching: bool,
+    pub hit: HitSeen,
+    /// The look changed after the crosshair was last picked (the pick runs between ticks), so the
+    /// hit may be from before the look landed.
+    pub look_changed_after_hit: bool,
+}
+
+/// The entities a hit can name, to give the id and kind.
+pub(crate) type EvidenceEntities<'w, 's, 'a> =
+    Query<'w, 's, (&'a MinecraftEntityId, &'a EntityKindComponent)>;
+
+impl ClickEvidence {
+    // Spec: specs/B6-placement-breaking.md §4.1 (refusals carry their evidence)
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn capture(
+        tick: u64,
+        eye: Vec3,
+        eye_height: f64,
+        look: LookDirection,
+        crouching: bool,
+        hit: &HitResult,
+        look_changed_after_hit: bool,
+        entities: &EvidenceEntities,
+    ) -> Self {
+        let hit = match hit {
+            HitResult::Block(r) if r.miss => HitSeen::Miss,
+            HitResult::Block(r) => {
+                HitSeen::Block { pos: r.block_pos, face: r.direction, point: r.location }
+            }
+            HitResult::Entity(r) => entities
+                .get(r.entity)
+                .map(|(id, kind)| HitSeen::Entity { id: id.0, kind: kind.0.to_str() })
+                .unwrap_or(HitSeen::Entity { id: -1, kind: "unknown" }),
+        };
+        Self {
+            tick,
+            eye,
+            eye_height,
+            yaw: look.y_rot(),
+            pitch: look.x_rot(),
+            crouching,
+            hit,
+            look_changed_after_hit,
+        }
+    }
+}
+
 /// The state of one placement or break, as of the last `GameTick`.
 // Spec: specs/B6-placement-breaking.md §4.6 (acknowledgement and readback)
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -241,6 +317,8 @@ pub struct BlockActionResult {
     pub outcome: BlockActionOutcome,
     /// Why a `Refused` action was refused: the client's own checks (nothing was sent), or `NoAck`.
     pub refusal: Option<BlockActionRefusal>,
+    /// What the client-side check saw, when it refused (not for `NoAck` or a dead bot).
+    pub evidence: Option<ClickEvidence>,
     /// Sequence number of the packet whose ack settles the action; for a break, `None` until the
     /// finishing packet is sent.
     pub seq: Option<u32>,
@@ -631,7 +709,7 @@ pub fn handle_place_block_queued(
         &PlaceBlockQueued,
         &mut BlockStatePredictionHandler,
         &mut BlockActionResults,
-        &HitResultComponent,
+        Ref<HitResultComponent>,
         &WorldHolder,
         &Position,
         &EntityDimensions,
@@ -639,7 +717,10 @@ pub fn handle_place_block_queued(
         &Inventory,
         (&mut ClientMovementState, Option<&Crouching>, Has<AutoCrouchHold>),
         &mut LookDirection,
+        &TicksConnected,
     )>,
+    entities: EvidenceEntities,
+    ticks: SystemChangeTick,
     mut finished: MessageWriter<BlockActionFinished>,
 ) {
     for (
@@ -655,9 +736,24 @@ pub fn handle_place_block_queued(
         inv,
         (mut mv, crouching, holding),
         mut look,
+        connected,
     ) in &mut query
     {
         let world = world.shared.read();
+        // What the checks below see, kept for a refusal (patch 28).
+        let look_after_hit = look.last_changed().is_newer_than(hit_result.last_changed(), ticks.this_run());
+        let evidence = |mv: &ClientMovementState, look: LookDirection| {
+            ClickEvidence::capture(
+                connected.0,
+                position.up(dims.eye_height.into()),
+                dims.eye_height.into(),
+                look,
+                is_crouching(mv, crouching),
+                &hit_result,
+                look_after_hit,
+                &entities,
+            )
+        };
         let clicked = world.get_block_state(queued.position).unwrap_or_default();
         // Crouch handling: a standing click on a block that uses the click would use it, not place.
         if !holding
@@ -687,6 +783,7 @@ pub fn handle_place_block_queued(
                 position: queued.position.offset_with_direction(queued.direction),
                 outcome: BlockActionOutcome::Refused,
                 refusal: Some(BlockActionRefusal::BlockUsesClick),
+                evidence: Some(evidence(&mv, *look)),
                 seq: None,
                 finish_ticks: None,
                 ack_ticks: None,
@@ -711,7 +808,7 @@ pub fn handle_place_block_queued(
             queued.position,
             Some(queued.direction),
             clicked.outline_shape(),
-            hit_result,
+            &hit_result,
         );
         // The target depends on where the click lands (a slab) and what is held (snow).
         let held = match inv.held_item() {
@@ -731,6 +828,7 @@ pub fn handle_place_block_queued(
             position: target,
             outcome: BlockActionOutcome::Pending,
             refusal: None,
+            evidence: None,
             seq: None,
             finish_ticks: None,
             ack_ticks: None,
@@ -741,6 +839,7 @@ pub fn handle_place_block_queued(
             Err(why) => {
                 result.outcome = BlockActionOutcome::Refused;
                 result.refusal = Some(why);
+                result.evidence = Some(evidence(&mv, *look));
                 finished.write(BlockActionFinished { entity, is_break: false, result });
             }
             Ok(r) => {
@@ -788,6 +887,7 @@ pub struct UseBlockResult {
     pub position: BlockPos,
     pub outcome: UseBlockOutcome,
     pub refusal: Option<BlockActionRefusal>,
+    pub evidence: Option<ClickEvidence>,
     pub seq: Option<u32>,
     /// Ticks since it was sent; stops counting when settled.
     pub elapsed_ticks: u32,
@@ -805,7 +905,7 @@ pub fn handle_use_block_queued(
         &UseBlockQueued,
         &mut BlockStatePredictionHandler,
         &mut BlockActionResults,
-        &HitResultComponent,
+        Ref<HitResultComponent>,
         &WorldHolder,
         &Position,
         &EntityDimensions,
@@ -813,7 +913,10 @@ pub fn handle_use_block_queued(
         &Inventory,
         (&ClientMovementState, Option<&Crouching>),
         (Has<OpenScreen>, Has<Mining>, Has<ItemInUse>, Has<crate::respawn::DeathScreen>),
+        (Ref<LookDirection>, &TicksConnected),
     )>,
+    entities: EvidenceEntities,
+    ticks: SystemChangeTick,
 ) {
     for (
         entity,
@@ -828,6 +931,7 @@ pub fn handle_use_block_queued(
         inv,
         (mv, crouching),
         (screen, mining, using, dead),
+        (look, connected),
     ) in &mut query
     {
         commands.entity(entity).remove::<UseBlockQueued>();
@@ -845,7 +949,7 @@ pub fn handle_use_block_queued(
         } else if places_instead {
             Err(BlockActionRefusal::CrouchingWithItem)
         } else {
-            check_click(eye, range, queued.position, queued.direction, state.outline_shape(), hit_result)
+            check_click(eye, range, queued.position, queued.direction, state.outline_shape(), &hit_result)
         };
         results.next_id += 1;
         let mut result = UseBlockResult {
@@ -853,6 +957,7 @@ pub fn handle_use_block_queued(
             position: queued.position,
             outcome: UseBlockOutcome::Pending,
             refusal: None,
+            evidence: None,
             seq: None,
             elapsed_ticks: 0,
             open_ticks: None,
@@ -862,6 +967,16 @@ pub fn handle_use_block_queued(
             Err(why) => {
                 result.outcome = UseBlockOutcome::Refused;
                 result.refusal = Some(why);
+                result.evidence = Some(ClickEvidence::capture(
+                    connected.0,
+                    eye,
+                    dims.eye_height.into(),
+                    *look,
+                    is_crouching(mv, crouching),
+                    &hit_result,
+                    look.last_changed().is_newer_than(hit_result.last_changed(), ticks.this_run()),
+                    &entities,
+                ));
             }
             Ok(r) => {
                 let seq = prediction.start_predicting();
@@ -892,16 +1007,30 @@ pub fn begin_break_result(
             &Position,
             &EntityDimensions,
             &Attributes,
-            &HitResultComponent,
+            Ref<HitResultComponent>,
             (&LocalGameMode, &Inventory),
             Has<CheckBreakClick>,
+            (Ref<LookDirection>, &TicksConnected, &ClientMovementState, Option<&Crouching>),
         ),
         Added<MiningQueued>,
     >,
+    entities: EvidenceEntities,
+    ticks: SystemChangeTick,
     mut finished: MessageWriter<BlockActionFinished>,
 ) {
-    for (entity, queued, mut results, world, position, dims, attrs, hit_result, (mode, inv), checked) in
-        &mut query
+    for (
+        entity,
+        queued,
+        mut results,
+        world,
+        position,
+        dims,
+        attrs,
+        hit_result,
+        (mode, inv),
+        checked,
+        (look, connected, mv, crouching),
+    ) in &mut query
     {
         commands.entity(entity).remove::<CheckBreakClick>();
         if results.last_break.is_some_and(|b| {
@@ -919,6 +1048,7 @@ pub fn begin_break_result(
             position: queued.position,
             outcome: BlockActionOutcome::Pending,
             refusal: None,
+            evidence: None,
             seq: None,
             finish_ticks: None,
             ack_ticks: None,
@@ -929,13 +1059,23 @@ pub fn begin_break_result(
         let refusal = if check_is_interaction_restricted(&world, queued.position, &mode.current, inv) {
             Some(BlockActionRefusal::NotAllowed)
         } else if checked {
-            check_click(eye, range, queued.position, None, state.outline_shape(), hit_result).err()
+            check_click(eye, range, queued.position, None, state.outline_shape(), &hit_result).err()
         } else {
             None
         };
         if let Some(why) = refusal {
             result.outcome = BlockActionOutcome::Refused;
             result.refusal = Some(why);
+            result.evidence = Some(ClickEvidence::capture(
+                connected.0,
+                eye,
+                dims.eye_height.into(),
+                *look,
+                is_crouching(mv, crouching),
+                &hit_result,
+                look.last_changed().is_newer_than(hit_result.last_changed(), ticks.this_run()),
+                &entities,
+            ));
             commands.entity(entity).remove::<MiningQueued>();
             finished.write(BlockActionFinished { entity, is_break: true, result });
         }
@@ -1144,6 +1284,43 @@ mod tests {
 
     use super::*;
 
+    use azalea_core::hit_result::EntityHitResult;
+    use azalea_registry::builtin::EntityKind;
+    use bevy_ecs::system::RunSystemOnce;
+
+    // Spec: specs/B6-placement-breaking.md §4.1 (refusals carry their evidence)
+    #[test]
+    fn evidence_names_the_block_the_miss_and_the_entity_the_ray_hit() {
+        let mut world = bevy_ecs::world::World::new();
+        let stand = world.spawn((MinecraftEntityId(7), EntityKindComponent(EntityKind::ArmorStand))).id();
+        let eye = Vec3::new(1.0, 65.62, 2.0);
+        let look = LookDirection::new(9.75, 13.5);
+        let block = HitResult::Block(BlockHitResult {
+            location: Vec3::new(1.0, 66.0, 3.0),
+            miss: false,
+            direction: Direction::North,
+            block_pos: BlockPos::new(1, 65, 3),
+            inside: false,
+            world_border: false,
+        });
+        let miss = HitResult::new_miss(Vec3::new(1.0, 65.0, 6.0), Direction::South, BlockPos::new(1, 65, 6));
+        let entity = HitResult::Entity(EntityHitResult { location: eye, entity: stand });
+        let seen = world
+            .run_system_once(move |entities: EvidenceEntities| {
+                [&block, &miss, &entity]
+                    .map(|h| ClickEvidence::capture(5, eye, 1.62, look, false, h, true, &entities))
+            })
+            .unwrap();
+        assert_eq!(
+            seen[0].hit,
+            HitSeen::Block { pos: BlockPos::new(1, 65, 3), face: Direction::North, point: Vec3::new(1.0, 66.0, 3.0) }
+        );
+        assert_eq!(seen[1].hit, HitSeen::Miss);
+        assert_eq!(seen[2].hit, HitSeen::Entity { id: 7, kind: "minecraft:armor_stand" });
+        assert_eq!((seen[0].tick, seen[0].eye_height, seen[0].yaw, seen[0].pitch), (5, 1.62, 9.75, 13.5));
+        assert!(seen[0].look_changed_after_hit && !seen[0].crouching);
+    }
+
     #[test]
     fn thin_shape_is_visible_from_between_its_top_and_the_cell_top() {
         let carpet = box_shape(0., 0., 0., 1., 0.0625, 1.);
@@ -1189,6 +1366,7 @@ mod tests {
             position: BlockPos::new(x, 64, 0),
             outcome: BlockActionOutcome::Pending,
             refusal: None,
+            evidence: None,
             seq: Some(seq),
             finish_ticks: None,
             ack_ticks: None,
@@ -1269,6 +1447,7 @@ mod tests {
             position: BlockPos::new(0, 64, 0),
             outcome: BlockActionOutcome::Pending,
             refusal: None,
+            evidence: None,
             seq: None,
             finish_ticks: None,
             ack_ticks: None,
@@ -1290,6 +1469,7 @@ mod tests {
             position: BlockPos::new(0, 64, 0),
             outcome: UseBlockOutcome::Pending,
             refusal: None,
+            evidence: None,
             seq: Some(seq),
             elapsed_ticks: 0,
             open_ticks: None,
