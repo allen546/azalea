@@ -9,6 +9,7 @@ use azalea_core::{
     position::{ChunkPos, Vec3},
 };
 use azalea_entity::{
+    unmodelled::{RidingVehicle, WorldBorderState},
     Attributes, Dead, EntityBundle, EntityKindComponent, HasClientLoaded, LoadedBy, LocalEntity, LookDirection,
     Physics, PlayerAbilities, Position,
     effect_events::{AddEffectEvent, RemoveEffectsEvent},
@@ -817,8 +818,48 @@ impl GamePacketHandler<'_> {
         debug!("Got set entity link packet {p:?}");
     }
 
+    // Null fork (patch 30), `ClientPacketListener#handleInitializeBorder`: the unmodelled-movement
+    // gate needs to know when the bot's box is at the border. A lerp time over 0 starts a lerp.
+    // Spec: specs/F5-version-layer.md §4.6 (the world border as a Movement entry)
     pub fn initialize_border(&mut self, p: &ClientboundInitializeBorder) {
         debug!("Got initialize border packet {p:?}");
+        self.update_border(|b, _now| {
+            *b = WorldBorderState {
+                center_x: p.new_center_x,
+                center_z: p.new_center_z,
+                from_size: if p.lerp_time > 0 { p.old_size } else { p.new_size },
+                to_size: p.new_size,
+                start_tick: _now,
+                lerp_ticks: p.lerp_time,
+            };
+        });
+    }
+
+    fn update_border(&mut self, f: impl FnOnce(&mut WorldBorderState, u64)) {
+        as_system::<(Commands, Query<(&TicksConnected, Option<&mut WorldBorderState>)>)>(
+            self.ecs,
+            |(mut commands, mut query)| {
+                let Ok((ticks, border)) = query.get_mut(self.player) else {
+                    return;
+                };
+                let now = ticks.0;
+                match border {
+                    Some(mut b) => f(&mut b, now),
+                    None => {
+                        let mut b = WorldBorderState {
+                            center_x: 0.0,
+                            center_z: 0.0,
+                            from_size: 5.9999968E7,
+                            to_size: 5.9999968E7,
+                            start_tick: now,
+                            lerp_ticks: 0,
+                        };
+                        f(&mut b, now);
+                        commands.entity(self.player).insert(b);
+                    }
+                }
+            },
+        );
     }
 
     pub fn set_time(&mut self, _p: &ClientboundSetTime) {
@@ -1514,6 +1555,7 @@ impl GamePacketHandler<'_> {
                     &GameProfileComponent,
                     &ClientInformation,
                     Option<&mut WorldName>,
+                    Option<&Attributes>,
                 ),
                 With<LocalEntity>,
             >,
@@ -1523,12 +1565,13 @@ impl GamePacketHandler<'_> {
         )>(
             self.ecs,
             |(mut commands, mut query, mut events, mut worlds, mut loaded_by_query)| {
-                let Ok((mut world_holder, game_profile, client_information, world_name)) =
+                let Ok((mut world_holder, game_profile, client_information, world_name, old_attributes)) =
                     query.get_mut(self.player)
                 else {
                     warn!("Got respawn packet but player doesn't have the required components");
                     return;
                 };
+                let old_attributes = old_attributes.cloned();
 
                 let new_world_name = WorldName(p.common.dimension.clone());
 
@@ -1578,12 +1621,25 @@ impl GamePacketHandler<'_> {
                 }
 
                 // this resets a bunch of our components like physics and stuff
-                let entity_bundle = EntityBundle::new(
+                #[allow(unused_mut)]
+                let mut entity_bundle = EntityBundle::new(
                     game_profile.uuid,
                     Vec3::ZERO,
                     EntityKind::Player,
                     new_world_name,
                 );
+                // Null fork (patch 30), `ClientPacketListener#handleRespawn`: the new player
+                // takes the old attributes' base values always, and the modifiers too when the
+                // packet keeps bit 1 (`KEEP_ATTRIBUTE_MODIFIERS`). Effects start empty. The new
+                // player rides nothing.
+                if let Some(old) = old_attributes {
+                    if p.data_to_keep & 1 != 0 {
+                        entity_bundle.attributes.assign_all_values(&old);
+                    } else {
+                        entity_bundle.attributes.assign_base_values(&old);
+                    }
+                }
+                commands.entity(self.player).remove::<RidingVehicle>();
                 // update the local gamemode and metadata things
                 commands.entity(self.player).insert((
                     LocalGameMode {
@@ -1691,15 +1747,55 @@ impl GamePacketHandler<'_> {
 
     pub fn select_advancements_tab(&mut self, _p: &ClientboundSelectAdvancementsTab) {}
     pub fn set_action_bar_text(&mut self, _p: &ClientboundSetActionBarText) {}
-    pub fn set_border_center(&mut self, _p: &ClientboundSetBorderCenter) {}
-    pub fn set_border_lerp_size(&mut self, _p: &ClientboundSetBorderLerpSize) {}
-    pub fn set_border_size(&mut self, _p: &ClientboundSetBorderSize) {}
+    // Null fork (patch 30): `handleSetBorderCenter`, `handleSetBorderLerpSize`, `handleSetBorderSize`.
+    // Spec: specs/F5-version-layer.md §4.6 (the world border as a Movement entry)
+    pub fn set_border_center(&mut self, p: &ClientboundSetBorderCenter) {
+        self.update_border(|b, _| {
+            b.center_x = p.new_center_x;
+            b.center_z = p.new_center_z;
+        });
+    }
+    pub fn set_border_lerp_size(&mut self, p: &ClientboundSetBorderLerpSize) {
+        self.update_border(|b, now| {
+            b.from_size = p.old_size;
+            b.to_size = p.new_size;
+            b.start_tick = now;
+            b.lerp_ticks = p.lerp_time;
+        });
+    }
+    pub fn set_border_size(&mut self, p: &ClientboundSetBorderSize) {
+        self.update_border(|b, now| {
+            b.from_size = p.size;
+            b.to_size = p.size;
+            b.start_tick = now;
+            b.lerp_ticks = 0;
+        });
+    }
     pub fn set_border_warning_delay(&mut self, _p: &ClientboundSetBorderWarningDelay) {}
     pub fn set_border_warning_distance(&mut self, _p: &ClientboundSetBorderWarningDistance) {}
     pub fn set_camera(&mut self, _p: &ClientboundSetCamera) {}
     pub fn set_display_objective(&mut self, _p: &ClientboundSetDisplayObjective) {}
     pub fn set_objective(&mut self, _p: &ClientboundSetObjective) {}
-    pub fn set_passengers(&mut self, _p: &ClientboundSetPassengers) {}
+    // Null fork (patch 30), `ClientPacketListener#handleSetEntityPassengers`: the bot is a
+    // passenger while a packet for its vehicle lists it. A passenger is moved by the vehicle,
+    // which the fork does not model (the unmodelled-movement gate disconnects the bot).
+    // Spec: specs/F5-version-layer.md §4.6 (a vehicle as a Movement entry)
+    pub fn set_passengers(&mut self, p: &ClientboundSetPassengers) {
+        debug!("Got set passengers packet {p:?}");
+        as_system::<(Commands, Query<(&MinecraftEntityId, Option<&RidingVehicle>)>)>(
+            self.ecs,
+            |(mut commands, query)| {
+                let Ok((me, riding)) = query.get(self.player) else {
+                    return;
+                };
+                if p.passengers.contains(me) {
+                    commands.entity(self.player).insert(RidingVehicle(p.vehicle));
+                } else if riding.is_some_and(|r| r.0 == p.vehicle) {
+                    commands.entity(self.player).remove::<RidingVehicle>();
+                }
+            },
+        );
+    }
     pub fn set_player_team(&mut self, p: &ClientboundSetPlayerTeam) {
         debug!("Got set player team packet {p:?}");
     }

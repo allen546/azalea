@@ -6,6 +6,7 @@ pub mod clip;
 pub mod collision;
 pub mod fluids;
 pub mod travel;
+pub mod unmodelled_contacts;
 
 use std::collections::HashSet;
 

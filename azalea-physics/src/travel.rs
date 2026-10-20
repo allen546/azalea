@@ -4,11 +4,11 @@ use azalea_core::{
     position::{BlockPos, Vec3},
 };
 use azalea_entity::{
-    Attributes, HasClientLoaded, Jumping, LocalEntity, LookDirection, OnClimbable, Physics,
+    ActiveEffects, Attributes, HasClientLoaded, Jumping, LocalEntity, LookDirection, OnClimbable, Physics,
     PlayerAbilities, Pose, Position, inventory::Inventory, metadata::Sprinting, move_relative,
 };
 use azalea_inventory::components::EquipmentSlot;
-use azalea_registry::builtin::ItemKind;
+use azalea_registry::builtin::{ItemKind, MobEffect};
 use azalea_world::{World, WorldName, Worlds};
 use bevy_ecs::prelude::*;
 
@@ -39,6 +39,7 @@ pub fn travel(
             Option<&Pose>,
             Option<&PlayerAbilities>,
             Option<&Inventory>,
+            Option<&ActiveEffects>,
             &mut Physics,
             &mut LookDirection,
             &mut Position,
@@ -60,6 +61,7 @@ pub fn travel(
         pose,
         abilities,
         inventory,
+        active_effects,
         mut physics,
         direction,
         position,
@@ -90,6 +92,9 @@ pub fn travel(
             on_climbable: *on_climbable,
             pose: pose.copied(),
             jumping: *jumping,
+            // Null fork (patch 30): the effects `travelInAir` and `getEffectiveGravity` read.
+            levitation: active_effects.and_then(|e| e.get_level(MobEffect::Levitation)),
+            slow_falling: active_effects.is_some_and(|e| e.get(MobEffect::SlowFalling).is_some()),
             wears_leather_boots: inventory.is_some_and(|inv| {
                 inv.get_equipment(EquipmentSlot::Feet)
                     .is_some_and(|s| s.kind() == ItemKind::LeatherBoots)
@@ -108,8 +113,12 @@ pub fn travel(
 }
 
 /// The usual movement when we're not in water or using an elytra.
+///
+/// Null fork (patch 30), `LivingEntity#travelInAir`: with Levitation the vertical speed (after
+/// the climb and move step) moves a fifth of the way toward 0.05 x (amplifier + 1); without it
+/// the effective gravity is subtracted. Grim: `PointThreeEstimator` (levitation from the level).
+// Spec: specs/B1-movement.md §4.2
 fn travel_in_air(ctx: &mut MoveCtx) {
-    let gravity = get_effective_gravity(ctx.attributes);
 
     let block_pos_below = get_block_pos_below_that_affects_movement(*ctx.position);
 
@@ -129,7 +138,16 @@ fn travel_in_air(ctx: &mut MoveCtx) {
     // this applies the current delta
     let mut movement = handle_relative_friction_and_calculate_movement(ctx, block_friction);
 
-    movement.y -= gravity;
+    if let Some(amplifier) = ctx.levitation {
+        movement.y = levitation_vertical_speed(movement.y, amplifier);
+    } else {
+        // `getEffectiveGravity` reads the speed at this point, after the move step.
+        movement.y -= effective_gravity(
+            ctx.attributes.gravity.calculate(),
+            movement.y,
+            ctx.slow_falling,
+        );
+    }
 
     // if (this.shouldDiscardFriction()) {
     //     this.setDeltaMovement(movement.x, yMovement, movement.z);
@@ -152,7 +170,12 @@ fn travel_in_air(ctx: &mut MoveCtx) {
 fn travel_in_fluid(ctx: &mut MoveCtx) {
     let moving_down = ctx.physics.velocity.y <= 0.;
     let y = ctx.position.y;
-    let gravity = get_effective_gravity(ctx.attributes);
+    // `travelInFluid` reads the effective gravity once, at the start (Slow Falling, patch 30).
+    let gravity = effective_gravity(
+        ctx.attributes.gravity.calculate(),
+        ctx.physics.velocity.y,
+        ctx.slow_falling,
+    );
 
     let acceleration = Vec3::new(
         ctx.physics.x_acceleration as f64,
@@ -352,11 +375,23 @@ fn contains_any_liquid(world: &World, bounding_box: Aabb) -> bool {
     false
 }
 
-/// `LivingEntity#getEffectiveGravity`, without the slow falling cap (TODO).
+/// `LivingEntity#getEffectiveGravity` (patch 30): with Slow Falling and a vertical speed that is
+/// not upward, gravity is at most 0.01. Grim: `PointThreeEstimator` / `Simulation` read the
+/// same cap from the effect.
 // Spec: specs/B1-movement.md §4.2
-fn get_effective_gravity(attributes: &Attributes) -> f64 {
-    // TODO: slow falling effect
-    attributes.gravity.calculate()
+pub fn effective_gravity(gravity: f64, velocity_y: f64, slow_falling: bool) -> f64 {
+    if velocity_y <= 0.0 && slow_falling {
+        gravity.min(0.01)
+    } else {
+        gravity
+    }
+}
+
+/// The vertical speed `LivingEntity#travelInAir` gives with Levitation of this amplifier (0 is
+/// level I) before the air drag: the old speed plus a fifth of the gap to 0.05 x (amplifier + 1).
+// Spec: specs/B1-movement.md §4.2
+pub fn levitation_vertical_speed(velocity_y: f64, amplifier: i32) -> f64 {
+    velocity_y + (0.05 * (amplifier + 1) as f64 - velocity_y) * 0.2
 }
 
 pub fn fluid_jump_threshold() -> f64 {

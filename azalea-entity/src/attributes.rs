@@ -107,6 +107,43 @@ impl Attributes {
         }
     }
 
+    /// `AttributeMap#assignBaseValues`: take the base value of every attribute of `old` and
+    /// keep this map's modifiers. `ClientPacketListener#handleRespawn` does this on every respawn.
+    // Spec: specs/B1-movement.md §4.2
+    pub fn assign_base_values(&mut self, old: &Attributes) {
+        self.assign_from(old, |new, old| new.base = old.base);
+    }
+
+    /// `AttributeMap#assignAllValues`: take the base value and the modifiers of every attribute
+    /// of `old`. `handleRespawn` does this when the packet's keep bit 1
+    /// (`KEEP_ATTRIBUTE_MODIFIERS`) is set.
+    // Spec: specs/B1-movement.md §4.2
+    pub fn assign_all_values(&mut self, old: &Attributes) {
+        self.assign_from(old, |new, old| {
+            new.base = old.base;
+            new.modifiers_by_id = old.modifiers_by_id.clone();
+        });
+    }
+
+    fn assign_from(&mut self, old: &Attributes, copy: impl Fn(&mut AttributeInstance, &AttributeInstance)) {
+        macro_rules! fields {
+            ($($f:ident),*) => { $( copy(&mut self.$f, &old.$f); )* };
+        }
+        fields!(
+            movement_speed, sneaking_speed, attack_speed, water_movement_efficiency,
+            mining_efficiency, block_break_speed, block_interaction_range,
+            entity_interaction_range, step_height, jump_strength, gravity, movement_efficiency,
+            submerged_mining_speed
+        );
+        for (attribute, from) in &old.other {
+            if let Some((_, to)) = self.other.iter_mut().find(|(a, _)| a == attribute) {
+                copy(to, from);
+            } else {
+                self.other.push((*attribute, from.clone()));
+            }
+        }
+    }
+
     /// The attributes in force that change what the client computes but that
     /// the fork does not model, with their current values. Empty when every
     /// such attribute has its default.

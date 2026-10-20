@@ -30,6 +30,7 @@ pub mod task_pool;
 pub mod tick_counter;
 pub mod tick_clock;
 pub mod tick_end;
+pub mod unmodelled_disconnect;
 
 /// This plugin group will add all the default plugins necessary for Azalea to
 /// work.
@@ -65,6 +66,7 @@ impl PluginGroup for DefaultPlugins {
             .add(brand::BrandPlugin)
             .add(client_information::ClientInformationPlugin)
             .add(tick_counter::TickCounterPlugin)
+            .add(unmodelled_disconnect::UnmodelledDisconnectPlugin)
             .add(pong::PongPlugin)
             .add(connection::ConnectionPlugin)
             .add(login::LoginPlugin)

@@ -61,8 +61,16 @@ pub fn handle_outgoing_packets_observer(
     trigger: On<SendGamePacketEvent>,
     mut query: Query<(&mut RawConnection, Option<&InGameState>)>,
     mut dead: Query<&mut RespawnLog, With<DeathScreen>>,
+    mut after_unmodelled: Query<&mut crate::unmodelled_disconnect::PacketsAfterUnmodelledDisconnect>,
 ) {
     let event = trigger.event();
+
+    // Patch 30: once the unmodelled-movement gate has closed the connection nothing is written;
+    // the attempt is counted so the ability check can require 0.
+    if let Ok(mut n) = after_unmodelled.get_mut(event.sent_by) {
+        n.0 += 1;
+        return;
+    }
 
     if let Ok((mut raw_connection, in_game_state)) = query.get_mut(event.sent_by) {
         if in_game_state.is_none() {

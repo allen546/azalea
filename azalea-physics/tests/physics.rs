@@ -824,3 +824,125 @@ mod server_attributes {
         }
     }
 }
+
+/// Levitation and Slow Falling (patch 30). Expected values are worked out from the vanilla
+/// formulas (`LivingEntity#travelInAir`, `#getEffectiveGravity`, `#getFluidFallingAdjustedMovement`),
+/// not from the fork: the drag is the float 0.98F widened to a double, and `aiStep` zeroes a
+/// vertical speed under 0.003 before the travel.
+mod levitation_slow_falling {
+    use azalea_entity::{ActiveEffects, MobEffectData};
+    use azalea_registry::builtin::MobEffect;
+    use bevy_ecs::entity::Entity;
+
+    use super::{block_effects::{setup, tick}, *};
+
+    const DRAG: f64 = 0.9800000190734863;
+
+    fn give(app: &mut App, e: Entity, effect: MobEffect, amplifier: i32) {
+        // `ai_step` (the under-0.003 zeroing) runs only for entities with `Sprinting`
+        app.world_mut().entity_mut(e).insert(azalea_entity::metadata::Sprinting(false));
+        app.world_mut().get_mut::<ActiveEffects>(e).unwrap().insert(
+            effect,
+            MobEffectData { amplifier, duration: 100, ..Default::default() },
+        );
+    }
+
+    fn vy(app: &App, e: Entity) -> f64 {
+        app.world().get::<Physics>(e).unwrap().velocity.y
+    }
+
+    fn set_vy(app: &mut App, e: Entity, v: f64) {
+        app.world_mut().get_mut::<Physics>(e).unwrap().velocity.y = v;
+    }
+
+    /// The vanilla vertical speed after one air tick, `start` being the speed before it.
+    fn air_step(start: f64, levitation: Option<i32>, slow_falling: bool) -> f64 {
+        let v = if start.abs() < 0.003 { 0.0 } else { start };
+        let d = match levitation {
+            Some(a) => v + (0.05 * (a + 1) as f64 - v) * 0.2,
+            None => v - if v <= 0.0 && slow_falling { 0.08f64.min(0.01) } else { 0.08 },
+        };
+        d * DRAG
+    }
+
+    fn check_air(levitation: Option<i32>, slow_falling: bool, start: f64) {
+        let (mut app, e, _w) = setup(BlockKind::Air, BlockKind::Air, false, false);
+        if let Some(a) = levitation {
+            give(&mut app, e, MobEffect::Levitation, a);
+        }
+        if slow_falling {
+            give(&mut app, e, MobEffect::SlowFalling, 0);
+        }
+        set_vy(&mut app, e, start);
+        let mut want = start;
+        for n in 0..30 {
+            tick(&mut app, e, 0.);
+            want = air_step(want, levitation, slow_falling);
+            let got = vy(&app, e);
+            assert!((got - want).abs() < 1e-9, "tick {n}: got {got} want {want}");
+        }
+    }
+
+    #[test]
+    fn levitation_i_and_ii_from_rest() {
+        check_air(Some(0), false, 0.0);
+        check_air(Some(1), false, 0.0);
+    }
+
+    #[test]
+    fn levitation_from_a_fall_climbs_toward_the_target() {
+        check_air(Some(0), false, -0.8);
+        check_air(Some(1), false, -1.5);
+    }
+
+    #[test]
+    fn slow_falling_caps_gravity_in_air() {
+        check_air(None, true, 0.0);
+        check_air(None, true, -0.5);
+    }
+
+    // With an upward speed gravity is unchanged (the speed is read after the move).
+    #[test]
+    fn slow_falling_keeps_gravity_on_the_way_up() {
+        check_air(None, true, 0.3);
+        let (mut app, e, _w) = setup(BlockKind::Air, BlockKind::Air, false, false);
+        give(&mut app, e, MobEffect::SlowFalling, 0);
+        set_vy(&mut app, e, 0.3);
+        tick(&mut app, e, 0.);
+        assert!((vy(&app, e) - (0.3 - 0.08) * DRAG).abs() < 1e-9);
+    }
+
+    // Fluid falling adjustment: with gravity g and a speed near 0 the bot sinks at -0.003 when
+    // |0 - g/16| < 0.003 (g 0.01), and at -g/16 otherwise (g 0.08 gives -0.005).
+    #[test]
+    fn slow_falling_caps_gravity_in_water_and_levitation_does_not_act() {
+        let sink = |slow: bool, lev: bool| {
+            let (mut app, e, _w) = setup(BlockKind::Air, BlockKind::Water, false, false);
+            if slow {
+                give(&mut app, e, MobEffect::SlowFalling, 0);
+            }
+            if lev {
+                give(&mut app, e, MobEffect::Levitation, 0);
+            }
+            tick(&mut app, e, 0.);
+            vy(&app, e)
+        };
+        assert!((sink(false, false) + 0.005).abs() < 1e-9, "{}", sink(false, false));
+        assert!((sink(true, false) + 0.003).abs() < 1e-9, "{}", sink(true, false));
+        assert!((sink(false, true) + 0.005).abs() < 1e-9, "{}", sink(false, true));
+    }
+
+    // Slow Falling in lava travel: gravity/4 is subtracted after the 0.5 scaling.
+    #[test]
+    fn effective_gravity_formula() {
+        use azalea_physics::travel::{effective_gravity, levitation_vertical_speed};
+        assert_eq!(effective_gravity(0.08, 0.0, true), 0.01);
+        assert_eq!(effective_gravity(0.08, -1.0, true), 0.01);
+        assert_eq!(effective_gravity(0.08, 0.1, true), 0.08);
+        assert_eq!(effective_gravity(0.005, -1.0, true), 0.005);
+        assert_eq!(effective_gravity(0.08, -1.0, false), 0.08);
+        assert!((levitation_vertical_speed(0.0, 0) - 0.01).abs() < 1e-12);
+        assert!((levitation_vertical_speed(0.0, 1) - 0.02).abs() < 1e-12);
+        assert!((levitation_vertical_speed(-1.0, 1) - (-1.0 + 1.1 * 0.2)).abs() < 1e-12);
+    }
+}

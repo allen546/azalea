@@ -163,6 +163,11 @@ pub struct MoveCtx<'world, 'state, 'a, 'b> {
     /// Whether the feet slot holds leather boots, for
     /// `PowderSnowBlock#canEntityWalkOnPowderSnow`.
     pub wears_leather_boots: bool,
+    /// Levitation's amplifier (0 is level I) while the effect is in force
+    /// (`LivingEntity#travelInAir`).
+    pub levitation: Option<i32>,
+    /// Slow Falling is in force (`LivingEntity#getEffectiveGravity`).
+    pub slow_falling: bool,
 }
 
 /// Move an entity by a given delta, checking for collisions.
