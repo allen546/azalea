@@ -10,6 +10,7 @@ pub mod inventory;
 pub mod metadata;
 pub mod mining;
 pub mod particle;
+pub mod unmodelled;
 #[cfg(feature = "bevy_ecs")]
 mod plugin;
 pub mod vec_delta_codec;
@@ -399,16 +400,23 @@ impl Attributes {
     pub fn new(_entity_kind: EntityKind) -> Self {
         // TODO: do the correct defaults for everything, some
         // entities have different defaults
+        // The ranges are the `RangedAttribute` limits in `Attributes`.
+        let r = AttributeInstance::ranged;
         Attributes {
-            movement_speed: AttributeInstance::new(0.1f32 as f64),
-            sneaking_speed: AttributeInstance::new(0.3),
-            attack_speed: AttributeInstance::new(4.0),
-            water_movement_efficiency: AttributeInstance::new(0.0),
-            mining_efficiency: AttributeInstance::new(0.0),
-            block_interaction_range: AttributeInstance::new(4.5),
-            entity_interaction_range: AttributeInstance::new(3.0),
-            step_height: AttributeInstance::new(0.6),
-            block_break_speed: AttributeInstance::new(1.0),
+            movement_speed: r(0.1f32 as f64, 0.0, 1024.0),
+            sneaking_speed: r(0.3, 0.0, 1.0),
+            attack_speed: r(4.0, 0.0, 1024.0),
+            water_movement_efficiency: r(0.0, 0.0, 1.0),
+            mining_efficiency: r(0.0, 0.0, 1024.0),
+            block_interaction_range: r(4.5, 0.0, 64.0),
+            entity_interaction_range: r(3.0, 0.0, 64.0),
+            step_height: r(0.6, 0.0, 10.0),
+            block_break_speed: r(1.0, 0.0, 1024.0),
+            jump_strength: r(0.42f32 as f64, 0.0, 32.0),
+            gravity: r(0.08, -1.0, 1.0),
+            movement_efficiency: r(0.0, 0.0, 1.0),
+            submerged_mining_speed: r(0.2, 0.0, 20.0),
+            other: Vec::new(),
         }
     }
 }

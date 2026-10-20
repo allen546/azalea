@@ -1,4 +1,4 @@
-use azalea_block::{BlockBehavior, BlockTrait};
+use azalea_block::{BlockBehavior, BlockTrait, fluid_state::FluidKind};
 use azalea_inventory::{ItemStack, components::Tool};
 use azalea_registry::builtin::{BlockKind, MobEffect};
 
@@ -72,7 +72,7 @@ fn has_correct_tool_for_drops(block: &dyn BlockTrait, item: &ItemStack) -> bool 
 fn destroy_speed(
     block: BlockKind,
     tool: &ItemStack,
-    _fluid_on_eyes: &FluidOnEyes,
+    fluid_on_eyes: &FluidOnEyes,
     physics: &Physics,
     attributes: &Attributes,
     active_effects: &ActiveEffects,
@@ -100,13 +100,11 @@ fn destroy_speed(
 
     speed *= attributes.block_break_speed.calculate() as f32;
 
-    // TODO
-    // if **fluid_on_eyes == FluidKind::Water
-    //     && enchantments::get_enchant_level(registry::Enchantment::AquaAffinity,
-    // player_inventory)         == 0
-    // {
-    //     base_destroy_speed /= 5.;
-    // }
+    // `Player#getDestroySpeed`: with the eyes in water, the submerged mining speed
+    // applies (aqua affinity raises it through the attribute).
+    if **fluid_on_eyes == FluidKind::Water {
+        speed *= attributes.submerged_mining_speed.calculate() as f32;
+    }
 
     if !physics.on_ground {
         speed /= 5.;
@@ -126,4 +124,56 @@ fn base_destroy_speed(block: BlockKind, item: &ItemStack) -> f32 {
         }
     }
     tool.default_mining_speed
+}
+
+#[cfg(test)]
+mod tests {
+    use azalea_block::{BlockState, fluid_state::FluidKind};
+    use azalea_inventory::components::AttributeModifier;
+    use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
+    use azalea_registry::{builtin::{Attribute, EntityKind}, identifier::Identifier};
+
+    use super::*;
+
+    fn progress(attributes: &Attributes, fluid: FluidKind, on_ground: bool) -> f32 {
+        let mut physics = Physics::default();
+        physics.set_on_ground(on_ground);
+        let block = BlockState::from(BlockKind::Stone).to_trait();
+        get_mine_progress(
+            &*block,
+            &ItemStack::Empty,
+            &FluidOnEyes(fluid),
+            &physics,
+            attributes,
+            &ActiveEffects::default(),
+        )
+    }
+
+    // `Player#getDestroySpeed` and `BlockState#getDestroyProgress`: bare hand 1.0, times
+    // block break speed, times submerged mining speed with the eyes in water; stone takes
+    // 1.5 to destroy and, without the right tool, a divisor of 100.
+    #[test]
+    fn break_speed_and_submerged_speed_scale_the_progress() {
+        let mut a = Attributes::new(EntityKind::Player);
+        let plain = 1.0 / 1.5 / 100.0;
+        assert!((progress(&a, FluidKind::Empty, true) - plain).abs() < 1e-9);
+        // under water, the default 0.2 applies
+        assert!((progress(&a, FluidKind::Water, true) - plain * 0.2).abs() < 1e-9);
+        // the server raises it (aqua affinity gives +4 on top of the base)
+        a.apply_server_snapshot(
+            Attribute::SubmergedMiningSpeed,
+            0.2,
+            &[AttributeModifier {
+                id: Identifier::new("enchantment.aqua_affinity"),
+                amount: 4.0,
+                operation: AttributeModifierOperation::AddValue,
+            }],
+        );
+        assert!((progress(&a, FluidKind::Water, true) - plain * 4.2).abs() < 1e-6);
+        // a block break speed of 3
+        a.apply_server_snapshot(Attribute::BlockBreakSpeed, 3.0, &[]);
+        assert!((progress(&a, FluidKind::Empty, true) - plain * 3.0).abs() < 1e-7);
+        // off the ground, a fifth
+        assert!((progress(&a, FluidKind::Empty, false) - plain * 3.0 / 5.0).abs() < 1e-7);
+    }
 }

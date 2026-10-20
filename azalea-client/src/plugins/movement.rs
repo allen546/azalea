@@ -5,7 +5,7 @@ use azalea_core::{
     tick::GameTick,
 };
 use azalea_entity::{
-    Attributes, Crouching, HasClientLoaded, Jumping, LastSentPosition, LocalEntity, LookDirection,
+    ActiveEffects, Attributes, Crouching, HasClientLoaded, Jumping, LastSentPosition, LocalEntity, LookDirection,
     Physics, PlayerAbilities, Pose, Position,
     dimensions::calculate_dimensions,
     metadata::{self, Sprinting},
@@ -30,7 +30,7 @@ use azalea_protocol::{
         },
     },
 };
-use azalea_registry::builtin::EntityKind;
+use azalea_registry::builtin::{EntityKind, MobEffect};
 use azalea_world::World;
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
@@ -332,6 +332,7 @@ pub fn local_player_ai_step(
             &mut Crouching,
             &mut Attributes,
             Has<ItemInUse>,
+            &ActiveEffects,
         ),
         (With<HasClientLoaded>, With<LocalEntity>),
     >,
@@ -353,6 +354,7 @@ pub fn local_player_ai_step(
         mut crouching,
         mut attributes,
         item_in_use,
+        active_effects,
     ) in query.iter_mut()
     {
         // server ai step
@@ -401,8 +403,8 @@ pub fn local_player_ai_step(
         let is_passenger = false;
         // Null fork: set by whoever sends the use-item packet (Azalea has no tracking yet).
         let using_item = item_in_use;
-        // TODO: status effects
-        let has_blindness = false;
+        // `Player#isMobilityRestricted`: blindness stops and forbids sprinting.
+        let has_blindness = active_effects.get(MobEffect::Blindness).is_some();
 
         let has_enough_impulse = has_enough_impulse_to_start_sprinting(physics_state);
 

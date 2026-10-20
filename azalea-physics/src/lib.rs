@@ -75,6 +75,7 @@ pub fn ai_step(
             &LookDirection,
             &Sprinting,
             &ActiveEffects,
+            &Attributes,
             &WorldName,
             &EntityKindComponent,
             &ClientMovementState,
@@ -90,6 +91,7 @@ pub fn ai_step(
         look_direction,
         sprinting,
         active_effects,
+        attributes,
         world_name,
         entity_kind,
         client_movement,
@@ -160,6 +162,7 @@ pub fn ai_step(
                             world_name,
                             &worlds,
                             active_effects,
+                            attributes,
                         );
                         physics.no_jump_delay = 10;
                     }
@@ -477,13 +480,14 @@ pub fn jump_from_ground(
     world_name: &WorldName,
     worlds: &Worlds,
     active_effects: &ActiveEffects,
+    attributes: &Attributes,
 ) {
     let world_lock = worlds
         .get(world_name)
         .expect("All entities should be in a valid world");
     let world = world_lock.read();
 
-    let base_jump = jump_power(&world, position);
+    let base_jump = jump_power(&world, position, attributes);
     let jump_power = base_jump + jump_boost_power(active_effects);
     if jump_power <= 1.0E-5 {
         return;
@@ -654,8 +658,8 @@ fn block_jump_factor(world: &World, position: Position) -> f32 {
 // public double getJumpBoostPower() {
 //     return this.hasEffect(MobEffects.JUMP) ? (double)(0.1F *
 // (float)(this.getEffect(MobEffects.JUMP).getAmplifier() + 1)) : 0.0D; }
-fn jump_power(world: &World, position: Position) -> f32 {
-    0.42 * block_jump_factor(world, position)
+fn jump_power(world: &World, position: Position, attributes: &Attributes) -> f32 {
+    attributes.jump_strength.calculate() as f32 * block_jump_factor(world, position)
 }
 
 fn jump_boost_power(active_effects: &ActiveEffects) -> f32 {

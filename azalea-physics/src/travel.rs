@@ -109,7 +109,7 @@ pub fn travel(
 
 /// The usual movement when we're not in water or using an elytra.
 fn travel_in_air(ctx: &mut MoveCtx) {
-    let gravity = get_effective_gravity();
+    let gravity = get_effective_gravity(ctx.attributes);
 
     let block_pos_below = get_block_pos_below_that_affects_movement(*ctx.position);
 
@@ -152,7 +152,7 @@ fn travel_in_air(ctx: &mut MoveCtx) {
 fn travel_in_fluid(ctx: &mut MoveCtx) {
     let moving_down = ctx.physics.velocity.y <= 0.;
     let y = ctx.position.y;
-    let gravity = get_effective_gravity();
+    let gravity = get_effective_gravity(ctx.attributes);
 
     let acceleration = Vec3::new(
         ctx.physics.x_acceleration as f64,
@@ -352,9 +352,11 @@ fn contains_any_liquid(world: &World, bounding_box: Aabb) -> bool {
     false
 }
 
-fn get_effective_gravity() -> f64 {
+/// `LivingEntity#getEffectiveGravity`, without the slow falling cap (TODO).
+// Spec: specs/B1-movement.md §4.2
+fn get_effective_gravity(attributes: &Attributes) -> f64 {
     // TODO: slow falling effect
-    0.08
+    attributes.gravity.calculate()
 }
 
 pub fn fluid_jump_threshold() -> f64 {

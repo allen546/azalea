@@ -23,7 +23,7 @@ use azalea_protocol::{
         game::{c_move_entity_pos_rot::CompactLookDirection, *},
     },
 };
-use azalea_registry::builtin::{Attribute, EntityKind};
+use azalea_registry::builtin::EntityKind;
 use azalea_world::{PartialWorld, WorldName, Worlds};
 use bevy_ecs::{prelude::*, system::SystemState};
 pub use events::*;
@@ -754,10 +754,9 @@ impl GamePacketHandler<'_> {
         });
     }
 
-    /// Null fork: the server's powdered-snow frost slows the bot's movement speed
-    /// (`LivingEntity#tryAddFrost`, server side) and tells the client through this
-    /// packet. Only that one modifier is taken over; the other speed modifiers
-    /// (sprinting, effects) are still worked out locally.
+    /// `ClientPacketListener#handleUpdateAttributes` for the local player: the
+    /// server's base value and modifiers replace ours for every attribute in
+    /// the packet. (Null fork: patch 26 took only the powder snow modifier.)
     // Spec: specs/B1-movement.md §4.2
     pub fn update_attributes(&mut self, p: &ClientboundUpdateAttributes) {
         as_system::<Query<(&MinecraftEntityId, &mut Attributes)>>(self.ecs, |mut query| {
@@ -767,19 +766,12 @@ impl GamePacketHandler<'_> {
             if *entity_id != p.entity_id {
                 return;
             }
-            let id = azalea_registry::identifier::Identifier::new("powder_snow");
             for snapshot in &p.values {
-                if snapshot.attribute != Attribute::MovementSpeed {
-                    continue;
-                }
-                match snapshot.modifiers.iter().find(|m| m.id == id) {
-                    Some(modifier) => {
-                        attributes.movement_speed.insert(modifier.clone());
-                    }
-                    None => {
-                        attributes.movement_speed.remove(&id);
-                    }
-                }
+                attributes.apply_server_snapshot(
+                    snapshot.attribute,
+                    snapshot.base,
+                    &snapshot.modifiers,
+                );
             }
         });
     }

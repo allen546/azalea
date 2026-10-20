@@ -65,7 +65,7 @@ fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
 
     let on_ground = ctx.physics.on_ground() || y_collision && movement.y < 0.;
 
-    let max_up_step = 0.6;
+    let max_up_step = get_max_up_step(ctx.attributes) as f64;
     if max_up_step > 0. && on_ground && (x_collision || z_collision) {
         let mut step_to_delta = collide_bounding_box(
             movement.with_y(max_up_step),
@@ -270,7 +270,10 @@ pub fn move_colliding(ctx: &mut MoveCtx, mut movement: Vec3) {
     // sounds
 
     // Null fork: Entity#getBlockSpeedFactor scales the velocity after the move.
-    let speed_factor = block_speed_factor(ctx.world, **ctx.position, ctx.abilities) as f64;
+    // `LivingEntity#getBlockSpeedFactor` blends it toward 1 by movement efficiency.
+    let factor = block_speed_factor(ctx.world, **ctx.position, ctx.abilities);
+    let efficiency = ctx.attributes.movement_efficiency.calculate() as f32;
+    let speed_factor = (factor + efficiency * (1. - factor)) as f64;
     ctx.physics.velocity.x *= speed_factor;
     ctx.physics.velocity.z *= speed_factor;
 

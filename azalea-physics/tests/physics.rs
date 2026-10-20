@@ -577,7 +577,7 @@ mod block_effects {
 
     /// A floor of `floor` at y=69 and `feet` at the bot's feet (y=70), the bot
     /// at rest at (0.5, 70, 0.5), forward input held on every tick.
-    fn setup(
+    pub(super) fn setup(
         floor: BlockKind,
         feet: BlockKind,
         jumping: bool,
@@ -635,7 +635,7 @@ mod block_effects {
         (app, id, (world_lock, partial_world))
     }
 
-    fn tick(app: &mut App, entity: bevy_ecs::entity::Entity, input: f32) {
+    pub(super) fn tick(app: &mut App, entity: bevy_ecs::entity::Entity, input: f32) {
         app.world_mut()
             .get_mut::<Physics>(entity)
             .unwrap()
@@ -647,14 +647,14 @@ mod block_effects {
 
     /// Three ticks with no input, so the bot is on the ground and any block
     /// effect has taken hold.
-    fn settle(app: &mut App, entity: bevy_ecs::entity::Entity) {
+    pub(super) fn settle(app: &mut App, entity: bevy_ecs::entity::Entity) {
         for _ in 0..3 {
             tick(app, entity, 0.);
         }
     }
 
     /// One tick with full forward input; returns the z displacement.
-    fn walk_dz(app: &mut App, entity: bevy_ecs::entity::Entity) -> f64 {
+    pub(super) fn walk_dz(app: &mut App, entity: bevy_ecs::entity::Entity) -> f64 {
         let before = app.world_mut().get::<Position>(entity).unwrap().z;
         tick(app, entity, 1.);
         app.world_mut().get::<Position>(entity).unwrap().z - before
@@ -714,5 +714,113 @@ mod block_effects {
         tick(&mut app, e, 0.);
         let vy = app.world_mut().get::<Physics>(e).unwrap().velocity.y;
         assert!((vy - 0.12 * 0.98).abs() < 1e-4, "boots: vy {vy}");
+    }
+}
+
+/// Attributes the server sets for the local player (patch 27). Expected values are worked out
+/// from the vanilla formulas (`LivingEntity#travel`, `#jumpFromGround`, `Entity#collide`,
+/// `#getBlockSpeedFactor`), not from the fork.
+mod server_attributes {
+    use azalea_core::attribute_modifier_operation::AttributeModifierOperation;
+    use azalea_entity::Attributes;
+    use azalea_inventory::components::AttributeModifier;
+    use azalea_registry::{builtin::Attribute, identifier::Identifier};
+    use bevy_ecs::entity::Entity;
+
+    use super::{block_effects::{settle, setup, tick, walk_dz}, *};
+
+    fn set(app: &mut App, e: Entity, attribute: Attribute, base: f64, mods: &[AttributeModifier]) {
+        app.world_mut()
+            .get_mut::<Attributes>(e)
+            .unwrap()
+            .apply_server_snapshot(attribute, base, mods);
+    }
+
+    fn vy(app: &mut App, e: Entity) -> f64 {
+        app.world_mut().get::<Physics>(e).unwrap().velocity.y
+    }
+
+    // Free fall from rest: the move adds -gravity, then drag 0.98: vy = -g * 0.98.
+    #[test]
+    fn gravity_attribute_sets_the_fall() {
+        for g in [0.08, 0.04, 0.0] {
+            let (mut app, e, _w) = setup(BlockKind::Air, BlockKind::Air, false, false);
+            set(&mut app, e, Attribute::Gravity, g, &[]);
+            tick(&mut app, e, 0.);
+            let v = vy(&mut app, e);
+            assert!((v + g * 0.98f32 as f64).abs() < 1e-9, "g {g}: vy {v}");
+        }
+    }
+
+    // Jump on stone: vy = jump strength, then the same tick's gravity and drag: (J - 0.08) * 0.98.
+    #[test]
+    fn jump_strength_attribute_sets_the_jump() {
+        for j in [0.42f32 as f64, 0.84, 0.21] {
+            let (mut app, e, _w) = setup(BlockKind::Stone, BlockKind::Air, true, false);
+            set(&mut app, e, Attribute::JumpStrength, j, &[]);
+            // `ai_step`, which jumps, only runs for entities with effects
+            app.world_mut().entity_mut(e).insert((azalea_entity::ActiveEffects::default(), azalea_entity::metadata::Sprinting(false)));
+            settle(&mut app, e);
+            // the first jump tick happened during settle; wait for the next jump (delay 10)
+            let mut best = f64::MIN;
+            for _ in 0..30 {
+                tick(&mut app, e, 0.);
+                best = best.max(vy(&mut app, e));
+            }
+            let want = (j - 0.08) * 0.98f32 as f64;
+            assert!((best - want).abs() < 1e-6, "J {j}: best vy {best}, want {want}");
+        }
+    }
+
+    // A full block in front: the default 0.6 cannot step it, a step height of 1.0 can.
+    #[test]
+    fn step_height_attribute_lets_the_bot_climb() {
+        for (step, climbs) in [(0.6, false), (1.0, true)] {
+            let (mut app, e, (world_lock, partial)) = setup(BlockKind::Stone, BlockKind::Air, false, false);
+            partial.chunks.set_block_state(
+                BlockPos { x: 0, y: 70, z: 3 },
+                BlockKind::Stone.into(),
+                &world_lock.write().chunks,
+            );
+            set(&mut app, e, Attribute::StepHeight, step, &[]);
+            settle(&mut app, e);
+            // the highest point reached; the floor ends at z 7, so the bot may fall later
+            let mut top = f64::MIN;
+            for _ in 0..60 {
+                tick(&mut app, e, 1.);
+                top = top.max(app.world_mut().get::<Position>(e).unwrap().y);
+            }
+            assert_eq!(top > 70.5, climbs, "step {step}: top {top}");
+        }
+    }
+
+    // A speed modifier of -50% (multiplied total) halves the step: 0.1 * 0.5 per tick on stone.
+    #[test]
+    fn movement_speed_modifier_changes_the_walk() {
+        let (mut app, e, _w) = setup(BlockKind::Stone, BlockKind::Air, false, false);
+        let m = AttributeModifier {
+            id: Identifier::new("test"),
+            amount: -0.5,
+            operation: AttributeModifierOperation::AddMultipliedTotal,
+        };
+        set(&mut app, e, Attribute::MovementSpeed, 0.1f32 as f64, &[m]);
+        settle(&mut app, e);
+        let dz = walk_dz(&mut app, e);
+        assert!((dz - 0.05).abs() < 1e-6, "dz {dz}");
+    }
+
+    // `LivingEntity#getBlockSpeedFactor`: lerp(efficiency, 0.4, 1.0) on soul sand.
+    #[test]
+    fn movement_efficiency_softens_the_speed_factor() {
+        for eff in [0.0, 0.5, 1.0] {
+            let (mut app, e, _w) = setup(BlockKind::SoulSand, BlockKind::Air, false, false);
+            set(&mut app, e, Attribute::MovementEfficiency, eff, &[]);
+            settle(&mut app, e);
+            let _ = walk_dz(&mut app, e);
+            let dz2 = walk_dz(&mut app, e);
+            let factor = 0.4 + eff * 0.6;
+            let want = 0.1 * 0.546 * factor + 0.1;
+            assert!((dz2 - want).abs() < 1e-6, "eff {eff}: dz2 {dz2} want {want}");
+        }
     }
 }
