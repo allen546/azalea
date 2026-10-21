@@ -12,6 +12,10 @@ pub mod interpolation;
 pub mod metadata;
 pub mod mining;
 pub mod particle;
+#[cfg(feature = "bevy_ecs")]
+pub mod push;
+#[cfg(feature = "bevy_ecs")]
+pub mod teams;
 pub mod unmodelled;
 #[cfg(feature = "bevy_ecs")]
 mod plugin;

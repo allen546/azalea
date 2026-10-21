@@ -25,6 +25,7 @@ pub mod mining;
 pub mod movement;
 pub mod packet;
 pub mod pong;
+pub mod pushes;
 pub mod respawn;
 pub mod tags;
 pub mod task_pool;
@@ -60,6 +61,7 @@ impl PluginGroup for DefaultPlugins {
             .add(attack::AttackPlugin)
             .add(attackers::AttackersPlugin)
             .add(interpolation::InterpolationPlugin)
+            .add(pushes::PushesPlugin)
             .add(item_use::ItemUsePlugin)
             .add(chunks::ChunksPlugin)
             .add(block_update::BlockUpdatePlugin)

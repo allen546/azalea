@@ -57,6 +57,54 @@ pub struct EntityIdIndex {
     /// An index of entities by their MinecraftEntityId
     entity_by_id: IntMap<MinecraftEntityId, Entity>,
     id_by_entity: HashMap<Entity, MinecraftEntityId>,
+    /// Null fork, patch 32: the order this client ticks its entities in.
+    tick_order: TickOrder,
+}
+
+/// The order in which one client ticks the entities it knows (Null fork, patch 32).
+///
+/// Vanilla `ClientLevel#tickEntities` walks `EntityTickList`, a map in insertion order: an
+/// entity joins it when it is added to the level and leaves on removal, so removing and adding
+/// it again puts it at the end. The local player is one entry, added at login (first), and again
+/// at a respawn in the same dimension (`ClientLevel#addEntity` removes the old entry first, so
+/// the player moves to the end); a respawn into another dimension builds a new level with an
+/// empty list. The swarm shares one ECS world and its hash maps keep no order, so each client
+/// keeps its own sequence numbers here. An entity with no number counts as ticking after the
+/// player. Not modelled: the chunk-section ticking state (an entity in a chunk that loads later
+/// ticks later in vanilla).
+///
+/// Spec: specs/B1-movement.md §4.2 (Pushes from entities)
+#[derive(Clone, Debug, Default)]
+pub struct TickOrder {
+    next: u64,
+    seq: HashMap<Entity, u64>,
+}
+
+impl TickOrder {
+    /// Give `entity` the next number (a new entry, or the old one moved to the end).
+    pub fn assign(&mut self, entity: Entity) -> u64 {
+        let n = self.next;
+        self.next += 1;
+        self.seq.insert(entity, n);
+        n
+    }
+    pub fn drop_entity(&mut self, entity: Entity) {
+        self.seq.remove(&entity);
+    }
+    pub fn clear(&mut self) {
+        self.next = 0;
+        self.seq.clear();
+    }
+    pub fn number(&self, entity: Entity) -> Option<u64> {
+        self.seq.get(&entity).copied()
+    }
+    /// Does `entity` tick before `local` (the local player)? An entity with no number does not.
+    pub fn ticks_before(&self, entity: Entity, local: Entity) -> bool {
+        match (self.number(entity), self.number(local)) {
+            (Some(a), Some(b)) => a < b,
+            _ => false,
+        }
+    }
 }
 
 impl EntityIdIndex {
@@ -65,6 +113,14 @@ impl EntityIdIndex {
     }
     pub fn get_by_ecs_entity(&self, entity: Entity) -> Option<MinecraftEntityId> {
         self.id_by_entity.get(&entity).copied()
+    }
+
+    /// The order this client ticks its entities in (patch 32).
+    pub fn tick_order(&self) -> &TickOrder {
+        &self.tick_order
+    }
+    pub fn tick_order_mut(&mut self) -> &mut TickOrder {
+        &mut self.tick_order
     }
 
     pub fn contains_minecraft_entity(&self, id: MinecraftEntityId) -> bool {
@@ -77,6 +133,7 @@ impl EntityIdIndex {
     pub fn insert(&mut self, id: MinecraftEntityId, entity: Entity) {
         self.entity_by_id.insert(id, entity);
         self.id_by_entity.insert(entity, id);
+        self.tick_order.assign(entity);
         trace!("Inserted {id} -> {entity:?} into a client's EntityIdIndex");
     }
 
@@ -86,6 +143,7 @@ impl EntityIdIndex {
                 "Removed {id} -> {entity:?} from a client's EntityIdIndex (using EntityIdIndex::remove)"
             );
             self.id_by_entity.remove(&entity);
+            self.tick_order.drop_entity(entity);
             Some(entity)
         } else {
             trace!(
@@ -101,6 +159,7 @@ impl EntityIdIndex {
                 "Removed {id} -> {entity:?} from a client's EntityIdIndex (using EntityIdIndex::remove_by_ecs_entity)."
             );
             self.entity_by_id.remove(&id);
+            self.tick_order.drop_entity(entity);
             Some(id)
         } else {
             // this is expected to happen when despawning entities if it was already

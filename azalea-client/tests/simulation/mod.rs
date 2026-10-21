@@ -11,6 +11,7 @@ mod correct_sprint_sneak_movement;
 mod despawn_entities_when_changing_dimension;
 mod enchantments;
 mod entity_interpolation;
+mod entity_pushes;
 mod fast_login;
 mod item_use_hold_and_release;
 mod login_to_dimension_with_same_name;

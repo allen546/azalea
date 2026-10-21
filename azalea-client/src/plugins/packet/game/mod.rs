@@ -25,11 +25,12 @@ use azalea_protocol::{
         game::{c_move_entity_pos_rot::CompactLookDirection, *},
     },
 };
+use azalea_entity::teams::{CollisionRule, Scoreboard};
 use azalea_registry::builtin::EntityKind;
 use azalea_world::{PartialWorld, WorldName, Worlds};
 use bevy_ecs::{prelude::*, system::SystemState};
 pub use events::*;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     ClientInformation,
@@ -339,8 +340,14 @@ impl GamePacketHandler<'_> {
                     TicksConnected(0),
                     crate::respawn::ShowDeathScreen(p.show_death_screen),
                     crate::respawn::IsHardcore(p.hardcore),
+                    // Patch 32: this client's own scoreboard and push evidence.
+                    azalea_entity::teams::Scoreboard::default(),
+                    azalea_entity::push::PushRecord::default(),
                 ));
 
+                // Patch 32: a login starts the tick order again, with the player first
+                // (`handleLogin` adds the local player before any other entity).
+                entity_id_index.tick_order_mut().clear();
                 azalea_entity::indexing::add_entity_to_indexes(
                     entity_id,
                     self.player,
@@ -1618,6 +1625,7 @@ impl GamePacketHandler<'_> {
                     &ClientInformation,
                     Option<&mut WorldName>,
                     Option<&Attributes>,
+                    &mut EntityIdIndex,
                 ),
                 With<LocalEntity>,
             >,
@@ -1627,7 +1635,7 @@ impl GamePacketHandler<'_> {
         )>(
             self.ecs,
             |(mut commands, mut query, mut events, mut worlds, mut loaded_by_query)| {
-                let Ok((mut world_holder, game_profile, client_information, world_name, old_attributes)) =
+                let Ok((mut world_holder, game_profile, client_information, world_name, old_attributes, mut entity_id_index)) =
                     query.get_mut(self.player)
                 else {
                     warn!("Got respawn packet but player doesn't have the required components");
@@ -1636,6 +1644,15 @@ impl GamePacketHandler<'_> {
                 let old_attributes = old_attributes.cloned();
 
                 let new_world_name = WorldName(p.common.dimension.clone());
+                // Patch 32, `handleRespawn`: a respawn in the same dimension adds the new local
+                // player to the same level, so it moves to the end of the tick order; another
+                // dimension builds a new level with an empty list, so the player is first again.
+                if world_name.as_deref() == Some(&new_world_name) {
+                    entity_id_index.tick_order_mut().assign(self.player);
+                } else {
+                    entity_id_index.tick_order_mut().clear();
+                    entity_id_index.tick_order_mut().assign(self.player);
+                }
 
                 if let Some(mut world_name) = world_name {
                     *world_name = new_world_name.clone();
@@ -1860,8 +1877,28 @@ impl GamePacketHandler<'_> {
             },
         );
     }
+    // Patch 32, `ClientPacketListener#handleSetPlayerTeamPacket`: this bot's own scoreboard.
+    // Add creates the team (an existing name is reused); any other action on an unknown team is
+    // ignored with a warning. Parameters (Add, Change) set the collision rule. Join moves each
+    // name to the team; Leave of a name that is not on it is ignored (vanilla throws); Remove
+    // drops the team and its members.
+    // Spec: specs/B1-movement.md §4.2 (Pushes from entities)
     pub fn set_player_team(&mut self, p: &ClientboundSetPlayerTeam) {
         debug!("Got set player team packet {p:?}");
+        as_system::<(Commands, Query<Option<&mut Scoreboard>>)>(self.ecs, |(mut commands, mut query)| {
+            let Ok(existing) = query.get_mut(self.player) else { return };
+            let mut fresh = Scoreboard::default();
+            let is_new = existing.is_none();
+            let mut sb = existing;
+            let board: &mut Scoreboard = match sb.as_mut() {
+                Some(b) => b,
+                None => &mut fresh,
+            };
+            apply_team_packet(board, p);
+            if is_new {
+                commands.entity(self.player).insert(fresh);
+            }
+        });
     }
     pub fn set_score(&mut self, _p: &ClientboundSetScore) {}
     pub fn set_simulation_distance(&mut self, _p: &ClientboundSetSimulationDistance) {}
@@ -2044,3 +2081,50 @@ fn move_entity(
     });
 }
 
+/// Apply one `ClientboundSetPlayerTeam` to a scoreboard (see `set_player_team`).
+// Spec: specs/B1-movement.md §4.2 (Pushes from entities)
+pub fn apply_team_packet(board: &mut Scoreboard, p: &ClientboundSetPlayerTeam) {
+    use azalea_protocol::packets::game::c_set_player_team::{CollisionRule as Wire, Method};
+    let rule = |r: Wire| match r {
+        Wire::Always => CollisionRule::Always,
+        Wire::Never => CollisionRule::Never,
+        Wire::PushOtherTeams => CollisionRule::PushOtherTeams,
+        Wire::PushOwnTeam => CollisionRule::PushOwnTeam,
+    };
+    match &p.method {
+        Method::Add((params, members)) => {
+            board.add_team(&p.name, rule(params.collision_rule));
+            for m in members {
+                board.join(&p.name, m);
+            }
+        }
+        Method::Change(params) => {
+            if !board.set_rule(&p.name, rule(params.collision_rule)) {
+                info!("team packet (change) for an unknown team {:?}: ignored", p.name);
+            }
+        }
+        Method::Remove => {
+            if !board.remove_team(&p.name) {
+                info!("team packet (remove) for an unknown team {:?}: ignored", p.name);
+            }
+        }
+        Method::Join(members) => {
+            for m in members {
+                if !board.join(&p.name, m) {
+                    info!("team packet (join {m:?}) for an unknown team {:?}: ignored", p.name);
+                }
+            }
+        }
+        Method::Leave(members) => {
+            if !board.has_team(&p.name) {
+                info!("team packet (leave) for an unknown team {:?}: ignored", p.name);
+                return;
+            }
+            for m in members {
+                if !board.leave(&p.name, m) {
+                    info!("team packet: {m:?} is not on team {:?}: leave ignored", p.name);
+                }
+            }
+        }
+    }
+}

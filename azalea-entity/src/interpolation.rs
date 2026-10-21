@@ -117,6 +117,22 @@ impl InterpolationState {
         Interpolate::Started
     }
 
+    /// The position the next [`step`](Self::step) would give, without taking it. The pushes use
+    /// it for entities that tick before the local player: vanilla has already taken their step
+    /// in this tick (patch 32).
+    pub fn peek(&self, current: Vec3) -> Vec3 {
+        if !self.is_active() {
+            return current;
+        }
+        let d = 1.0 / self.left as f64;
+        let lerp = |a: f64, b: f64| a + d * (b - a);
+        Vec3::new(
+            lerp(current.x, self.target.x),
+            lerp(current.y, self.target.y),
+            lerp(current.z, self.target.z),
+        )
+    }
+
     /// `InterpolationHandler#interpolate`, once per tick: move `1 / steps left` of the way to the
     /// target on each axis, then count one step off. The displacement shift for riders and
     /// carried entities is not modelled. Returns the new position, or `None` when idle.
@@ -295,6 +311,11 @@ impl PeerEntry {
     /// Steps left in the run; for tests and the load counters.
     pub fn steps_left(&self) -> u32 {
         self.state.steps_left()
+    }
+
+    /// The position this entry takes in the next [`tick`](Self::tick), without taking it.
+    pub fn peek_position(&self) -> Vec3 {
+        self.state.peek(self.position)
     }
 
     /// One tick: an interpolation step, then the box at the new position.
@@ -484,6 +505,24 @@ mod tests {
         assert!((at.x - 9.0).abs() < 1e-12);
         assert!(!s.is_active());
         assert!(s.step(at).is_none());
+    }
+
+    #[test]
+    fn peek_shows_the_next_step_without_taking_it() {
+        let mut s = InterpolationState::new((0., 0.));
+        let at = v(0., 0., 0.);
+        assert_eq!(s.peek(at), at, "idle: where it is");
+        s.interpolate_to(3, Some(v(9., 0., 0.)), None, at);
+        assert_eq!(s.peek(at), v(3., 0., 0.));
+        assert_eq!(s.steps_left(), 3, "peeking takes no step");
+        let next = s.step(at).unwrap();
+        assert_eq!(next, v(3., 0., 0.));
+        assert_eq!(s.peek(next), v(6., 0., 0.));
+        let d = dims();
+        let mut e = PeerEntry::seed(v(0., 64., 0.), (0., 0.), &d);
+        e.on_move(Some(&PositionDelta8 { xa: 12288, ya: 0, za: 0 }), None);
+        assert!((e.peek_position().x - 1.0).abs() < 1e-9);
+        assert!(e.position.x.abs() < 1e-9);
     }
 
     #[test]
