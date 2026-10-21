@@ -9,6 +9,7 @@ use azalea_core::{
     position::{ChunkPos, Vec3},
 };
 use azalea_entity::{
+    interpolation::{PeerEntry, PeerView, SNAP_DISTANCE_SQ, apply_server_pose},
     unmodelled::{RidingVehicle, WorldBorderState},
     Attributes, Dead, EntityBundle, EntityKindComponent, HasClientLoaded, LoadedBy, LocalEntity, LookDirection,
     Physics, PlayerAbilities, Position,
@@ -207,6 +208,29 @@ pub struct GamePacketHandler<'a> {
     pub player: Entity,
 }
 impl GamePacketHandler<'_> {
+    /// Patch 31: a packet about another bot. The bot's own client owns its position, so the packet
+    /// feeds this bot's smoothed view of it instead (`PeerView`). Returns true when the target is
+    /// another bot (handled here, even if this bot keeps no view of it: it is out of the radius).
+    // Spec: specs/F5-version-layer.md §4.6 (What Null computes)
+    fn for_peer(&mut self, id: MinecraftEntityId, f: impl FnOnce(&mut PeerEntry)) -> bool {
+        let Some(target) = self
+            .ecs
+            .get::<EntityIdIndex>(self.player)
+            .and_then(|ids| ids.get_by_minecraft_entity(id))
+        else {
+            return false;
+        };
+        if target == self.player || self.ecs.get::<LocalEntity>(target).is_none() {
+            return false;
+        }
+        if let Some(mut view) = self.ecs.get_mut::<PeerView>(self.player)
+            && let Some(entry) = view.get_mut(target)
+        {
+            f(entry);
+        }
+        true
+    }
+
     pub fn login(&mut self, p: &ClientboundLogin) {
         debug!("Got login packet");
 
@@ -592,6 +616,7 @@ impl GamePacketHandler<'_> {
             Res<Worlds>,
             ResMut<EntityUuidIndex>,
             Query<(Option<&UpdatedBy>, Has<LocalEntity>)>,
+            Query<&mut PeerView>,
         )>(
             self.ecs,
             |(
@@ -602,6 +627,7 @@ impl GamePacketHandler<'_> {
                 worlds,
                 mut entity_uuid_index,
                 updated_by_query,
+                mut peer_views,
             )| {
                 let (mut entity_id_index, world_name, tab_list) =
                     query.get_mut(self.player).unwrap();
@@ -640,13 +666,23 @@ impl GamePacketHandler<'_> {
                     // Never for a local entity: another bot in our swarm owns its own position.
                     let (updated_by, local) = updated_by_query.get(ecs_entity).unwrap_or((None, true));
                     let driven = updated_by.is_some_and(|u| u.0 != self.player && loaded_by.contains(&u.0));
-                    if !driven && !local {
+                    if local && ecs_entity != self.player {
+                        // Patch 31: another bot. Its own client owns its position; this bot's
+                        // view of it takes the packet's (`recreateFromPacket`: set at once).
+                        let look: LookDirection =
+                            CompactLookDirection { y_rot: p.y_rot, x_rot: p.x_rot }.into();
+                        if let Ok(mut view) = peer_views.get_mut(self.player)
+                            && let Some(entry) = view.get_mut(ecs_entity)
+                        {
+                            entry.on_add(p.position, (look.y_rot(), look.x_rot()));
+                        }
+                    } else if !driven && !local {
                         let pos = p.position;
                         commands.entity(ecs_entity).insert(UpdatedBy(self.player));
                         commands.entity(ecs_entity).queue(move |mut e: EntityWorldMut| {
-                            if let Some(mut position) = e.get_mut::<Position>() {
-                                **position = pos;
-                            }
+                            // Patch 31: `recreateFromPacket` sets the position at once and ends
+                            // any interpolation run.
+                            apply_server_pose(&mut e, Some(pos), None, true);
                             if let Some(mut physics) = e.get_mut::<Physics>() {
                                 physics.vec_delta_codec.set_base(pos);
                                 physics.set_old_pos(Position::new(pos));
@@ -896,8 +932,31 @@ impl GamePacketHandler<'_> {
         });
     }
 
+    // Patch 31, `handleTeleportEntity` / `setValuesFromPositionPacket`: a non-bot entity moves
+    // toward the new position by interpolation (a jump over 64 blocks snaps); a relative packet
+    // is applied to the entity's current (smoothed) position, as vanilla does.
+    // Spec: specs/F5-version-layer.md §4.6 (What Null computes)
     pub fn teleport_entity(&mut self, p: &ClientboundTeleportEntity) {
         debug!("Got teleport entity packet {p:?}");
+
+        let handled = self.for_peer(p.id, |entry| {
+            let r = &p.relative;
+            let rel = |base: f64, relative: bool, change: f64| if relative { base + change } else { change };
+            let pos = Vec3::new(
+                rel(entry.position.x, r.x, p.change.pos.x),
+                rel(entry.position.y, r.y, p.change.pos.y),
+                rel(entry.position.z, r.z, p.change.pos.z),
+            );
+            let (y_rot, x_rot) = entry.rot();
+            let look = LookDirection::new(
+                rel(y_rot as f64, r.y_rot, p.change.look_direction.y_rot() as f64) as f32,
+                rel(x_rot as f64, r.x_rot, p.change.look_direction.x_rot() as f64) as f32,
+            );
+            entry.on_teleport(pos, (look.y_rot(), look.x_rot()));
+        });
+        if handled {
+            return;
+        }
 
         as_system::<(Commands, Query<(&EntityIdIndex, &WorldHolder)>)>(
             self.ecs,
@@ -915,22 +974,16 @@ impl GamePacketHandler<'_> {
                 commands.entity(entity).queue(RelativeEntityUpdate::new(
                     world_holder.partial.clone(),
                     move |entity| {
-                        let entity_id = entity.id();
-                        entity.world_scope(move |world| {
-                            let mut query =
-                                world.query::<(&mut Physics, &mut LookDirection, &mut Position)>();
-                            let (mut physics, mut look_direction, mut position) =
-                                query.get_mut(world, entity_id).unwrap();
-                            let old_position = *position;
-                            relative.apply(
-                                &change,
-                                &mut position,
-                                &mut look_direction,
-                                &mut physics,
-                            );
-                            // old_pos is set to the current position when we're teleported
-                            physics.set_old_pos(old_position);
-                        });
+                        let Some(old_position) = entity.get::<Position>().copied() else { return };
+                        let Some(mut look_direction) = entity.get::<LookDirection>().copied() else { return };
+                        // Apply the packet to copies, then move toward the result.
+                        let mut target = old_position;
+                        let Some(mut physics) = entity.get_mut::<Physics>() else { return };
+                        relative.apply(&change, &mut target, &mut look_direction, &mut physics);
+                        // old_pos is set to the current position when we're teleported
+                        physics.set_old_pos(old_position);
+                        let far = (*old_position).distance_squared_to(*target) > SNAP_DISTANCE_SQ;
+                        apply_server_pose(entity, Some(*target), Some(look_direction), far);
                     },
                 ));
             },
@@ -944,6 +997,9 @@ impl GamePacketHandler<'_> {
     pub fn rotate_head(&mut self, _p: &ClientboundRotateHead) {}
 
     pub fn move_entity_pos(&mut self, p: &ClientboundMoveEntityPos) {
+        if self.for_peer(p.entity_id, |e| e.on_move(Some(&p.delta), None)) {
+            return;
+        }
         as_system::<(
             Commands,
             Query<(&EntityIdIndex, &WorldHolder)>,
@@ -969,6 +1025,9 @@ impl GamePacketHandler<'_> {
         );
     }
     pub fn move_entity_pos_rot(&mut self, p: &ClientboundMoveEntityPosRot) {
+        if self.for_peer(p.entity_id, |e| e.on_move(Some(&p.delta), Some({ let l = LookDirection::from(p.look_direction); (l.y_rot(), l.x_rot()) }))) {
+            return;
+        }
         as_system::<(
             Commands,
             Query<(&EntityIdIndex, &WorldHolder)>,
@@ -994,6 +1053,9 @@ impl GamePacketHandler<'_> {
         );
     }
     pub fn move_entity_rot(&mut self, p: &ClientboundMoveEntityRot) {
+        if self.for_peer(p.entity_id, |e| e.on_move(None, Some({ let l = LookDirection::from(p.look_direction); (l.y_rot(), l.x_rot()) }))) {
+            return;
+        }
         as_system::<(
             Commands,
             Query<(&EntityIdIndex, &WorldHolder)>,
@@ -1684,14 +1746,21 @@ impl GamePacketHandler<'_> {
         );
     }
 
+    // Patch 31, `handleEntityPositionSync`: sets the codec base, then a non-bot entity moves
+    // toward the position by interpolation (a jump over 64 blocks snaps). The fork treats every
+    // entity as ticking, so the "not in the tick list: snap" case is not modelled.
+    // Spec: specs/F5-version-layer.md §4.6 (What Null computes)
     pub fn entity_position_sync(&mut self, p: &ClientboundEntityPositionSync) {
+        let look = p.values.look_direction;
+        if self.for_peer(p.id, |e| e.on_position_sync(p.values.pos, (look.y_rot(), look.x_rot()))) {
+            return;
+        }
         as_system::<(
             Commands,
             Query<(&EntityIdIndex, &WorldHolder)>,
             Query<(
                 &mut Physics,
-                &mut Position,
-                &mut LookDirection,
+                &Position,
                 Option<&LocalEntity>,
             )>,
             EntityUpdateQuery,
@@ -1718,9 +1787,7 @@ impl GamePacketHandler<'_> {
                     return;
                 }
 
-                let Ok((mut physics, mut position, mut look_direction, local_entity)) =
-                    entity_query.get_mut(entity)
-                else {
+                let Ok((mut physics, position, local_entity)) = entity_query.get_mut(entity) else {
                     return;
                 };
 
@@ -1734,13 +1801,10 @@ impl GamePacketHandler<'_> {
 
                 physics.set_on_ground(new_on_ground);
 
-                if **position != new_position {
-                    **position = new_position;
-                }
-
-                if *look_direction != new_look_direction {
-                    *look_direction = new_look_direction;
-                }
+                let far = (**position).distance_squared_to(new_position) > SNAP_DISTANCE_SQ;
+                commands.entity(entity).queue(move |mut e: EntityWorldMut| {
+                    apply_server_pose(&mut e, Some(new_position), Some(new_look_direction), far);
+                });
             },
         );
     }
@@ -1930,8 +1994,7 @@ struct MoveEntity {
     pub on_ground: bool,
 }
 
-type MoveEntityQuery<'world, 'state, 'a> =
-    Query<'world, 'state, (&'a mut Physics, &'a mut Position, &'a mut LookDirection)>;
+type MoveEntityQuery<'world, 'state, 'a> = Query<'world, 'state, &'a mut Physics>;
 
 fn move_entity(
     player_entity: Entity,
@@ -1952,7 +2015,7 @@ fn move_entity(
         return;
     };
 
-    let Ok((mut physics, mut position, mut look_direction)) = entity_query.get_mut(entity) else {
+    let Ok(mut physics) = entity_query.get_mut(entity) else {
         debug!("Got move entity packet for entity with missing components {entity_id}");
         return;
     };
@@ -1966,21 +2029,18 @@ fn move_entity(
         return;
     }
 
+    // Patch 31, `handleMoveEntity`: decode against the codec base (the last decoded target, not
+    // the smoothed position), then `moveOrInterpolateTo`.
+    let mut new_position = None;
     if let Some(new_delta) = p.delta {
-        let new_position = physics.vec_delta_codec.decode(&new_delta);
-        physics.vec_delta_codec.set_base(new_position);
-
-        if new_position != **position {
-            **position = new_position;
-        }
+        let decoded = physics.vec_delta_codec.decode(&new_delta);
+        physics.vec_delta_codec.set_base(decoded);
+        new_position = Some(decoded);
     }
-
-    if let Some(new_look_direction) = p.look_direction {
-        let new_look_direction = new_look_direction.into();
-        if new_look_direction != *look_direction {
-            *look_direction = new_look_direction;
-        }
-    }
-
+    let new_look = p.look_direction.map(LookDirection::from);
     physics.set_on_ground(p.on_ground);
+    commands.entity(entity).queue(move |mut e: EntityWorldMut| {
+        apply_server_pose(&mut e, new_position, new_look, false);
+    });
 }
+

@@ -15,6 +15,7 @@ pub mod connection;
 pub mod cookies;
 pub mod disconnect;
 pub mod interact;
+pub mod interpolation;
 pub mod item_use;
 pub mod inventory;
 pub mod join;
@@ -58,6 +59,7 @@ impl PluginGroup for DefaultPlugins {
             .add(entity_actions::EntityActionsPlugin)
             .add(attack::AttackPlugin)
             .add(attackers::AttackersPlugin)
+            .add(interpolation::InterpolationPlugin)
             .add(item_use::ItemUsePlugin)
             .add(chunks::ChunksPlugin)
             .add(block_update::BlockUpdatePlugin)

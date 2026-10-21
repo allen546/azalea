@@ -56,6 +56,18 @@ impl VecDeltaCodec {
     }
 }
 
+/// Round a position to the 1/4096 grid the server's movement packets use.
+///
+/// Null fork (patch 31): the server position of a bot we have no packets for yet, as it would
+/// send it.
+pub fn quantise(pos: Vec3) -> Vec3 {
+    Vec3::new(
+        decode(encode(pos.x)),
+        decode(encode(pos.y)),
+        decode(encode(pos.z)),
+    )
+}
+
 fn encode(value: f64) -> i64 {
     (value * 4096.).round() as i64
 }

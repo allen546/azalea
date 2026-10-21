@@ -7,6 +7,8 @@ pub mod dimensions;
 mod effects;
 pub mod inventory;
 #[cfg(feature = "bevy_ecs")]
+pub mod interpolation;
+#[cfg(feature = "bevy_ecs")]
 pub mod metadata;
 pub mod mining;
 pub mod particle;

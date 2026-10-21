@@ -38,7 +38,8 @@ use azalea_core::{
 };
 use azalea_entity::{
     Attributes, Crouching, LookDirection, Physics, Position, dimensions::EntityDimensions,
-    indexing::EntityIdIndex, inventory::Inventory, EntityKindComponent, view_vector,
+    indexing::EntityIdIndex, interpolation::PeerView, inventory::Inventory, EntityKindComponent,
+    view_vector,
 };
 use azalea_physics::{
     PhysicsSystems, client_movement::ClientMovementState, collision::entity_collisions::{
@@ -466,6 +467,7 @@ fn crosshair(
     attrs: &Attributes,
     aabb_query: &AabbQuery,
     pickable: &MaybePickableEntityQuery,
+    peers: Option<&PeerView>,
 ) -> HitResult {
     pick(PickOpts {
         source_entity: source,
@@ -477,6 +479,7 @@ fn crosshair(
         block_pick_range: attrs.block_interaction_range.calculate(),
         aabb_query,
         pickable_query: pickable,
+        peers,
     })
 }
 
@@ -494,22 +497,34 @@ pub fn handle_look_at_entity_queued(
         &Attributes,
         &Physics,
         &EntityIdIndex,
+        Option<&mut PeerView>,
     )>,
     boxes: Query<&LastBoundingBox>,
     aabb_query: AabbQuery,
     pickable: MaybePickableEntityQuery,
 ) {
-    for (entity, queued, mut look, world, position, dims, attrs, physics, ids) in &mut query {
+    for (entity, queued, mut look, world, position, dims, attrs, physics, ids, mut peers) in &mut query {
         commands.entity(entity).remove::<LookAtEntityQueued>();
         let Some(target) = ids.get_by_minecraft_entity(MinecraftEntityId(queued.entity_id)) else {
             continue;
         };
-        let Ok(target_box) = boxes.get(target) else { continue };
+        // Patch 31: another bot is aimed at where this bot sees it, and stays in the view.
+        if let Some(view) = peers.as_deref_mut() {
+            view.set_aim_target(target);
+        }
+        let view = peers.as_deref();
+        let target_box = match view.and_then(|v| v.get(target)) {
+            Some(entry) => entry.bounding_box,
+            None => match boxes.get(target) {
+                Ok(b) => b.0,
+                Err(_) => continue,
+            },
+        };
         let eye = position.up(dims.eye_height.into());
         let world = world.shared.read();
         let current = *look;
-        let aim = aim_at_entity(eye, &target_box.0, current, target, |l| {
-            crosshair(entity, l, eye, &physics.bounding_box, &world, attrs, &aabb_query, &pickable)
+        let aim = aim_at_entity(eye, &target_box, current, target, |l| {
+            crosshair(entity, l, eye, &physics.bounding_box, &world, attrs, &aabb_query, &pickable, view)
         });
         if let Some(aim) = aim {
             look.update(aim);
@@ -553,7 +568,7 @@ pub fn handle_use_entity_queued(
         (&mut ClientMovementState, Option<&Crouching>, Has<AutoCrouchHold>),
         &mut LookDirection,
         (Has<OpenScreen>, Has<Mining>, Has<ItemInUse>, Has<DeathScreen>),
-        (&Inventory, Option<&LocalGameMode>),
+        (&Inventory, Option<&LocalGameMode>, Option<&mut PeerView>),
         &TicksConnected,
     )>,
     entities: EvidenceEntities,
@@ -574,7 +589,7 @@ pub fn handle_use_entity_queued(
         (mut mv, crouching, holding),
         mut look,
         (screen, mining, using, dead),
-        (inv, game_mode),
+        (inv, game_mode, mut peers),
         connected,
     ) in &mut query
     {
@@ -593,13 +608,23 @@ pub fn handle_use_entity_queued(
             refuse(&mut commands, entity, holding, &mut mv, &mut results, id, EntityUseRefusal::Spectator, None);
             continue;
         }
+        // Patch 31: another bot is clicked at the position and box this bot sees it at.
         let Some((target, (kind, target_position, target_box))) = ids
             .get_by_minecraft_entity(MinecraftEntityId(id))
-            .and_then(|e| targets.get(e).ok().map(|(k, p, b)| (e, (k.0, **p, b.0))))
+            .and_then(|e| {
+                targets.get(e).ok().map(|(k, p, b)| match peers.as_deref().and_then(|v| v.get(e)) {
+                    Some(entry) => (e, (k.0, entry.position, entry.bounding_box)),
+                    None => (e, (k.0, **p, b.0)),
+                })
+            })
         else {
             refuse(&mut commands, entity, holding, &mut mv, &mut results, id, EntityUseRefusal::UnknownEntity, None);
             continue;
         };
+        if let Some(view) = peers.as_deref_mut() {
+            view.set_aim_target(target);
+        }
+        let view = peers.as_deref();
         let secondary = is_crouching(&mv, crouching);
         let plan = entity_use_plan(kind, secondary);
         if plan == EntityUsePlan::Unsupported {
@@ -608,7 +633,7 @@ pub fn handle_use_entity_queued(
         }
         let world = world.shared.read();
         let eye = position.up(dims.eye_height.into());
-        let hit = crosshair(entity, *look, eye, &physics.bounding_box, &world, attrs, &aabb_query, &pickable);
+        let hit = crosshair(entity, *look, eye, &physics.bounding_box, &world, attrs, &aabb_query, &pickable, view);
         let range = attrs.entity_interaction_range.calculate();
         let checked = check_entity_click(eye, view_vector(*look), range, target, &target_box, &hit);
         // Patch 28: what this check saw, kept for a refusal. The pick above is fresh, so the hit
@@ -643,7 +668,7 @@ pub fn handle_use_entity_queued(
             let crouched_eye = position.up(CROUCH_EYE_HEIGHT);
             let current = *look;
             let aim = aim_at_entity(crouched_eye, &target_box, current, target, |l| {
-                crosshair(entity, l, crouched_eye, &physics.bounding_box, &world, attrs, &aabb_query, &pickable)
+                crosshair(entity, l, crouched_eye, &physics.bounding_box, &world, attrs, &aabb_query, &pickable, view)
             });
             if let Some(aim) = aim {
                 look.update(aim);
