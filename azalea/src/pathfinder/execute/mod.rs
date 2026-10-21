@@ -68,6 +68,8 @@ impl Plugin for DefaultPathfinderExecutionPlugin {
                 .after(azalea_client::movement::send_position)
                 .after(MiningSystems)
                 .after(debug_render_path_with_particles)
+                // Interpolation writes only entities `Without<LocalEntity>`; these read the bot's own.
+                .ambiguous_with(azalea_entity::interpolation::interpolate_entities)
                 .in_set(PathfinderSystems),
         );
     }
