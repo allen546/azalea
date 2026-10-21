@@ -43,7 +43,10 @@ use azalea_core::{
     position::{BlockPos, Vec3},
     tick::GameTick,
 };
-use azalea_entity::{LocalEntity, Position, inventory::Inventory, metadata::Player};
+use azalea_client::tick_counter::TicksConnected;
+use azalea_entity::{
+    LocalEntity, Position, inventory::Inventory, metadata::Player, unmodelled::WorldBorderState,
+};
 use azalea_world::{WorldName, Worlds};
 use bevy_app::{PreUpdate, Update};
 use bevy_ecs::prelude::*;
@@ -316,6 +319,7 @@ pub fn goto_listener(
         &Inventory,
         Option<&CustomPathfinderState>,
     )>,
+    borders: Query<(&WorldBorderState, &TicksConnected)>,
     mut dead: Query<&mut azalea_client::respawn::RespawnLog, With<azalea_client::respawn::DeathScreen>>,
     worlds: Res<Worlds>,
 ) {
@@ -368,6 +372,7 @@ pub fn goto_listener(
         pathfinder.opts = Some(event.opts.clone());
         pathfinder.is_calculating = true;
 
+        let border = border_wall(&borders, event.entity);
         let world_lock = worlds
             .get(world_name)
             .expect("Entity tried to pathfind but the entity isn't in a valid world");
@@ -412,6 +417,7 @@ pub fn goto_listener(
                 start: instant_path_start,
                 goal: goal.clone(),
                 world_lock: world_lock.clone(),
+                border,
                 goto_id_atomic: goto_id_atomic.clone(),
                 mining_cache: MiningCache::new(inventory_menu.clone()),
                 custom_state: custom_state.clone(),
@@ -497,6 +503,7 @@ pub fn goto_listener(
                 start,
                 goal,
                 world_lock,
+                border,
                 goto_id_atomic,
                 mining_cache,
                 custom_state,
@@ -525,11 +532,24 @@ pub fn player_pos_to_block_pos(position: Vec3) -> BlockPos {
     BlockPos::from(position.up(0.5))
 }
 
+/// The bot's world border as the planner's wall, from the server's border state and the local
+/// tick (patch 34). `None` when the server sent no border.
+// Spec: specs/B1-movement.md §4.3
+pub fn border_wall(
+    borders: &Query<(&WorldBorderState, &TicksConnected)>,
+    entity: Entity,
+) -> Option<world::BorderWall> {
+    let (state, ticks) = borders.get(entity).ok()?;
+    Some(world::BorderWall::from_state(state, ticks.0))
+}
+
 pub struct CalculatePathCtx {
     pub entity: Entity,
     pub start: BlockPos,
     pub goal: Arc<dyn Goal>,
     pub world_lock: Arc<RwLock<azalea_world::World>>,
+    /// The world border when the path is planned (patch 34); `None` walls nothing.
+    pub border: Option<world::BorderWall>,
     pub goto_id_atomic: Arc<AtomicUsize>,
     pub mining_cache: MiningCache,
     pub custom_state: CustomPathfinderState,
@@ -551,7 +571,7 @@ pub fn calculate_path(ctx: CalculatePathCtx) -> Option<PathFoundEvent> {
     let goto_id = ctx.goto_id_atomic.fetch_add(1, atomic::Ordering::SeqCst) + 1;
 
     let origin = ctx.start;
-    let cached_world = CachedWorld::new(ctx.world_lock, origin);
+    let cached_world = CachedWorld::new(ctx.world_lock, origin).with_border(ctx.border);
     let successors = |pos: RelBlockPos| {
         call_successors_fn(
             &cached_world,
@@ -682,6 +702,7 @@ pub fn path_found_listener(
         &Inventory,
         Option<&CustomPathfinderState>,
     )>,
+    borders: Query<(&WorldBorderState, &TicksConnected)>,
     worlds: Res<Worlds>,
     mut commands: Commands,
 ) {
@@ -709,7 +730,8 @@ pub fn path_found_listener(
                         .expect("Entity tried to pathfind but the entity isn't in a valid world");
                     let origin = event.start;
                     let successors_fn: moves::SuccessorsFn = event.successors_fn;
-                    let cached_world = CachedWorld::new(world_lock, origin);
+                    let cached_world = CachedWorld::new(world_lock, origin)
+                        .with_border(border_wall(&borders, event.entity));
                     let mining_cache = MiningCache::new(if event.allow_mining {
                         Some(inventory.inventory_menu.clone())
                     } else {

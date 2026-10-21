@@ -148,13 +148,31 @@ impl WorldBorderState {
 /// ([`honey_touches_side`]): standing on top is modelled (patch 26).
 // Spec: specs/B1-movement.md §4.3
 pub fn is_unmodelled_block(kind: BlockKind) -> bool {
+    // An explicit list, not a name test: the pathfinder reads this for every block state of
+    // every section it builds (patch 34), and a test checks it against the `_bed` name rule.
     matches!(
         kind,
         BlockKind::BubbleColumn
             | BlockKind::SlimeBlock
             | BlockKind::Scaffolding
             | BlockKind::MovingPiston
-    ) || kind.to_str().ends_with("_bed")
+            | BlockKind::WhiteBed
+            | BlockKind::OrangeBed
+            | BlockKind::MagentaBed
+            | BlockKind::LightBlueBed
+            | BlockKind::YellowBed
+            | BlockKind::LimeBed
+            | BlockKind::PinkBed
+            | BlockKind::GrayBed
+            | BlockKind::LightGrayBed
+            | BlockKind::CyanBed
+            | BlockKind::PurpleBed
+            | BlockKind::BlueBed
+            | BlockKind::BrownBed
+            | BlockKind::GreenBed
+            | BlockKind::RedBed
+            | BlockKind::BlackBed
+    )
 }
 
 /// `HoneyBlock#entityInside` slides a bot that is in the block's cell below its top (15/16) and
@@ -228,6 +246,19 @@ mod tests {
         for kind in [BlockKind::Stone, BlockKind::HoneyBlock, BlockKind::Cobweb, BlockKind::Water, BlockKind::OakSlab] {
             assert!(!is_unmodelled_block(kind), "{kind:?}");
         }
+    }
+
+    // The explicit list matches the names it stands for: the four named kinds and every `_bed`.
+    #[test]
+    fn block_list_matches_names() {
+        let mut n = 0;
+        for kind in (0u32..).map_while(|i| BlockKind::try_from(i).ok()) {
+            let by_name = matches!(kind, BlockKind::BubbleColumn | BlockKind::SlimeBlock | BlockKind::Scaffolding | BlockKind::MovingPiston)
+                || kind.to_str().ends_with("_bed");
+            assert_eq!(is_unmodelled_block(kind), by_name, "{kind:?}");
+            n += by_name as u32;
+        }
+        assert_eq!(n, 20);
     }
 
     // Honey: standing on top is modelled; feet below the 15/16 top touch it from the side.

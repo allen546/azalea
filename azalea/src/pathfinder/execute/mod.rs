@@ -10,7 +10,8 @@ use azalea_client::{
     mining::{Mining, MiningSystems, StartMiningBlockEvent},
 };
 use azalea_core::{position::Vec3, tick::GameTick};
-use azalea_entity::{Physics, Position, inventory::Inventory};
+use azalea_client::tick_counter::TicksConnected;
+use azalea_entity::{Physics, Position, inventory::Inventory, unmodelled::WorldBorderState};
 use azalea_physics::{PhysicsSystems, get_block_pos_below_that_affects_movement};
 use azalea_world::{WorldName, Worlds};
 use bevy_app::{App, Plugin};
@@ -33,6 +34,8 @@ use crate::{
         execute::simulation::SimulatingPathState,
         moves::{ExecuteCtx, IsReachedCtx},
         player_pos_to_block_pos,
+        border_wall,
+        world::BorderWall,
     },
 };
 
@@ -271,6 +274,7 @@ pub fn timeout_movement(
         Option<&CustomPathfinderState>,
         Option<&mut SimulatingPathState>,
     )>,
+    borders: Query<(&WorldBorderState, &TicksConnected)>,
     worlds: Res<Worlds>,
 ) {
     for (
@@ -329,6 +333,7 @@ pub fn timeout_movement(
                     world_name,
                     custom_state,
                     inventory,
+                    border_wall(&borders, entity),
                 );
                 continue;
             }
@@ -368,6 +373,7 @@ pub fn timeout_movement(
                 world_name,
                 custom_state,
                 inventory,
+                border_wall(&borders, entity),
             );
         }
     }
@@ -383,6 +389,7 @@ fn patch_path_from_timeout(
     world_name: &WorldName,
     custom_state: Option<&CustomPathfinderState>,
     inventory: &Inventory,
+    border: Option<BorderWall>,
 ) {
     executing_path.queued_path = None;
     let cur_pos = player_pos_to_block_pos(**position);
@@ -410,6 +417,7 @@ fn patch_path_from_timeout(
         inventory,
         entity,
         world_lock,
+        border,
         custom_state,
         opts,
     );

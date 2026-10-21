@@ -7,7 +7,8 @@ use std::{
 };
 
 use azalea_core::position::BlockPos;
-use azalea_entity::inventory::Inventory;
+use azalea_client::tick_counter::TicksConnected;
+use azalea_entity::{inventory::Inventory, unmodelled::WorldBorderState};
 use azalea_world::{WorldName, Worlds};
 use bevy_ecs::{
     entity::Entity,
@@ -19,13 +20,13 @@ use tracing::{debug, error, warn};
 use crate::pathfinder::{
     CalculatePathCtx, ExecutingPath, Pathfinder, PathfinderOpts,
     astar::{self, PathfinderTimeout},
-    calculate_path, call_successors_fn,
+    border_wall, calculate_path, call_successors_fn,
     custom_state::CustomPathfinderState,
     goals::BlockPosGoal,
     mining::MiningCache,
     moves,
     positions::RelBlockPos,
-    world::CachedWorld,
+    world::{BorderWall, CachedWorld},
 };
 
 #[allow(clippy::type_complexity)]
@@ -38,6 +39,7 @@ pub fn check_for_path_obstruction(
         &Inventory,
         Option<&CustomPathfinderState>,
     )>,
+    borders: Query<(&WorldBorderState, &TicksConnected)>,
     worlds: Res<Worlds>,
 ) {
     query.par_iter_mut().for_each(|(entity, mut pathfinder, mut executing_path, world_name, inventory, custom_state)| {
@@ -51,7 +53,8 @@ pub fn check_for_path_obstruction(
 
         // obstruction check (the path we're executing isn't possible anymore)
         let origin = executing_path.last_reached_node;
-        let cached_world = CachedWorld::new(world_lock, origin);
+        let cached_world =
+            CachedWorld::new(world_lock, origin).with_border(border_wall(&borders, entity));
         let mining_cache = MiningCache::new(if opts.allow_mining {
             Some(inventory.inventory_menu.clone())
         } else {
@@ -119,6 +122,7 @@ pub fn check_for_path_obstruction(
             inventory,
             entity,
             world_lock,
+            border_wall(&borders, entity),
             custom_state.clone(),
             opts,
         );
@@ -138,6 +142,7 @@ pub fn patch_path(
     inventory: &Inventory,
     entity: Entity,
     world_lock: Arc<RwLock<azalea_world::World>>,
+    border: Option<BorderWall>,
     custom_state: CustomPathfinderState,
     opts: PathfinderOpts,
 ) {
@@ -170,6 +175,7 @@ pub fn patch_path(
         start: patch_start,
         goal,
         world_lock,
+        border,
         goto_id_atomic,
         mining_cache,
         custom_state,

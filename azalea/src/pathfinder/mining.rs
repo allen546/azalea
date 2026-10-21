@@ -87,6 +87,11 @@ impl MiningCache {
         if BlockKind::from(block) == BlockKind::Cobweb {
             return f32::INFINITY;
         }
+        // Patch 34: the same for every block the patch 30 gate lists (bubble column, slime,
+        // beds, scaffolding, moving piston): breaking one would put the bot in its effect.
+        if super::world::is_block_state_unmodelled(block) {
+            return f32::INFINITY;
+        }
 
         // SAFETY: mining is single-threaded, so this is safe
         let block_state_id_costs = unsafe { &mut *self.block_state_id_costs.get() };

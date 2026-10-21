@@ -1,6 +1,7 @@
 use std::f32::consts::SQRT_2;
 
 use azalea_block::{BlockState, properties};
+use azalea_entity::unmodelled::is_unmodelled_block;
 use azalea_registry::builtin::BlockKind;
 use azalea_client::{SprintDirection, WalkDirection};
 use azalea_core::{
@@ -399,11 +400,24 @@ pub fn descend_is_reached(
 // Spec: specs/B1-movement.md §4.3
 fn has_movement_effect_block(ctx: &MovesCtx, pos: RelBlockPos) -> bool {
     [pos, pos.up(1)].into_iter().any(|p| {
+        let kind = BlockKind::from(ctx.world.get_block_state(p));
         matches!(
-            BlockKind::from(ctx.world.get_block_state(p)),
+            kind,
             BlockKind::Cobweb | BlockKind::SweetBerryBush | BlockKind::PowderSnow
-        )
+        ) || is_unmodelled_block(kind)
+            // patch 34: a cell walled by a honey block, a piston face or the world border
+            || ctx.world.is_wall_cell(p)
     })
+}
+
+/// Whether the floor under `pos` is a block whose motion effect the fork does not model (slime,
+/// bed, scaffolding). Such a floor can be a gap to the planner, but a bot that jumps over it, or
+/// cuts the corner of its cell on a diagonal, has its box within a millimetre of the block's top
+/// face, which patch 30's gate counts as touching it (`SlimeBlock#stepOn`). Parkour and diagonal
+/// moves therefore never cross one (patch 36).
+// Spec: specs/B1-movement.md §4.3
+pub(super) fn unmodelled_floor(ctx: &MovesCtx, pos: RelBlockPos) -> bool {
+    ctx.world.is_block_unmodelled(pos.down(1))
 }
 
 fn diagonal_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
@@ -468,6 +482,9 @@ fn diagonal_move(ctx: &mut MovesCtx, pos: RelBlockPos) {
                 continue;
             }
         } else if !ctx.world.is_standable(new_position) {
+            continue;
+        } else if unmodelled_floor(ctx, left_pos) || unmodelled_floor(ctx, right_pos) {
+            // patch 36: the diagonal's box passes over the corners of both side cells
             continue;
         }
 
