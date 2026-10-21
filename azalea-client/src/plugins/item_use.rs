@@ -30,8 +30,10 @@ use tracing::debug;
 
 use crate::{
     interact::{BlockStatePredictionHandler, handle_start_use_item_queued},
+    client_refusals::use_start_refusal,
     inventory::ensure_has_sent_carried_item,
-    local_player::{Hunger, LocalGameMode},
+    local_player::{Hunger, LocalGameMode, WorldHolder},
+    respawn::RespawnLog,
     movement::ItemInUse,
     packet::game::SendGamePacketEvent,
 };
@@ -124,9 +126,13 @@ pub fn handle_use_item_queued(
         &PlayerAbilities,
         &LocalGameMode,
         Has<ItemInUse>,
+        &WorldHolder,
+        Option<&mut RespawnLog>,
     )>,
 ) {
-    for (entity, queued, mut prediction, look, inventory, hunger, abilities, mode, in_use) in &mut query {
+    for (entity, queued, mut prediction, look, inventory, hunger, abilities, mode, in_use, world, log) in
+        &mut query
+    {
         commands.entity(entity).remove::<UseItemQueued>();
         // Vanilla only starts a use when none is running.
         if in_use || mode.current == GameMode::Spectator {
@@ -135,6 +141,13 @@ pub fn handle_use_item_queued(
         }
         let Some(stack) = stack_in_hand(inventory, queued.hand) else { continue };
         if matches!(stack, ItemStack::Empty) {
+            continue;
+        }
+        // Patch 34: a use the fork does not model (riptide, other use speed) is refused.
+        if let Some(why) = use_start_refusal(stack, &world.shared.read().registries) {
+            if let Some(mut log) = log {
+                log.refuse_input(why);
+            }
             continue;
         }
         commands.trigger(SendGamePacketEvent::new(

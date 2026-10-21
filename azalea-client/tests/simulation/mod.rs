@@ -4,6 +4,7 @@ mod attack_cooldown_like_vanilla;
 mod attackers_from_damage_event;
 mod change_dimension_to_nether_and_back;
 mod client_disconnect;
+mod client_refusals;
 mod close_open_container;
 mod correct_movement;
 mod correct_sneak_movement;

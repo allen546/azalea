@@ -33,6 +33,10 @@ pub enum UnmodelledInput {
     Block(BlockPos, BlockKind),
     /// The bot's box is outside or at the world border (`WorldBorder` collision).
     WorldBorder,
+    /// The server set the bot's shared flag 7 (`Entity#isFallFlying`, entity metadata): the
+    /// client glides by itself (`LivingEntity#updateFallFlying`, `travelFallFlying`) and the fork
+    /// does not model gliding. The bot never starts a glide itself (patch 34 refuses the jump).
+    Gliding,
 }
 
 impl UnmodelledInput {
@@ -61,6 +65,12 @@ const LISTED_EFFECTS: [MobEffect; 3] = [
     MobEffect::SlowFalling,
     MobEffect::DolphinsGrace,
 ];
+
+/// The `Gliding` entry for the bot's own shared flag 7 (the `FallFlying` metadata), if it is on.
+// Spec: specs/F5-version-layer.md §4.6
+pub fn gliding_entry(fall_flying: Option<bool>) -> Option<UnmodelledInput> {
+    fall_flying.filter(|&f| f).map(|_| UnmodelledInput::Gliding)
+}
 
 /// Every unmodelled attribute or effect in force; empty when the client's predictions hold. The
 /// vehicle, block and border entries come from [`UnmodelledContacts`], which `azalea-client`
@@ -157,6 +167,15 @@ pub fn honey_touches_side(bb: &Aabb, cell: BlockPos) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_glide_flag_is_a_movement_entry() {
+        use super::*;
+        assert_eq!(gliding_entry(Some(true)), Some(UnmodelledInput::Gliding));
+        assert_eq!(gliding_entry(Some(false)), None);
+        assert_eq!(gliding_entry(None), None);
+        assert_eq!(UnmodelledInput::Gliding.kind(), UnmodelledKind::Movement);
+    }
+
     use azalea_core::position::Vec3;
     use azalea_registry::builtin::EntityKind;
 

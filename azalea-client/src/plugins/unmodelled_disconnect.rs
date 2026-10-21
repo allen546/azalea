@@ -13,9 +13,9 @@
 
 use azalea_core::tick::GameTick;
 use azalea_entity::{
-    ActiveEffects, Attributes, LocalEntity, Physics,
+    metadata::FallFlying, ActiveEffects, Attributes, LocalEntity, Physics,
     unmodelled::{
-        RidingVehicle, UnmodelledContacts, UnmodelledInput, UnmodelledKind, WorldBorderState,
+        RidingVehicle, UnmodelledContacts, gliding_entry, UnmodelledInput, UnmodelledKind, WorldBorderState,
         unmodelled_inputs,
     },
 };
@@ -85,15 +85,18 @@ pub fn derive_unmodelled_contacts(
             Option<&RidingVehicle>,
             Option<&WorldBorderState>,
             Option<&mut UnmodelledContacts>,
+            Option<&FallFlying>,
         ),
         With<LocalEntity>,
     >,
 ) {
-    for (entity, physics, world_holder, ticks, vehicle, border, contacts) in &mut query {
+    for (entity, physics, world_holder, ticks, vehicle, border, contacts, fall_flying) in &mut query {
         let mut list = Vec::new();
         if vehicle.is_some() {
             list.push(UnmodelledInput::Passenger);
         }
+        // Patch 34: the server set the glide flag on the bot.
+        list.extend(gliding_entry(fall_flying.map(|f| f.0)));
         if border.is_some_and(|b| b.touches(&physics.bounding_box, ticks.0)) {
             list.push(UnmodelledInput::WorldBorder);
         }

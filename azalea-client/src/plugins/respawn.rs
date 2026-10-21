@@ -197,6 +197,9 @@ pub struct RespawnLog {
     pub last_refusal: Option<RespawnRefusal>,
     /// Actions refused since the last death began, with how many times (patch 22).
     pub refused_while_dead: Vec<(DeadAction, u32)>,
+    /// Inputs refused because the fork does not model what they start (patch 34): elytra, riptide,
+    /// item use effects. Never cleared by a death.
+    pub refused_inputs: Vec<(crate::client_refusals::InputRefusal, u32)>,
     /// Game packets sent since the last death began, by name, up to the respawn packet.
     pub sent_while_dead: Vec<(String, u32)>,
 }

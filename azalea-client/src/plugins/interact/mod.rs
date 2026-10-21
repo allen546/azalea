@@ -272,12 +272,30 @@ pub fn handle_start_use_item_queued(
         &HitResultComponent,
         &LookDirection,
         Option<&Mining>,
+        &Inventory,
+        &crate::local_player::WorldHolder,
+        Option<&mut crate::respawn::RespawnLog>,
     )>,
 ) {
-    for (entity, start_use_item, mut prediction_handler, hit_result, look_direction, mining) in
+    for (entity, start_use_item, mut prediction_handler, hit_result, look_direction, mining, inventory, world, log) in
         query
     {
         commands.entity(entity).remove::<StartUseItemQueued>();
+
+        // Patch 34: the held item's use is one the fork does not model (riptide, other use
+        // speed); refuse the whole click. Spec: specs/F5-version-layer.md §4.6
+        let held = inventory.get_equipment(match start_use_item.hand {
+            InteractionHand::MainHand => components::EquipmentSlot::Mainhand,
+            InteractionHand::OffHand => components::EquipmentSlot::Offhand,
+        });
+        if let Some(why) = held
+            .and_then(|s| crate::client_refusals::use_start_refusal(s, &world.shared.read().registries))
+        {
+            if let Some(mut log) = log {
+                log.refuse_input(why);
+            }
+            continue;
+        }
 
         if mining.is_some() {
             warn!("Got a StartUseItemEvent for a client that was mining");
@@ -364,11 +382,23 @@ pub struct EntityInteractEvent {
     pub location: Option<Vec3>,
 }
 
+// Spec: specs/F5-version-layer.md §4.6 (client refusals: mounting; the right-click bypass)
+/// Sends the INTERACT_AT and INTERACT packets of a right-click on an entity. Patch 34 closed the
+/// bypass of the mount refusal: a click that would mount (`entity_actions::entity_use_plan_with`
+/// is `WouldMount`, or `NeedsCrouch` while standing) is refused here too, logged as
+/// `EntityUseRefusal::WouldMount`, and nothing is sent. Null reaches this event only through
+/// `StartUseItemQueued` (the adapter does not use it); `UseEntityQueued` has its own path.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_entity_interact(
     trigger: On<EntityInteractEvent>,
     mut commands: Commands,
     client_query: Query<(&ClientMovementState, &EntityIdIndex, &HitResultComponent)>,
     target_query: Query<&Position>,
+    kinds: Query<(
+        &azalea_entity::EntityKindComponent,
+        Option<&azalea_entity::metadata::AbstractAgeableBaby>,
+        Option<&azalea_entity::metadata::Tamed>,
+    )>,
     mut dead: Query<&mut crate::respawn::RespawnLog, With<crate::respawn::DeathScreen>>,
 ) {
     // Patch 22: no mouse while the death screen is open.
@@ -383,6 +413,30 @@ pub fn handle_entity_interact(
         );
         return;
     };
+
+    // Patch 34: never send a click that would mount.
+    if let Ok((kind, baby, tamed)) = kinds.get(trigger.target) {
+        let facts = crate::entity_actions::MountFacts {
+            baby: baby.map(|b| b.0),
+            tamed: tamed.map(|t| t.0),
+        };
+        let plan = crate::entity_actions::entity_use_plan_with(
+            kind.0,
+            physics_state.trying_to_crouch,
+            facts,
+        );
+        if matches!(
+            plan,
+            crate::entity_actions::EntityUsePlan::WouldMount
+                | crate::entity_actions::EntityUsePlan::NeedsCrouch
+        ) {
+            tracing::info!(
+                "refused an entity click that would mount: {}",
+                crate::entity_actions::EntityUseRefusal::WouldMount.as_str()
+            );
+            return;
+        }
+    }
 
     // TODO: worldborder check
 

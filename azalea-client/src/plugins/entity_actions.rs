@@ -37,7 +37,7 @@ use azalea_core::{
     tick::GameTick,
 };
 use azalea_entity::{
-    Attributes, Crouching, LookDirection, Physics, Position, dimensions::EntityDimensions,
+    Attributes, Crouching, metadata::{AbstractAgeableBaby, Tamed}, LookDirection, Physics, Position, dimensions::EntityDimensions,
     indexing::EntityIdIndex, interpolation::PeerView, inventory::Inventory, EntityKindComponent,
     view_vector,
 };
@@ -129,8 +129,11 @@ pub enum EntityUseRefusal {
     NotLookingAtIt,
     /// A block is in the way of the crosshair ray, nearer than the entity.
     BehindBlock,
-    /// A standing click would make the player ride it (`AbstractBoat#interact`). Null does not
-    /// ride: crouch first, or set `auto_crouch`.
+    /// The click would make the player ride the entity (`AbstractBoat#interact`,
+    /// `AbstractHorse#mobInteract`, `Camel#mobInteract`, ...). The fork does not model riding and
+    /// Null does not ride. Where crouching avoids the mount (a chest boat), crouch first or set
+    /// `auto_crouch`. Patch 34 extends this from boats and minecarts to every kind that mounts on
+    /// a right-click.
     WouldMount,
     /// A screen is open; a vanilla client has no crosshair then.
     ScreenOpen,
@@ -150,7 +153,7 @@ impl EntityUseRefusal {
             Self::OutOfReach => "out of reach",
             Self::NotLookingAtIt => "crosshair does not hit it",
             Self::BehindBlock => "a block is in the way of the crosshair",
-            Self::WouldMount => "a standing click would ride it: crouch first (or auto_crouch)",
+            Self::WouldMount => "this click would ride the entity: the fork does not model riding (a chest boat opens when crouching: crouch first or auto_crouch)",
             Self::ScreenOpen => "a screen is open",
             Self::Busy => "mining or using an item",
             Self::Spectator => "spectators cannot use entities",
@@ -173,18 +176,68 @@ pub enum EntityUsePlan {
     Unsupported,
 }
 
+/// What the fork knows about the clicked entity that decides whether the click mounts. `None`
+/// is unknown, and unknown means the click may mount (patch 34: refuse). The fork does not track
+/// other entities' saddles, armour, passengers or leashes, so those are always unknown.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MountFacts {
+    /// Ageable mob metadata (`AgeableMob#isBaby`).
+    pub baby: Option<bool>,
+    /// Horse-family metadata (`AbstractHorse#isTamed`).
+    pub tamed: Option<bool>,
+}
+
+// Spec: specs/F5-version-layer.md §4.6 (client refusals: mounting on a right-click)
+/// Whether a main-hand click on `kind` mounts the player on a vanilla client, for the kinds whose
+/// `interact` override starts a ride (Mojang names):
+/// - `AbstractBoat#interact` and `Minecart#interact`: standing mounts, crouching does nothing;
+/// - `AbstractHorse#mobInteract` (horse, donkey, mule, llama, trader llama, zombie horse, skeleton
+///   horse): a rideable adult mounts, also with an empty hand on an untamed one; a crouching click
+///   on a tamed one opens its inventory; a skeleton horse mounts only when tamed;
+/// - `Camel#mobInteract` (camel, camel husk), `Pig` and `Strider` (`Saddleable` mobs), the happy
+///   ghast and the nautilus kinds: an adult mounts when standing (saddle, harness or tame state
+///   unknown here, so assumed present); crouching opens an inventory or does nothing.
+/// A baby never mounts. Returns `Some(true)` when the click mounts (or may), `Some(false)` when
+/// the fork knows it does not, and `None` for a kind that has no mount.
+pub fn click_mounts(kind: EntityKind, secondary: bool, facts: MountFacts) -> Option<bool> {
+    use EntityKind as K;
+    let baby = facts.baby == Some(true);
+    match kind {
+        K::Horse | K::Donkey | K::Mule | K::Llama | K::TraderLlama | K::ZombieHorse => {
+            Some(!baby && !(secondary && facts.tamed == Some(true)))
+        }
+        K::SkeletonHorse => {
+            Some(!baby && facts.tamed != Some(false) && !(secondary && facts.tamed == Some(true)))
+        }
+        K::Camel | K::CamelHusk | K::Pig | K::Strider | K::HappyGhast | K::Nautilus
+        | K::ZombieNautilus => Some(!baby && !secondary),
+        _ => None,
+    }
+}
+
 // Spec: specs/B3-inventory-crafting.md §4.7 (open a container on an entity by right-clicking it)
 /// The client's prediction for a main-hand click on `kind` with the crouch state `secondary`
-/// (`Player#isSecondaryUseActive`). Vanilla 1.21.11, Mojang names:
+/// (`Player#isSecondaryUseActive`), nothing known about the entity. See
+/// [`entity_use_plan_with`]. Vanilla 1.21.11, Mojang names:
 /// - `AbstractMinecartContainer#interact` (chest and hopper minecart): `interactWithContainerVehicle`,
 ///   which returns SUCCESS on the client whatever the crouch;
 /// - `AbstractChestBoat#interact`: first `AbstractBoat#interact`, which on the client is SUCCESS when
 ///   standing (a mount is predicted) and PASS when crouching; then, crouching, the container
 ///   interaction (SUCCESS). A chest boat that cannot take a passenger opens standing too; this
 ///   function does not model that;
-/// - a plain boat or minecart: standing is a mount, crouching is PASS.
+/// - a plain boat or minecart: standing is a mount, crouching is PASS;
+/// - every kind in [`click_mounts`]: `WouldMount` when the click mounts.
 pub fn entity_use_plan(kind: EntityKind, secondary: bool) -> EntityUsePlan {
+    entity_use_plan_with(kind, secondary, MountFacts::default())
+}
+
+// Spec: specs/F5-version-layer.md §4.6 (client refusals: mounting on a right-click)
+/// [`entity_use_plan`] with what the fork knows about the entity (patch 34).
+pub fn entity_use_plan_with(kind: EntityKind, secondary: bool, facts: MountFacts) -> EntityUsePlan {
     use EntityKind as K;
+    if let Some(mounts) = click_mounts(kind, secondary, facts) {
+        return if mounts { EntityUsePlan::WouldMount } else { EntityUsePlan::Unsupported };
+    }
     match kind {
         K::ChestMinecart | K::HopperMinecart => EntityUsePlan::Send,
         K::AcaciaChestBoat
@@ -572,7 +625,13 @@ pub fn handle_use_entity_queued(
         &TicksConnected,
     )>,
     entities: EvidenceEntities,
-    targets: Query<(&EntityKindComponent, &Position, &LastBoundingBox)>,
+    targets: Query<(
+        &EntityKindComponent,
+        &Position,
+        &LastBoundingBox,
+        Option<&AbstractAgeableBaby>,
+        Option<&Tamed>,
+    )>,
     aabb_query: AabbQuery,
     pickable: MaybePickableEntityQuery,
 ) {
@@ -609,12 +668,15 @@ pub fn handle_use_entity_queued(
             continue;
         }
         // Patch 31: another bot is clicked at the position and box this bot sees it at.
-        let Some((target, (kind, target_position, target_box))) = ids
+        let Some((target, (kind, target_position, target_box, facts))) = ids
             .get_by_minecraft_entity(MinecraftEntityId(id))
             .and_then(|e| {
-                targets.get(e).ok().map(|(k, p, b)| match peers.as_deref().and_then(|v| v.get(e)) {
-                    Some(entry) => (e, (k.0, entry.position, entry.bounding_box)),
-                    None => (e, (k.0, **p, b.0)),
+                targets.get(e).ok().map(|(k, p, b, baby, tamed)| {
+                    let facts = MountFacts { baby: baby.map(|b| b.0), tamed: tamed.map(|t| t.0) };
+                    match peers.as_deref().and_then(|v| v.get(e)) {
+                        Some(entry) => (e, (k.0, entry.position, entry.bounding_box, facts)),
+                        None => (e, (k.0, **p, b.0, facts)),
+                    }
                 })
             })
         else {
@@ -626,7 +688,7 @@ pub fn handle_use_entity_queued(
         }
         let view = peers.as_deref();
         let secondary = is_crouching(&mv, crouching);
-        let plan = entity_use_plan(kind, secondary);
+        let plan = entity_use_plan_with(kind, secondary, facts);
         if plan == EntityUsePlan::Unsupported {
             refuse(&mut commands, entity, holding, &mut mv, &mut results, id, EntityUseRefusal::UnsupportedEntity, None);
             continue;
@@ -779,6 +841,41 @@ mod tests {
             assert_eq!(entity_use_plan(k, true), P::Unsupported);
         }
         assert_eq!(entity_use_plan(K::Zombie, false), P::Unsupported);
+    }
+
+    // Every row of the patch 34 mount table, standing and crouching.
+    #[test]
+    fn every_kind_that_mounts_on_a_right_click_is_refused() {
+        use EntityKind as K;
+        use EntityUsePlan as P;
+        let unknown = MountFacts::default();
+        let adult = MountFacts { baby: Some(false), tamed: None };
+        let baby = MountFacts { baby: Some(true), tamed: None };
+        // horse family: an empty hand mounts an untamed or unknown horse, standing or crouching
+        for k in [K::Horse, K::Donkey, K::Mule, K::Llama, K::TraderLlama, K::ZombieHorse] {
+            for f in [unknown, adult, MountFacts { baby: Some(false), tamed: Some(false) }] {
+                assert_eq!(entity_use_plan_with(k, false, f), P::WouldMount, "{k:?}");
+                assert_eq!(entity_use_plan_with(k, true, f), P::WouldMount, "{k:?} crouched, untamed");
+            }
+            // tamed and crouching: the inventory opens (not a mount); standing it mounts
+            let tamed = MountFacts { baby: Some(false), tamed: Some(true) };
+            assert_eq!(entity_use_plan_with(k, false, tamed), P::WouldMount);
+            assert_eq!(entity_use_plan_with(k, true, tamed), P::Unsupported);
+            assert_eq!(entity_use_plan_with(k, false, baby), P::Unsupported);
+        }
+        // skeleton horse: only when tamed (unknown counts as may-mount)
+        let sk = |tamed| MountFacts { baby: Some(false), tamed };
+        assert_eq!(entity_use_plan_with(K::SkeletonHorse, false, sk(Some(false))), P::Unsupported);
+        assert_eq!(entity_use_plan_with(K::SkeletonHorse, false, sk(Some(true))), P::WouldMount);
+        assert_eq!(entity_use_plan_with(K::SkeletonHorse, false, sk(None)), P::WouldMount);
+        assert_eq!(entity_use_plan_with(K::SkeletonHorse, true, sk(Some(true))), P::Unsupported);
+        // camel, camel husk, pig, strider, happy ghast, nautilus kinds: standing mounts, crouching not
+        for k in [K::Camel, K::CamelHusk, K::Pig, K::Strider, K::HappyGhast, K::Nautilus, K::ZombieNautilus] {
+            assert_eq!(entity_use_plan(k, false), P::WouldMount, "{k:?}");
+            assert_eq!(entity_use_plan_with(k, false, adult), P::WouldMount, "{k:?}");
+            assert_eq!(entity_use_plan(k, true), P::Unsupported, "{k:?} crouched");
+            assert_eq!(entity_use_plan_with(k, false, baby), P::Unsupported, "{k:?} baby");
+        }
     }
 
     #[test]

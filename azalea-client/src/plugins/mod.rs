@@ -26,6 +26,7 @@ pub mod movement;
 pub mod packet;
 pub mod place_prediction;
 pub mod pong;
+pub mod client_refusals;
 pub mod pushes;
 pub mod respawn;
 pub mod tags;
@@ -63,6 +64,7 @@ impl PluginGroup for DefaultPlugins {
             .add(attackers::AttackersPlugin)
             .add(interpolation::InterpolationPlugin)
             .add(pushes::PushesPlugin)
+            .add(client_refusals::ClientRefusalsPlugin)
             .add(item_use::ItemUsePlugin)
             .add(chunks::ChunksPlugin)
             .add(block_update::BlockUpdatePlugin)
