@@ -23,6 +23,7 @@ mod move_despawned_entity;
 mod packet_order;
 mod packet_order_set_carried_item;
 mod pick_every_tick;
+mod place_prediction_like_vanilla;
 mod receive_spawn_entity_and_start_config_packet;
 mod receive_start_config_packet;
 mod reply_to_ping_with_pong;

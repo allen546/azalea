@@ -60,6 +60,7 @@ use crate::{
         SkipStartTickProgress,
     },
     inventory::OpenScreen,
+    place_prediction::{Decision, PlaceRefusal, PlaceRequest, PlaceView, UnknownWhy, Verdict, decide, predict_place},
     tick_counter::TicksConnected,
     movement::ItemInUse,
     packet::game::SendGamePacketEvent,
@@ -217,6 +218,12 @@ pub enum BlockActionRefusal {
     BlockUsesClick,
     /// The death screen is open: a vanilla client has no mouse then (patch 22).
     Dead,
+    /// The place is inside the bot's movement zone and place prediction (patch 33) cannot compute
+    /// the block it would put there (see `place_prediction::UnknownWhy`). Nothing was sent.
+    PlaceNotPredicted,
+    /// The place is inside the movement zone and a neighbouring block may change its shape
+    /// because of it (fences, stairs, vines, ...); stage 1 does not predict that. Nothing was sent.
+    PlaceNeighbourReacts,
 }
 
 impl BlockActionRefusal {
@@ -232,6 +239,8 @@ impl BlockActionRefusal {
             Self::Busy => "mining or using an item",
             Self::BlockUsesClick => "block uses the click: crouch first (or auto_crouch) to place",
             Self::Dead => "the death screen is open: a vanilla client has no mouse then",
+            Self::PlaceNotPredicted => "inside the movement zone, the placed block cannot be predicted",
+            Self::PlaceNeighbourReacts => "inside the movement zone, a neighbour block would change shape",
         }
     }
 }
@@ -720,6 +729,7 @@ pub fn handle_place_block_queued(
         &TicksConnected,
     )>,
     entities: EvidenceEntities,
+    view: PlaceView,
     ticks: SystemChangeTick,
     mut finished: MessageWriter<BlockActionFinished>,
 ) {
@@ -843,8 +853,60 @@ pub fn handle_place_block_queued(
                 finished.write(BlockActionFinished { entity, is_break: false, result });
             }
             Ok(r) => {
+                // Place prediction (patch 33): the cell the vanilla client writes, or a refusal
+                // when the bot's physics would read a cell that could be wrong.
+                let cells = [queued.position, queued.position.offset_with_direction(queued.direction)];
+                let decision = match view.context(entity, &world, **position, dims, cells) {
+                    Some(cx) => {
+                        let verdict = predict_place(
+                            &world.chunks,
+                            &PlaceRequest {
+                                clicked: queued.position,
+                                face: queued.direction,
+                                hit: r.location,
+                                held,
+                                has_block_state_component: matches!(
+                                    inv.held_item(),
+                                    azalea_inventory::ItemStack::Present(d)
+                                        if d.get_component::<azalea_inventory::components::BlockState>().is_some()
+                                ),
+                                game_mode: cx.game_mode,
+                                yaw: look.y_rot(),
+                                sent_yaw: cx.sent_yaw,
+                                obstacles: &cx.obstacles,
+                            },
+                        );
+                        // the old target rule and stage 1 must agree on the cell
+                        let verdict = match verdict {
+                            Verdict::Predict { pos, .. } if pos != target => Verdict::Unknown(UnknownWhy::ReplaceRule),
+                            v => v,
+                        };
+                        tracing::debug!(?verdict, "place prediction");
+                        decide(&world.chunks, verdict, cells, &cx.zone)
+                    }
+                    // the bot is not fully set up: predict nothing, refuse nothing (as before)
+                    None => Decision::Send { write: None },
+                };
+                if let Decision::Refuse(why) = decision {
+                    result.outcome = BlockActionOutcome::Refused;
+                    result.refusal = Some(match why {
+                        PlaceRefusal::NotPredicted(_) => BlockActionRefusal::PlaceNotPredicted,
+                        PlaceRefusal::NeighbourReacts(_) => BlockActionRefusal::PlaceNeighbourReacts,
+                    });
+                    result.evidence = Some(evidence(&mv, *look));
+                    tracing::debug!(?why, "place refused: not predictable inside the movement zone");
+                    finished.write(BlockActionFinished { entity, is_break: false, result });
+                    results.set_place(result);
+                    continue;
+                }
                 let seq = prediction.start_predicting();
                 result.seq = Some(seq);
+                // `ClientLevel#setBlock` while predicting: retain the server's state, then write
+                if let Decision::Send { write: Some((pos, state)) } = decision
+                    && let Some(old) = world.set_block_state(pos, state)
+                {
+                    prediction.retain_known_server_state(pos, old, **position);
+                }
                 commands.trigger(SendGamePacketEvent::new(
                     entity,
                     ServerboundUseItemOn { hand: InteractionHand::MainHand, block_hit: r.into(), seq },

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use azalea_block::BlockState;
 use azalea_core::{
+    aabb::Aabb,
     direction::Direction,
     game_type::GameMode,
     hit_result::{BlockHitResult, HitResult},
@@ -22,7 +23,7 @@ use azalea_entity::{
 use azalea_inventory::{ItemStack, ItemStackData, components};
 use azalea_physics::{
     PhysicsSystems, client_movement::ClientMovementState,
-    collision::entity_collisions::update_last_bounding_box,
+    collision::{BlockWithShape, entity_collisions::update_last_bounding_box},
 };
 use azalea_protocol::packets::game::{
     ServerboundInteract, ServerboundUseItem,
@@ -111,7 +112,6 @@ struct ServerVerifiedState {
     block_state: BlockState,
     /// Used for teleporting the player back if we're colliding with the block
     /// that got placed back.
-    #[allow(unused)]
     player_pos: Vec3,
 }
 
@@ -172,31 +172,52 @@ impl BlockStatePredictionHandler {
         }
     }
 
-    pub fn end_prediction_up_to(&mut self, seq: u32, world: &World) {
+    /// Settle every retained cell up to `seq`: write back the server's state where it differs
+    /// and, when the player's box meets a cell whose state changed, return the position the
+    /// player had when the cell was first retained (vanilla `ClientLevel#syncBlockState`:
+    /// `Entity#isColliding` then `absSnapTo`). The caller moves the player there.
+    ///
+    /// `player_box` is the player's box now; `None` skips the snap-back.
+    // Spec: specs/B6-placement-breaking.md §4.10 (write and roll back)
+    pub fn end_prediction_up_to(
+        &mut self,
+        seq: u32,
+        world: &World,
+        player_box: Option<&Aabb>,
+    ) -> Option<Vec3> {
         self.acked_seq = self.acked_seq.max(seq);
-        let mut to_remove = Vec::new();
-        for (pos, state) in &self.server_state {
-            if state.seq > seq {
-                continue;
-            }
-            to_remove.push(*pos);
+        // oldest first, so the newest prediction decides the snap when several cells collide
+        let mut settled: Vec<(BlockPos, ServerVerifiedState)> = self
+            .server_state
+            .iter()
+            .filter(|(_, s)| s.seq <= seq)
+            .map(|(p, s)| (*p, s.clone()))
+            .collect();
+        settled.sort_by_key(|(p, s)| (s.seq, p.x, p.y, p.z));
+        let mut snap = None;
+        for (pos, state) in settled {
+            self.server_state.remove(&pos);
 
             // syncBlockState
-            let client_block_state = world.get_block_state(*pos).unwrap_or_default();
+            let client_block_state = world.get_block_state(pos).unwrap_or_default();
             let server_block_state = state.block_state;
             if client_block_state == server_block_state {
                 continue;
             }
-            world.set_block_state(*pos, server_block_state);
-            // TODO: implement these two functions
-            // if is_colliding(player, *pos, server_block_state) {
-            //     abs_snap_to(state.player_pos);
-            // }
+            world.set_block_state(pos, server_block_state);
+            if let Some(player_box) = player_box {
+                let cell = Vec3::new(pos.x as f64, pos.y as f64, pos.z as f64);
+                let colliding = server_block_state
+                    .collision_shape()
+                    .to_aabbs()
+                    .iter()
+                    .any(|b| b.move_relative(cell).intersects_aabb(player_box));
+                if colliding {
+                    snap = Some(state.player_pos);
+                }
+            }
         }
-
-        for pos in to_remove {
-            self.server_state.remove(&pos);
-        }
+        snap
     }
 }
 
@@ -528,5 +549,108 @@ fn update_attributes_for_gamemode(
                 .entity_interaction_range
                 .remove(&creative_entity_interaction_range_modifier().id);
         }
+    }
+}
+
+#[cfg(test)]
+mod prediction_tests {
+    use azalea_core::position::ChunkPos;
+    use azalea_registry::builtin::BlockKind;
+    use azalea_world::{Chunk, PartialChunkStorage};
+
+    use super::*;
+
+    fn world() -> (World, PartialChunkStorage) {
+        let mut world = World::default();
+        world.chunks = azalea_world::ChunkStorage::new(384, -64);
+        let mut partial = PartialChunkStorage::new(2);
+        partial.set(&ChunkPos::new(0, 0), Some(Chunk::default()), &mut world.chunks);
+        (world, partial)
+    }
+
+    const POS: BlockPos = BlockPos::new(2, 64, 2);
+    fn stone() -> BlockState {
+        BlockState::from(BlockKind::Stone)
+    }
+    fn dirt() -> BlockState {
+        BlockState::from(BlockKind::Dirt)
+    }
+    fn far_box() -> Aabb {
+        Aabb { min: Vec3::new(10.0, 64.0, 10.0), max: Vec3::new(10.6, 65.8, 10.6) }
+    }
+
+    // Spec: specs/B6-placement-breaking.md §4.10 (write and roll back)
+    #[test]
+    fn ack_with_the_same_state_keeps_the_prediction() {
+        let (world, _keep) = world();
+        let mut h = BlockStatePredictionHandler::default();
+        let seq = h.start_predicting();
+        let old = world.set_block_state(POS, stone()).unwrap();
+        h.retain_known_server_state(POS, old, Vec3::ZERO);
+        // the server's update arrives while the cell is retained: known state only, world untouched
+        assert!(h.update_known_server_state(POS, stone()));
+        assert_eq!(world.get_block_state(POS), Some(stone()));
+        assert_eq!(h.end_prediction_up_to(seq, &world, Some(&far_box())), None);
+        assert_eq!(world.get_block_state(POS), Some(stone()));
+        assert_eq!(h.acked_seq(), seq);
+        // settled: the cell is not retained any more, so an update goes straight to the world
+        assert!(!h.update_known_server_state(POS, dirt()));
+    }
+
+    #[test]
+    fn ack_with_a_different_state_rolls_back() {
+        let (world, _keep) = world();
+        let mut h = BlockStatePredictionHandler::default();
+        let seq = h.start_predicting();
+        let old = world.set_block_state(POS, stone()).unwrap();
+        h.retain_known_server_state(POS, old, Vec3::ZERO);
+        // no update came: the server refused, so the ack restores the old state
+        assert_eq!(h.end_prediction_up_to(seq, &world, Some(&far_box())), None);
+        assert_eq!(world.get_block_state(POS), Some(old));
+        // the server put something else there before the ack
+        let seq = h.start_predicting();
+        let old = world.set_block_state(POS, stone()).unwrap();
+        h.retain_known_server_state(POS, old, Vec3::ZERO);
+        h.update_known_server_state(POS, dirt());
+        h.end_prediction_up_to(seq, &world, Some(&far_box()));
+        assert_eq!(world.get_block_state(POS), Some(dirt()));
+    }
+
+    #[test]
+    fn a_later_write_to_the_same_cell_keeps_the_first_old_state() {
+        let (world, _keep) = world();
+        let mut h = BlockStatePredictionHandler::default();
+        let s1 = h.start_predicting();
+        let old = world.set_block_state(POS, stone()).unwrap();
+        h.retain_known_server_state(POS, old, Vec3::ZERO);
+        let s2 = h.start_predicting();
+        let old2 = world.set_block_state(POS, dirt()).unwrap();
+        h.retain_known_server_state(POS, old2, Vec3::new(9.0, 9.0, 9.0));
+        // an ack for the first sequence leaves the cell retained (its sequence was refreshed)
+        h.end_prediction_up_to(s1, &world, None);
+        assert_eq!(world.get_block_state(POS), Some(dirt()));
+        h.end_prediction_up_to(s2, &world, None);
+        assert_eq!(world.get_block_state(POS), Some(old));
+    }
+
+    #[test]
+    fn rolled_back_block_in_the_players_box_snaps_the_player_back() {
+        let (world, _keep) = world();
+        let mut h = BlockStatePredictionHandler::default();
+        let seq = h.start_predicting();
+        let before = Vec3::new(2.5, 66.0, 2.5);
+        // the server will say the cell is stone (it was air here), so the player at `before` is inside
+        let old = world.set_block_state(POS, BlockState::AIR).unwrap_or_default();
+        h.retain_known_server_state(POS, stone(), before);
+        let _ = old;
+        let inside = Aabb { min: Vec3::new(2.2, 64.2, 2.2), max: Vec3::new(2.8, 66.0, 2.8) };
+        assert_eq!(h.end_prediction_up_to(seq, &world, Some(&inside)), Some(before));
+        assert_eq!(world.get_block_state(POS), Some(stone()));
+        // standing beside it: no snap
+        let seq = h.start_predicting();
+        world.set_block_state(POS, BlockState::AIR);
+        h.retain_known_server_state(POS, stone(), before);
+        assert_eq!(h.end_prediction_up_to(seq, &world, Some(&far_box())), None);
+        assert_eq!(world.get_block_state(POS), Some(stone()));
     }
 }

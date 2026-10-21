@@ -1280,15 +1280,31 @@ impl GamePacketHandler<'_> {
 
     pub fn award_stats(&mut self, _p: &ClientboundAwardStats) {}
 
+    // Spec: specs/B6-placement-breaking.md §4.10 (write and roll back)
     pub fn block_changed_ack(&mut self, p: &ClientboundBlockChangedAck) {
-        as_system::<Query<(&WorldHolder, &mut BlockStatePredictionHandler)>>(
-            self.ecs,
-            |mut query| {
-                let (local_player, mut prediction_handler) = query.get_mut(self.player).unwrap();
-                let world = local_player.shared.read();
-                prediction_handler.end_prediction_up_to(p.seq, &world);
-            },
-        );
+        as_system::<
+            Query<(
+                &WorldHolder,
+                &mut BlockStatePredictionHandler,
+                &mut Position,
+                &mut Physics,
+                &azalea_entity::dimensions::EntityDimensions,
+                &mut QueuedServerBlockUpdates,
+            )>,
+        >(self.ecs, |mut query| {
+            let (local_player, mut prediction_handler, mut position, mut physics, dims, mut queued) =
+                query.get_mut(self.player).unwrap();
+            let world = local_player.shared.read();
+            // updates that arrived before the ack are applied before it (vanilla applies each
+            // block update as its packet arrives)
+            queued.apply_loaded(&world, &mut prediction_handler);
+            let player_box = dims.make_bounding_box(**position);
+            if let Some(snap) = prediction_handler.end_prediction_up_to(p.seq, &world, Some(&player_box)) {
+                // `Entity#absSnapTo`: the server refused a block the player now stands in.
+                **position = snap;
+                physics.set_old_pos(*position);
+            }
+        });
     }
 
     pub fn block_destruction(&mut self, _p: &ClientboundBlockDestruction) {}

@@ -2,6 +2,7 @@
 
 mod behavior;
 mod click_use;
+mod place_families;
 pub mod block_state;
 pub mod fluid_state;
 mod generated;
@@ -13,6 +14,9 @@ use std::{any::Any, collections::HashMap, str::FromStr};
 use azalea_registry::builtin::BlockKind;
 pub use behavior::BlockBehavior;
 pub use click_use::block_uses_click;
+pub use place_families::{
+    PlaceFamily, indirect_shape_block, place_family, plain_replace_rule, shape_inert,
+};
 // re-exported for convenience
 pub use block_state::BlockState;
 pub use generated::{blocks, properties};
@@ -199,5 +203,76 @@ mod click_use_tests {
         }
         assert!(state_uses_click(BlockState::from(BlockKind::Chest)));
         assert!(!state_uses_click(BlockState::from(BlockKind::Stone)));
+    }
+}
+
+#[cfg(test)]
+mod place_families_tests {
+    use azalea_registry::Registry;
+
+    use super::*;
+
+    fn kinds() -> impl Iterator<Item = BlockKind> {
+        (0..4000u32).filter_map(BlockKind::from_u32)
+    }
+
+    fn keys(kind: BlockKind) -> Vec<&'static str> {
+        let b: Box<dyn BlockTrait> = kind.into();
+        let mut k: Vec<_> = b.property_map().keys().copied().collect();
+        k.sort_unstable();
+        k
+    }
+
+    // Spec: specs/B6-placement-breaking.md §4.10 (place prediction: families)
+    #[test]
+    fn each_family_has_the_properties_its_state_rule_sets() {
+        let mut seen = [0usize; 6];
+        for kind in kinds() {
+            let k = keys(kind);
+            match place_family(kind) {
+                PlaceFamily::Plain => seen[0] += 1,
+                PlaceFamily::Axis => {
+                    assert_eq!(k, ["axis"], "{kind:?}");
+                    seen[1] += 1;
+                }
+                PlaceFamily::Waterloggable => {
+                    assert!(k.contains(&"waterlogged"), "{kind:?}");
+                    seen[2] += 1;
+                }
+                PlaceFamily::Slab => {
+                    assert_eq!(k, ["type", "waterlogged"], "{kind:?}");
+                    seen[3] += 1;
+                }
+                PlaceFamily::HorizontalFacing | PlaceFamily::HorizontalFacingSame => {
+                    assert!(k.contains(&"facing"), "{kind:?}");
+                    seen[4] += 1;
+                }
+                PlaceFamily::Unknown => seen[5] += 1,
+            }
+        }
+        assert!(seen.iter().all(|&n| n > 0), "{seen:?}");
+    }
+
+    #[test]
+    fn known_blocks_are_in_the_expected_family() {
+        assert_eq!(place_family(BlockKind::Dirt), PlaceFamily::Plain);
+        assert_eq!(place_family(BlockKind::Cobblestone), PlaceFamily::Plain);
+        assert_eq!(place_family(BlockKind::OakLog), PlaceFamily::Axis);
+        assert_eq!(place_family(BlockKind::OakSlab), PlaceFamily::Slab);
+        assert_eq!(place_family(BlockKind::Barrier), PlaceFamily::Waterloggable);
+        // placement rules beyond stage 1
+        for k in [BlockKind::OakFence, BlockKind::OakStairs, BlockKind::Torch, BlockKind::Chest, BlockKind::GrassBlock, BlockKind::OakDoor, BlockKind::OakLeaves] {
+            assert_eq!(place_family(k), PlaceFamily::Unknown, "{k:?}");
+        }
+        for k in [BlockKind::OakFence, BlockKind::OakStairs, BlockKind::RedstoneWire, BlockKind::OakLeaves, BlockKind::Vine, BlockKind::IronBars] {
+            assert!(!shape_inert(k), "{k:?}");
+        }
+        for k in [BlockKind::Stone, BlockKind::Dirt, BlockKind::Air, BlockKind::OakSlab] {
+            assert!(shape_inert(k), "{k:?}");
+        }
+        assert!(indirect_shape_block(BlockKind::RedstoneWire));
+        assert!(!plain_replace_rule(BlockKind::Snow));
+        assert!(!plain_replace_rule(BlockKind::OakSlab));
+        assert!(plain_replace_rule(BlockKind::Stone));
     }
 }

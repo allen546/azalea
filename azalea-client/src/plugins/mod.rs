@@ -24,6 +24,7 @@ pub mod login;
 pub mod mining;
 pub mod movement;
 pub mod packet;
+pub mod place_prediction;
 pub mod pong;
 pub mod pushes;
 pub mod respawn;
