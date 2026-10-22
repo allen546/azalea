@@ -1467,4 +1467,49 @@ mod tests {
         assert_clear_of_walls(&nodes, &world);
         assert!(nodes.iter().all(|n| n.x < 7));
     }
+    // Patch 37: isolates the unmodelled-floor rule of patch 36. Walls only the floor, so the
+    // slime cells are never in the way; only parkour's gap check and `unmodelled_floor` stop a
+    // jump over the strip.
+    #[test]
+    fn parkour_never_crosses_a_slime_strip() {
+        for width in 1..=3 {
+            let blocks: Vec<_> = (0..16)
+                .flat_map(|z| (0..width).map(move |dx| (BlockPos::new(6 + dx, 0, z), BlockKind::SlimeBlock.into())))
+                .collect();
+            let (nodes, partial, _world) = plan(&blocks);
+            assert!(partial, "slime strip {width} wide was crossed: {nodes:?}");
+            assert!(nodes.iter().all(|n| n.x < 6), "strip {width}: {nodes:?}");
+        }
+    }
+
+    // Patch 37: a diagonal step from (5,1,8) to (6,1,9) passes over the corner of (6,1,8) and of
+    // (5,1,9). With slime under either, no diagonal edge exists; with stone, it does.
+    #[test]
+    fn diagonal_never_passes_over_a_slime_corner() {
+        use crate::pathfinder::positions::RelBlockPos;
+        let origin = BlockPos::new(5, 1, 8);
+        let diagonal_targets = |blocks: &[(BlockPos, BlockState)]| -> Vec<RelBlockPos> {
+            let world = cached_at(floor_world(blocks), origin);
+            let edges = call_successors_fn(
+                &world,
+                &MiningCache::new(None),
+                &CustomPathfinderStateRef::default(),
+                moves::default_move,
+                RelBlockPos::get_origin(origin),
+            );
+            edges
+                .iter()
+                .map(|e| e.movement.target)
+                .filter(|t| t.x != 0 && t.z != 0 && t.x.abs() == 1 && t.z.abs() == 1)
+                .collect()
+        };
+        assert!(!diagonal_targets(&[]).is_empty(), "control: the plain floor has diagonals");
+        for corner in [BlockPos::new(6, 0, 8), BlockPos::new(5, 0, 9)] {
+            let t = diagonal_targets(&[(corner, BlockKind::SlimeBlock.into())]);
+            assert!(
+                !t.contains(&RelBlockPos::new(1, 1, 1)),
+                "diagonal over the slime corner {corner:?}: {t:?}"
+            );
+        }
+    }
 }
