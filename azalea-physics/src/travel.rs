@@ -1,7 +1,7 @@
 use azalea_block::{BlockState, fluid_state::FluidState};
 use azalea_core::{
     aabb::Aabb,
-    position::{BlockPos, Vec3},
+    position::{BlockPos, ChunkPos, Vec3},
 };
 use azalea_entity::{
     ActiveEffects, Attributes, HasClientLoaded, Jumping, LocalEntity, LookDirection, OnClimbable, Physics,
@@ -140,6 +140,9 @@ fn travel_in_air(ctx: &mut MoveCtx) {
 
     if let Some(amplifier) = ctx.levitation {
         movement.y = levitation_vertical_speed(movement.y, amplifier);
+    } else if ctx.world.chunks.get(&ChunkPos::from(block_pos_below)).is_none() {
+        // patch 38: the chunk under the feet has not arrived, so there is no gravity
+        movement.y = unloaded_chunk_vertical_speed(ctx.position.y, ctx.world.chunks.min_y());
     } else {
         // `getEffectiveGravity` reads the speed at this point, after the move step.
         movement.y -= effective_gravity(
@@ -385,6 +388,17 @@ pub fn effective_gravity(gravity: f64, velocity_y: f64, slow_falling: bool) -> f
     } else {
         gravity
     }
+}
+
+/// The vertical speed `LivingEntity#travelInAir` sets when the client has no chunk at the block
+/// below the feet (`Level#hasChunkAt` false): a fixed fall of 0.1 above the world bottom, none at
+/// or below it. It replaces the gravity step, so the player falls at a steady speed until the
+/// chunk arrives. Grim does not predict movement there (`SetbackTeleportUtil#insideUnloadedChunk`,
+/// used by `MovementCheckRunner`), so a bot that kept the normal fall drew `Simulation` alerts
+/// once the chunk came in.
+// Spec: specs/B1-movement.md §4.2
+pub fn unloaded_chunk_vertical_speed(y: f64, world_min_y: i32) -> f64 {
+    if y > world_min_y as f64 { -0.1 } else { 0.0 }
 }
 
 /// The vertical speed `LivingEntity#travelInAir` gives with Levitation of this amplifier (0 is

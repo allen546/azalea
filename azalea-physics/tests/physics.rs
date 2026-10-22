@@ -946,3 +946,67 @@ mod levitation_slow_falling {
         assert!((levitation_vertical_speed(-1.0, 1) - (-1.0 + 1.1 * 0.2)).abs() < 1e-12);
     }
 }
+
+// Patch 38: `LivingEntity#travelInAir` with no chunk at the block below the feet.
+mod unloaded_chunk {
+    use bevy_ecs::entity::Entity;
+
+    use super::{block_effects::{setup, tick}, *};
+
+    const DRAG: f64 = 0.9800000190734863;
+
+    fn vy_after(x: f64, y: f64, ticks: usize) -> Vec<f64> {
+        let (mut app, e, _w) = setup(BlockKind::Stone, BlockKind::Air, false, false);
+        move_to(&mut app, e, x, y);
+        (0..ticks)
+            .map(|_| {
+                tick(&mut app, e, 0.);
+                app.world().get::<Physics>(e).unwrap().velocity.y
+            })
+            .collect()
+    }
+
+    fn move_to(app: &mut App, e: Entity, x: f64, y: f64) {
+        let mut p = app.world_mut().get_mut::<Position>(e).unwrap();
+        p.x = x;
+        p.y = y;
+    }
+
+    // No chunk (x = 1000 is chunk 62, never loaded): the fall is a steady -0.1 a tick, then drag.
+    #[test]
+    fn steady_fall_without_a_chunk() {
+        for v in vy_after(1000.5, 70., 6) {
+            assert!((v - -0.1 * DRAG).abs() < 1e-12, "{v}");
+        }
+    }
+
+    // At or below the world bottom (-64 in the overworld) the speed is 0.
+    #[test]
+    fn no_fall_below_the_world_bottom_without_a_chunk() {
+        for v in vy_after(1000.5, -64., 3) {
+            assert_eq!(v, 0.0);
+        }
+        for v in vy_after(1000.5, -70., 3) {
+            assert_eq!(v, 0.0);
+        }
+    }
+
+    // With the chunk loaded, the normal gravity step applies (control).
+    #[test]
+    fn gravity_with_a_chunk() {
+        let (mut app, e, _w) = setup(BlockKind::Air, BlockKind::Air, false, false);
+        move_to(&mut app, e, 0.5, 90.);
+        tick(&mut app, e, 0.);
+        let v = app.world().get::<Physics>(e).unwrap().velocity.y;
+        assert!((v - -0.08 * DRAG).abs() < 1e-12, "{v}");
+    }
+
+    #[test]
+    fn speed_formula() {
+        use azalea_physics::travel::unloaded_chunk_vertical_speed as f;
+        assert_eq!(f(70., -64), -0.1);
+        assert_eq!(f(-63.9, -64), -0.1);
+        assert_eq!(f(-64., -64), 0.0);
+        assert_eq!(f(-100., -64), 0.0);
+    }
+}
