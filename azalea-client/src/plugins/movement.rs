@@ -302,12 +302,21 @@ pub struct ItemInUse {
     /// ticks of the use (vanilla `getUseDuration - useItemRemaining`) to about one tick, since
     /// the flag and later packets come down the same lag.
     pub confirmed_at: Option<u32>,
+    /// The [`DroppedTicks`](crate::tick_clock::DroppedTicks) total at the last tick; the rise
+    /// since then is what the next tick adds to `lost`.
+    pub dropped_seen: u64,
+    /// Client ticks dropped since the flag arrived. The server ran them, so they count as server
+    /// ticks (patch 39).
+    pub lost: u32,
 }
 
 impl ItemInUse {
-    /// Server ticks of this use so far, once the server has confirmed it.
+    /// Server ticks of this use so far, once the server has confirmed it. A belief, not a fact
+    /// (F5 §4.6): the flag and a later packet are each read up to a frame late, so it can be off
+    /// by a tick either way; a stall that drops client ticks no longer makes it read low.
+    // Spec: specs/F5-version-layer.md §4.6 (hidden server state is a belief)
     pub fn server_ticks(&self) -> Option<u32> {
-        self.confirmed_at.map(|c| self.ticks.saturating_sub(c))
+        self.confirmed_at.map(|c| self.ticks.saturating_sub(c) + self.lost)
     }
 }
 

@@ -416,7 +416,7 @@ fn has_movement_effect_block(ctx: &MovesCtx, pos: RelBlockPos) -> bool {
 /// face, which patch 30's gate counts as touching it (`SlimeBlock#stepOn`). Parkour and diagonal
 /// moves therefore never cross one (patch 36).
 // Spec: specs/B1-movement.md §4.3
-pub(super) fn unmodelled_floor(ctx: &MovesCtx, pos: RelBlockPos) -> bool {
+pub(in crate::pathfinder) fn unmodelled_floor(ctx: &MovesCtx, pos: RelBlockPos) -> bool {
     ctx.world.is_block_unmodelled(pos.down(1))
 }
 

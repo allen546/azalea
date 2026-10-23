@@ -79,6 +79,12 @@ impl TickClock {
     }
 }
 
+/// Client ticks this client dropped in all (`due` beyond 10 in one frame). The server's ticks go
+/// on while the client drops them, so a count of server ticks from client ticks adds them back
+/// (`ItemInUse::server_ticks`, patch 39).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Resource)]
+pub struct DroppedTicks(pub u64);
+
 /// Counters for the loop, read by the ability check: the update that had the most ticks due,
 /// what it ran and sent, and the ticks dropped in all. Reset with [`reset_loop_stats`].
 pub static MAX_DUE: AtomicU64 = AtomicU64::new(0);

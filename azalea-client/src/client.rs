@@ -219,6 +219,7 @@ async fn run_schedule_loop(
         }
         if due > 0 {
             if due > ran {
+                ecs.get_resource_or_init::<crate::tick_clock::DroppedTicks>().0 += u64::from(due - ran);
                 warn!("{due} ticks due, running {ran} and dropping {} like the vanilla client", due - ran);
             }
             let ends = crate::tick_clock::CLIENT_TICK_ENDS.load(std::sync::atomic::Ordering::Relaxed) - ends_before;

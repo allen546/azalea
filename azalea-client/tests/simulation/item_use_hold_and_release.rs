@@ -1,6 +1,7 @@
 use azalea_client::{
     ItemInUse,
     item_use::{ReleaseUseItemQueued, UseItemQueued},
+    tick_clock::DroppedTicks,
     test_utils::prelude::*,
 };
 use azalea_entity::{EntityDataItem, EntityDataValue, EntityMetadataItems};
@@ -76,6 +77,31 @@ fn hungry_player_eats_until_the_server_clears_the_flag() {
 
     using_flag(&mut s, false);
     assert!(!s.has_component::<ItemInUse>());
+}
+
+// Patch 39: client ticks dropped after the flag arrived are server ticks of the use; dropped
+// ticks before the flag are not.
+#[test]
+fn dropped_client_ticks_count_as_server_ticks_of_the_use() {
+    let _lock = init();
+    let (mut s, _sent) = setup(10);
+    insert(&mut s, UseItemQueued { hand: InteractionHand::MainHand });
+    s.tick();
+    assert_eq!(s.component::<ItemInUse>().server_ticks(), None);
+    s.app.world_mut().insert_resource(DroppedTicks(4));
+    using_flag(&mut s, true);
+    // The 4 ticks dropped before the flag do not count; the tick that sees the flag counts as 1.
+    assert_eq!(s.component::<ItemInUse>().server_ticks(), Some(1));
+    for _ in 0..3 {
+        s.tick();
+    }
+    assert_eq!(s.component::<ItemInUse>().server_ticks(), Some(4));
+    // A stall: 5 ticks were due and not run.
+    s.app.world_mut().resource_mut::<DroppedTicks>().0 += 5;
+    s.tick();
+    assert_eq!(s.component::<ItemInUse>().server_ticks(), Some(5 + 5));
+    s.tick();
+    assert_eq!(s.component::<ItemInUse>().server_ticks(), Some(6 + 5));
 }
 
 #[test]

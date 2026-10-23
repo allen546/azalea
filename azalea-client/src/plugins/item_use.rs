@@ -36,6 +36,7 @@ use crate::{
     respawn::RespawnLog,
     movement::ItemInUse,
     packet::game::SendGamePacketEvent,
+    tick_clock::DroppedTicks,
 };
 
 /// A use the server never flags within this many ticks was refused (food that cannot be eaten,
@@ -129,6 +130,7 @@ pub fn handle_use_item_queued(
         &WorldHolder,
         Option<&mut RespawnLog>,
     )>,
+    dropped: Option<Res<DroppedTicks>>,
 ) {
     for (entity, queued, mut prediction, look, inventory, hunger, abilities, mode, in_use, world, log) in
         &mut query
@@ -166,6 +168,8 @@ pub fn handle_use_item_queued(
                 ticks: 0,
                 confirmed: false,
                 confirmed_at: None,
+                dropped_seen: dropped.as_deref().map_or(0, |d| d.0),
+                lost: 0,
             });
         }
     }
@@ -215,8 +219,16 @@ fn send_player_action(commands: &mut Commands, entity: Entity, action: Action) {
 pub fn tick_item_in_use(
     mut commands: Commands,
     mut query: Query<(Entity, &mut ItemInUse, &Inventory, Option<&AbstractLivingUsingItem>, Has<Dead>)>,
+    dropped: Option<Res<DroppedTicks>>,
 ) {
+    let dropped_now = dropped.as_deref().map_or(0, |d| d.0);
     for (entity, mut item, inventory, flag, dead) in &mut query {
+        // Ticks dropped before this one, once the flag was known, were server ticks of the use
+        // (the server's `LivingEntity#updatingUsingItem` runs on its own clock).
+        if item.confirmed {
+            item.lost += u32::try_from(dropped_now.saturating_sub(item.dropped_seen)).unwrap_or(u32::MAX);
+        }
+        item.dropped_seen = dropped_now;
         let flagged = flag.is_some_and(|f| f.0);
         if flagged && !item.confirmed {
             item.confirmed = true;

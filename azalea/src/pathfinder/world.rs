@@ -1512,4 +1512,30 @@ mod tests {
             );
         }
     }
+
+    // Patch 39: the rule itself, with no planner around it. It is true for a cell whose floor
+    // (the block one below) is slime, false over stone, over air, and when the slime is in the
+    // cell itself or two below.
+    #[test]
+    fn unmodelled_floor_looks_one_block_below() {
+        use crate::pathfinder::{moves::{MovesCtx, basic::unmodelled_floor}, positions::RelBlockPos};
+        let origin = BlockPos::new(5, 1, 8);
+        let world = cached_at(
+            floor_world(&[
+                (BlockPos::new(6, 0, 8), BlockKind::SlimeBlock.into()),
+                (BlockPos::new(7, 1, 8), BlockKind::SlimeBlock.into()),
+                (BlockPos::new(8, 0, 8), BlockKind::SlimeBlock.into()),
+                (BlockPos::new(9, 0, 8), BlockKind::Air.into()),
+            ]),
+            origin,
+        );
+        let (mining, custom) = (MiningCache::new(None), CustomPathfinderStateRef::default());
+        let mut edges = Vec::new();
+        let ctx = MovesCtx { edges: &mut edges, world: &world, mining_cache: &mining, custom_state: &custom };
+        assert!(unmodelled_floor(&ctx, RelBlockPos::new(1, 1, 0)), "slime under the cell");
+        assert!(!unmodelled_floor(&ctx, RelBlockPos::new(0, 1, 0)), "stone under the cell");
+        assert!(!unmodelled_floor(&ctx, RelBlockPos::new(2, 1, 0)), "slime in the cell, not under it");
+        assert!(!unmodelled_floor(&ctx, RelBlockPos::new(3, 2, 0)), "slime two below");
+        assert!(!unmodelled_floor(&ctx, RelBlockPos::new(4, 1, 0)), "air under the cell");
+    }
 }
