@@ -494,3 +494,63 @@ fn test_another_bot_pushes_from_this_bots_view_of_it() {
     assert!(want < -0.02);
     assert!((record(&simulation).tick_delta.0 - want).abs() < 1e-12, "{} vs {want}", record(&simulation).tick_delta.0);
 }
+
+// Spec: specs/F5-version-layer.md §4.6 (What Null computes: one push per server id, never the own id)
+// A shared swarm `World` can hold a second entity that carries a server id (another bot's view of
+// it). Vanilla holds one entity per id and `LivingEntity#pushEntities` takes its candidates from
+// `Level#getEntities(this, ..)`, which leaves the entity itself out.
+#[test]
+fn test_no_push_from_an_entity_with_the_bots_own_id() {
+    let _lock = init();
+    let mut simulation = setup();
+    let own = simulation.minecraft_entity_id();
+    // Control: a player with another id, 0.3 away, pushes.
+    let other = add_at(&mut simulation, EntityKind::Player, 190, (BX + 0.3, 64., BZ));
+    simulation.tick();
+    assert!(velocity(&simulation).x < -0.02, "control: another id pushes: {}", velocity(&simulation).x);
+    // The same entity given the bot's own id no longer pushes it.
+    simulation.app.world_mut().entity_mut(other).insert(own);
+    let before = record(&simulation).total;
+    simulation.tick();
+    assert_eq!(record(&simulation).total, before, "the bot was pushed by an entity with its own id");
+}
+
+// Spec: specs/F5-version-layer.md §4.6 (What Null computes: one push per server id, never the own id)
+#[test]
+fn test_one_push_per_server_id_when_a_view_and_a_second_entity_share_it() {
+    let _lock = init();
+    let mut simulation = setup();
+    // Another bot (id 191): its local entity is read through this bot's view of it ...
+    let peer = add_at(&mut simulation, EntityKind::Player, 191, (BX + 0.3, 64., BZ));
+    simulation.app.world_mut().entity_mut(peer).insert(LocalEntity);
+    simulation.tick();
+    simulation.tick();
+    assert_eq!(record(&simulation).max_in_tick, 1, "control: one entity, one push");
+    // ... and a second, non-local entity carries the same id at the same place.
+    let twin = add_at(&mut simulation, EntityKind::Player, 192, (BX + 0.3, 64., BZ));
+    simulation.app.world_mut().entity_mut(twin).insert(MinecraftEntityId(191));
+    simulation.tick();
+    assert_eq!(record(&simulation).max_in_tick, 1, "the same id pushed twice in one tick");
+}
+
+// Spec: specs/F5-version-layer.md §4.6 (What Null computes: one push per server id, never the own id)
+// This bot's view of another bot is its client's only copy of that id (patch 31). A second entity with
+// the id is another bot's view, at a place this client never has, so it must not push even when the
+// view copy is out of reach.
+#[test]
+fn test_the_view_copy_decides_even_when_out_of_reach() {
+    let _lock = init();
+    let mut simulation = setup();
+    let peer = add_at(&mut simulation, EntityKind::Player, 191, (BX + 1.2, 64., BZ));
+    simulation.app.world_mut().entity_mut(peer).insert(LocalEntity);
+    simulation.tick();
+    simulation.tick();
+    let before = record(&simulation).total;
+    let twin = add_at(&mut simulation, EntityKind::Player, 192, (BX + 0.3, 64., BZ));
+    simulation.tick();
+    assert!(record(&simulation).total > before, "control: the twin pushes under its own id");
+    simulation.app.world_mut().entity_mut(twin).insert(MinecraftEntityId(191));
+    let before = record(&simulation).total;
+    simulation.tick();
+    assert_eq!(record(&simulation).total, before, "an entity sharing the view copy's id pushed");
+}
