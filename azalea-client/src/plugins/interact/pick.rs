@@ -1,6 +1,7 @@
 use azalea_core::{
     aabb::Aabb,
     direction::Direction,
+    entity_id::MinecraftEntityId,
     hit_result::{BlockHitResult, EntityHitResult, HitResult},
     position::Vec3,
 };
@@ -177,7 +178,11 @@ fn cast_hit_result(
 pub type MaybePickableEntityQuery<'world, 'state, 'a> = Query<
     'world,
     'state,
-    (Option<&'a ArmorStandMarker>, Option<&'a InGround>),
+    (
+        Option<&'a ArmorStandMarker>,
+        Option<&'a InGround>,
+        Option<&'a MinecraftEntityId>,
+    ),
     // search "isPickable" in the decompiled minecraft code
     (
         Or<(
@@ -249,6 +254,14 @@ pub fn pick(opts: PickOpts<'_, '_, '_, '_, '_>) -> HitResult {
         .expand_towards(view_vector * max_range)
         .inflate_all(inflate_by);
 
+    // Spec: specs/F5-version-layer.md §4.6 (What Null computes). Patch 40: the picking client's own Minecraft id. In a shared world another bot holds a
+    // second entity with this id (its view of us); it must never be picked.
+    let own_id = opts
+        .pickable_query
+        .get(opts.source_entity)
+        .ok()
+        .and_then(|(_, _, id)| id.copied());
+
     let is_pickable = |entity: Entity| {
         if entity == opts.source_entity {
             return false;
@@ -256,7 +269,13 @@ pub fn pick(opts: PickOpts<'_, '_, '_, '_, '_>) -> HitResult {
 
         // TODO: ender dragon has extra logic here. also, we shouldn't be able to pick
         // spectators.
-        if let Ok((armor_stand_marker, arrow_in_ground)) = opts.pickable_query.get(entity) {
+        if let Ok((armor_stand_marker, arrow_in_ground, id)) = opts.pickable_query.get(entity) {
+            // Vanilla `ProjectileUtil#getEntityHitResult` gets its candidates from
+            // `Level#getEntities(camera, box, predicate)`, which leaves out the camera entity (the
+            // local player); the same id is never a candidate here.
+            if own_id.is_some() && id.copied() == own_id {
+                return false;
+            }
             !(armor_stand_marker == Some(&ArmorStandMarker(true))
                 || arrow_in_ground == Some(&InGround(true)))
         } else {
