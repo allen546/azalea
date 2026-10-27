@@ -263,10 +263,13 @@ pub fn update_crouching(
 #[derive(Clone, Component, Copy, Debug)]
 pub struct InLoadedChunk;
 
-/// Update the [`InLoadedChunk`] component for all entities in the world.
+/// Update the [`InLoadedChunk`] component for all entities in the world that are not clients.
+/// A client (`LocalEntity`) is loaded when its own client holds the chunk, not when another bot of
+/// the swarm does: `azalea_client::loading::update_in_loaded_chunk_of_clients` sets it (patch 43).
+// Spec: specs/F5-version-layer.md §4.6 (What Null computes)
 pub fn update_in_loaded_chunk(
     mut commands: bevy_ecs::system::Commands,
-    query: Query<(Entity, &WorldName, &Position, Option<&InLoadedChunk>)>,
+    query: Query<(Entity, &WorldName, &Position, Option<&InLoadedChunk>), Without<LocalEntity>>,
     worlds: Res<Worlds>,
 ) {
     for (entity, world_name, position, last_in_loaded_chunk) in &query {

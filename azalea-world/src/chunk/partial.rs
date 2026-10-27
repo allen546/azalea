@@ -155,6 +155,14 @@ impl PartialChunkStorage {
         let index = self.index_from_chunk_pos(pos);
         self.chunks[index].as_ref()
     }
+    /// Whether this client holds the chunk: it is within render distance and was sent. Unlike
+    /// [`Self::limited_get`] it logs nothing outside the range. The shared storage can hold the
+    /// chunk for another client of the swarm; only this storage says what this client has.
+    // Spec: specs/F5-version-layer.md §4.6 (What Null computes)
+    pub fn has_chunk(&self, pos: &ChunkPos) -> bool {
+        self.in_range(pos) && self.chunks[self.index_from_chunk_pos(pos)].is_some()
+    }
+
     /// Get a mutable reference to a [`Chunk`] within render distance, or
     /// `None` if it's not loaded.
     ///

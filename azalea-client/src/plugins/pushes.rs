@@ -74,7 +74,7 @@ impl Plugin for PushesPlugin {
                     .after(crate::entity_actions::handle_look_at_entity_queued)
                     .after(crate::entity_actions::handle_use_entity_queued)
                     .after(crate::mining::MiningSystems)
-                    .after(azalea_entity::update_in_loaded_chunk)
+                    .after(crate::loading::update_in_loaded_chunk_of_clients)
                     .before(PhysicsSystems)
                     .in_set(PushSystems),
                 push_pass::<true>

@@ -65,7 +65,7 @@ impl Plugin for MovementPlugin {
                         .before(azalea_physics::fluids::update_in_water_state_and_do_fluid_pushing),
                     send_player_input_packet,
                     send_sprinting_if_needed
-                        .after(azalea_entity::update_in_loaded_chunk)
+                        .after(super::loading::update_in_loaded_chunk_of_clients)
                         .after(travel),
                     send_position.after(PhysicsSystems),
                 )

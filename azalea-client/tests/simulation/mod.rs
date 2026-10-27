@@ -21,6 +21,7 @@ mod mine_block_timing_hand;
 mod mine_block_without_rollback;
 mod move_and_despawn_entity;
 mod move_despawned_entity;
+mod own_chunks_decide_loaded;
 mod packet_order;
 mod packet_order_set_carried_item;
 mod pick_every_tick;
