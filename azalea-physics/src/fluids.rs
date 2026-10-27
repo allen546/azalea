@@ -11,7 +11,7 @@ use azalea_registry::builtin::BlockKind;
 use azalea_world::{World, WorldName, Worlds};
 use bevy_ecs::prelude::*;
 
-use crate::collision::legacy_blocks_motion;
+use crate::collision::{BlockWithShape, legacy_blocks_motion};
 
 #[allow(clippy::type_complexity)]
 pub fn update_in_water_state_and_do_fluid_pushing(
@@ -267,18 +267,14 @@ fn is_solid_face(
     is_face_sturdy(block_state, world, adjacent_pos, direction)
 }
 
+// `BlockBehaviour#isFaceSturdy`, for blocks whose collision shape is the full cube. A partial
+// shape (stairs, slabs, fences) counts as not sturdy here, where vanilla checks the face.
+// Spec: specs/B1-movement.md §4.6 (Falls, swimming, climbing)
 fn is_face_sturdy(
-    _block_state: BlockState,
+    block_state: BlockState,
     _world: &World,
     _pos: BlockPos,
     _direction: Direction,
 ) -> bool {
-    // TODO: this does a whole bunch of physics shape checks for waterlogged blocks
-    // that i honestly cannot be bothered to implement right now
-
-    // see BlockBehavior.isFaceSturdy in the decompiled minecraft source
-
-    // also, this probably should be in a module other than fluids.rs
-
-    false
+    block_state.is_collision_shape_full()
 }

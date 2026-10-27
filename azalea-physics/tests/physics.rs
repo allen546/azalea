@@ -425,6 +425,96 @@ fn spawn_and_unload_world() {
     app.update();
 }
 
+// Falling water (block level 8 or more) is full fluid that flows down; the fork once read it as
+// empty. A bot in a shallow flowing cell next to a falling-water block is pushed away from it,
+// because the falling block's surface is higher (`FlowingFluid#getFlow`). Spec: specs/B1-movement.md §4.6
+#[test]
+fn test_falling_water_pushes_a_neighbour_away() {
+    let mut app = make_test_app();
+    let world_lock = insert_overworld(&mut app);
+    let mut partial_world = PartialWorld::default();
+    partial_world.chunks.set(
+        &ChunkPos { x: 0, z: 0 },
+        Some(Chunk::default()),
+        &mut world_lock.write().chunks,
+    );
+    let setblock = |x: i32, y: i32, z: i32, b: BlockState| {
+        world_lock.write().chunks.set_block_state(BlockPos { x, y, z }, b);
+    };
+    let stone: BlockState = azalea_block::blocks::Stone.into();
+    let water_level = |level: BlockStateIntegerRepr| {
+        BlockState::from(azalea_block::blocks::Water { level: WaterLevel::from(level) })
+    };
+    // Floor, and walls east, north and south of the bot's cell (8, 64, 8).
+    for x in 6..=10 {
+        for z in 6..=10 {
+            setblock(x, 63, z, stone);
+        }
+    }
+    setblock(9, 64, 8, stone);
+    setblock(8, 64, 7, stone);
+    setblock(8, 64, 9, stone);
+    // The bot's cell: flowing water, level 2 (height 6/9). Its west neighbour: falling water (level 8).
+    setblock(8, 64, 8, water_level(2));
+    setblock(7, 64, 8, water_level(8));
+
+    let entity = app
+        .world_mut()
+        .spawn((
+            EntityBundle::new(
+                Uuid::nil(),
+                Vec3 { x: 8.5, y: 64., z: 8.5 },
+                EntityKind::Player,
+                WorldName::new("minecraft:overworld"),
+            ),
+            MinecraftEntityId(0),
+            LocalEntity,
+            HasClientLoaded,
+        ))
+        .id();
+    for _ in 0..3 {
+        app.world_mut().run_schedule(GameTick);
+        app.update();
+    }
+    let x = app.world_mut().get::<Position>(entity).unwrap().x;
+    assert!(x > 8.5 + 0.005, "the falling neighbour should push the bot east, x is {x}");
+}
+
+// Falling water beside a solid wall flows mostly down (`FlowingFluid#getFlow`: the horizontal part
+// is normalised, then 6 down is added, then the sum is normalised). Spec: specs/B1-movement.md §4.6
+#[test]
+fn test_falling_water_beside_a_wall_flows_down() {
+    let mut app = make_test_app();
+    let world_lock = insert_overworld(&mut app);
+    let mut partial_world = PartialWorld::default();
+    partial_world.chunks.set(
+        &ChunkPos { x: 0, z: 0 },
+        Some(Chunk::default()),
+        &mut world_lock.write().chunks,
+    );
+    let setblock = |x: i32, y: i32, z: i32, b: BlockState| {
+        world_lock.write().chunks.set_block_state(BlockPos { x, y, z }, b);
+    };
+    let water_level = |level: BlockStateIntegerRepr| {
+        BlockState::from(azalea_block::blocks::Water { level: WaterLevel::from(level) })
+    };
+    let pos = BlockPos::new(8, 64, 8);
+    // Falling water here, flowing level 1 to the west (so there is a horizontal flow), and no wall yet.
+    setblock(8, 64, 8, water_level(8));
+    setblock(7, 64, 8, water_level(1));
+    let flow_at = |pos: BlockPos| {
+        let world = world_lock.read();
+        let fluid = world.get_fluid_state(pos).unwrap();
+        azalea_physics::fluids::get_fluid_flow(&fluid, &world, pos)
+    };
+    let open = flow_at(pos);
+    assert!(open.y == 0. && open.x < -0.9, "no wall: a plain horizontal flow, got {open:?}");
+    // A stone wall to the east: the falling water now flows down along it.
+    setblock(9, 64, 8, azalea_block::blocks::Stone.into());
+    let walled = flow_at(pos);
+    assert!(walled.y < -0.95 && walled.x > -0.25, "wall: mostly down, got {walled:?}");
+}
+
 #[test]
 fn test_afk_pool() {
     let mut app = make_test_app();

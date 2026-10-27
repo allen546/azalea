@@ -15,11 +15,9 @@ pub struct FluidState {
     /// the two representations with [`to_or_from_legacy_fluid_level`].
     pub amount: u8,
 
-    /// Whether this fluid is at the max level and there's another fluid of the
-    /// same type above it.
-    ///
-    /// TODO: this is currently unused (always false), make this actually get
-    /// set (see FlowingFluid.getFlowing)
+    /// Whether this is falling fluid (vanilla's `FALLING` property): a flowing
+    /// block with fluid above it, stored as level 8 or more on the block. A
+    /// falling fluid has `amount` 8.
     pub falling: bool,
 }
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -36,6 +34,18 @@ impl FluidState {
             amount: 8,
             falling,
         }
+    }
+
+    /// The fluid a water or lava block holds at `level` (its `level` property, 0 to 15). Level 0 is a
+    /// source, 1 to 7 are flowing with `amount` 8 - level, and 8 or more is falling fluid, which has
+    /// `amount` 8: `LiquidBlock#getFluidState` reads the level capped at 8, and the cache entry for 8
+    /// is `getFlowing(8, true)`.
+    // Spec: specs/B1-movement.md §4.6 (Falls, swimming, climbing)
+    pub fn from_block_level(kind: FluidKind, level: u8) -> Self {
+        if level >= 8 {
+            return Self { kind, amount: 8, falling: true };
+        }
+        Self { kind, amount: to_or_from_legacy_fluid_level(level), falling: false }
     }
 
     /// A floating point number in between 0 and 1 representing the height (as a
@@ -88,21 +98,13 @@ impl From<BlockState> for FluidState {
                 let level = state
                     .property::<crate::properties::WaterLevel>()
                     .expect("water block should always have WaterLevel");
-                return Self {
-                    kind: FluidKind::Water,
-                    amount: to_or_from_legacy_fluid_level(level as u8),
-                    falling: false,
-                };
+                return Self::from_block_level(FluidKind::Water, level as u8);
             }
             BlockKind::Lava => {
                 let level = state
                     .property::<crate::properties::LavaLevel>()
                     .expect("lava block should always have LavaLevel");
-                return Self {
-                    kind: FluidKind::Lava,
-                    amount: to_or_from_legacy_fluid_level(level as u8),
-                    falling: false,
-                };
+                return Self::from_block_level(FluidKind::Lava, level as u8);
             }
             BlockKind::BubbleColumn
             | BlockKind::Seagrass
@@ -140,5 +142,31 @@ impl From<FluidState> for BlockState {
                 level: crate::properties::LavaLevel::from(state.amount as BlockStateIntegerRepr),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Falling water (block level 8 to 15) is water with amount 8, not empty: the bot is pushed by,
+    // and pushed away from, a waterfall. `LiquidBlock#getFluidState` caps the level at 8.
+    #[test]
+    fn falling_levels_are_full_falling_fluid() {
+        for level in 8..=15u8 {
+            let f = FluidState::from_block_level(FluidKind::Water, level);
+            assert_eq!((f.amount, f.falling), (8, true), "level {level}");
+        }
+        let source = FluidState::from_block_level(FluidKind::Water, 0);
+        assert_eq!((source.amount, source.falling), (8, false));
+        let flowing = FluidState::from_block_level(FluidKind::Lava, 3);
+        assert_eq!((flowing.amount, flowing.falling), (5, false));
+    }
+
+    #[test]
+    fn a_water_block_at_level_8_reads_as_falling_water() {
+        let state = BlockState::from(crate::blocks::Water { level: crate::properties::WaterLevel::from(8 as BlockStateIntegerRepr) });
+        let f = FluidState::from(state);
+        assert_eq!((f.kind, f.amount, f.falling), (FluidKind::Water, 8, true));
     }
 }
