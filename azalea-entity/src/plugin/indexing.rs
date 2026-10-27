@@ -137,6 +137,22 @@ impl EntityIdIndex {
         trace!("Inserted {id} -> {entity:?} into a client's EntityIdIndex");
     }
 
+    /// Point `id` at `new` instead of `old`, keeping the tick-order number (patch 44). Returns
+    /// false when `id` did not map to `old`.
+    // Spec: specs/F5-version-layer.md §4.6 (What Null computes)
+    pub fn replace_entity(&mut self, id: MinecraftEntityId, old: Entity, new: Entity) -> bool {
+        if self.entity_by_id.get(&id) != Some(&old) {
+            return false;
+        }
+        self.entity_by_id.insert(id, new);
+        self.id_by_entity.remove(&old);
+        self.id_by_entity.insert(new, id);
+        if let Some(n) = self.tick_order.seq.remove(&old) {
+            self.tick_order.seq.insert(new, n);
+        }
+        true
+    }
+
     pub fn remove_by_minecraft_entity(&mut self, id: MinecraftEntityId) -> Option<Entity> {
         if let Some(entity) = self.entity_by_id.remove(&id) {
             trace!(

@@ -232,6 +232,7 @@ impl GamePacketHandler<'_> {
         true
     }
 
+    // Spec: specs/F5-version-layer.md §4.6 (What Null computes)
     pub fn login(&mut self, p: &ClientboundLogin) {
         debug!("Got login packet");
 
@@ -345,6 +346,21 @@ impl GamePacketHandler<'_> {
                     azalea_entity::push::PushRecord::default(),
                 ));
 
+                // Patch 44: the server may have announced this bot to an earlier bot of the swarm
+                // before this Login. That bot then holds a plain player entity with this id (a
+                // twin). Vanilla has one entity per id, so this Login adopts the twin.
+                let shared = world_holder.shared.clone();
+                let twin = shared
+                    .read()
+                    .entity_by_id
+                    .get(&p.player_id)
+                    .copied()
+                    .filter(|&e| e != self.player && loaded_by_query.contains(e));
+                let adopted_by: HashSet<Entity> = twin
+                    .and_then(|t| loaded_by_query.get(t).ok())
+                    .map(|l| l.0.clone())
+                    .unwrap_or_default();
+
                 // Patch 32: a login starts the tick order again, with the player first
                 // (`handleLogin` adds the local player before any other entity).
                 entity_id_index.tick_order_mut().clear();
@@ -362,13 +378,28 @@ impl GamePacketHandler<'_> {
                     loaded_by.remove(&self.player);
                 }
 
-                // update or insert loaded_by
+                // update or insert loaded_by (the clients that held the twin hold this bot now)
                 if let Some(mut loaded_by) = loaded_by {
                     loaded_by.insert(self.player);
+                    loaded_by.extend(adopted_by.iter().copied());
                 } else {
-                    commands
-                        .entity(self.player)
-                        .insert(LoadedBy(HashSet::from_iter(vec![self.player])));
+                    let mut holders = adopted_by.clone();
+                    holders.insert(self.player);
+                    commands.entity(self.player).insert(LoadedBy(holders));
+                }
+
+                if let Some(twin) = twin {
+                    // Every client that held the twin now holds this bot's own entity, in the
+                    // same tick-order place; the twin leaves the chunk index and the ECS.
+                    for &holder in &adopted_by {
+                        if let Ok((_, _, _, _, mut index, _)) = query.get_mut(holder) {
+                            index.replace_entity(entity_id, twin, self.player);
+                        }
+                    }
+                    for entities in shared.write().entities_by_chunk.values_mut() {
+                        entities.remove(&twin);
+                    }
+                    commands.entity(twin).despawn();
                 }
             },
         );

@@ -111,6 +111,54 @@ impl Simulation {
             raw_conn.injected_clientbound_packets.push(buf);
         });
     }
+
+    /// Add a second client (a second bot of one swarm) to this app, in the game state with the
+    /// overworld registry. Its packets go through [`Self::receive_packet_for`].
+    // Spec: specs/F5-version-layer.md §4.6 (What Null computes)
+    pub fn add_client(&mut self, uuid: Uuid, name: &str) -> Entity {
+        let mut entity = self.app.world_mut().spawn_empty();
+        let (player, rt) = create_local_player_bundle(entity.id(), ConnectionProtocol::Configuration);
+        entity.insert((player, ClientInformation::default()));
+        let entity = entity.id();
+        // The runtime must outlive the client's tasks; the test keeps it with the simulation.
+        std::mem::forget(rt);
+        tick_app(&mut self.app);
+        self.app.world_mut().entity_mut(entity).insert((
+            InConfigState,
+            GameProfileComponent(GameProfile::new(uuid, name.to_owned())),
+        ));
+        tick_app(&mut self.app);
+        self.receive_packet_for(
+            entity,
+            ClientboundRegistryData {
+                registry_id: Identifier::new("minecraft:dimension_type"),
+                entries: vec![(
+                    Identifier::new("minecraft:overworld"),
+                    Some(NbtCompound::from_values(vec![
+                        ("height".into(), NbtTag::Int(384)),
+                        ("min_y".into(), NbtTag::Int(-64)),
+                    ])),
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
+        self.receive_packet_for(entity, ClientboundFinishConfiguration);
+        self.tick();
+        entity
+    }
+
+    /// Like [`Self::receive_packet`], for a client added with [`Self::add_client`].
+    pub fn receive_packet_for<P: ProtocolPacket + Debug>(&mut self, client: Entity, packet: impl Packet<P>) {
+        let buf = azalea_protocol::write::serialize_packet(&packet.into_variant()).unwrap();
+        self.app
+            .world_mut()
+            .entity_mut(client)
+            .get_mut::<RawConnection>()
+            .expect("client has a connection")
+            .injected_clientbound_packets
+            .push(buf);
+    }
     pub fn write_message(&mut self, message: impl Message) {
         self.app.world_mut().write_message(message);
     }

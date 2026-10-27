@@ -2,6 +2,7 @@
 
 mod attack_cooldown_like_vanilla;
 mod attackers_from_damage_event;
+mod bot_login_twin;
 mod change_dimension_to_nether_and_back;
 mod client_disconnect;
 mod client_refusals;
