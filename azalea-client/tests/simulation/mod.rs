@@ -15,6 +15,7 @@ mod enchantments;
 mod entity_interpolation;
 mod entity_pushes;
 mod fast_login;
+mod input_log;
 mod item_use_hold_and_release;
 mod login_to_dimension_with_same_name;
 mod mine_block_rollback;

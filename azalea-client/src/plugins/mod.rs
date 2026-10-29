@@ -17,6 +17,7 @@ pub mod disconnect;
 pub mod interact;
 pub mod interpolation;
 pub mod item_use;
+pub mod input_log;
 pub mod inventory;
 pub mod join;
 pub mod loading;
@@ -69,6 +70,7 @@ impl PluginGroup for DefaultPlugins {
             .add(chunks::ChunksPlugin)
             .add(block_update::BlockUpdatePlugin)
             .add(tick_end::TickEndPlugin)
+            .add(input_log::InputLogPlugin)
             .add(loading::PlayerLoadedPlugin)
             .add(brand::BrandPlugin)
             .add(client_information::ClientInformationPlugin)
