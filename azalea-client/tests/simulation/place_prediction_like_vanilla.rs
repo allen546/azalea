@@ -20,7 +20,7 @@ use azalea_protocol::{
         },
     },
 };
-use azalea_registry::builtin::{BlockKind, ItemKind};
+use azalea_registry::builtin::{BlockKind, EntityKind, ItemKind};
 use bevy_ecs::prelude::*;
 
 const FLOOR_Y: i32 = 119;
@@ -167,4 +167,90 @@ fn a_sneaking_bot_walks_onto_the_block_it_just_placed() {
     }
     let p = s.component::<Position>();
     assert!(p.z < 4.9 && p.y == 120.0, "the bot stands on the predicted block: {:?}", *p);
+}
+
+fn swings(sent: &SentPackets) -> usize {
+    sent.list.lock().iter().filter(|p| matches!(p, ServerboundGamePacket::Swing(_))).count()
+}
+
+fn hold(s: &mut Simulation, item: ItemKind, state_id: u32) {
+    s.receive_packet(ClientboundContainerSetSlot {
+        container_id: 0,
+        state_id,
+        slot: *azalea_inventory::Player::HOTBAR_SLOTS.start() as u16,
+        item_stack: ItemStack::from(item),
+    });
+    s.tick();
+}
+
+/// Clicks the top of the block at x = 3, outside the movement zone of a bot at x = 0.5, so a place
+/// that stage 1 cannot compute is sent, not refused.
+fn place_far(s: &mut Simulation) {
+    let floor = BlockPos::new(3, FLOOR_Y, 0);
+    look_at(s, floor, Direction::Up);
+    insert(s, PlaceBlockQueued { position: floor, direction: Direction::Up, auto_crouch: false });
+    s.tick();
+}
+
+// Spec: specs/B6-placement-breaking.md §4.10 (patch 48: `Minecraft#startUseItem` swings on a client success)
+#[test]
+fn a_place_swings_when_the_client_result_is_a_success() {
+    let _lock = init();
+    let (mut s, sent) = setup(&[BlockPos::new(0, FLOOR_Y, 0), BlockPos::new(3, FLOOR_Y, 0)], Vec3::new(0.5, 120., 0.5));
+    place_far(&mut s);
+    assert_eq!((used_item_on(&sent), swings(&sent)), (1, 1));
+}
+
+// Spec: specs/B6-placement-breaking.md §4.10 (patch 48: `BlockItem#place` fails with an entity in the cell)
+#[test]
+fn a_place_with_an_entity_in_the_cell_sends_use_item_on_and_no_swing() {
+    let _lock = init();
+    let (mut s, sent) = setup(&[BlockPos::new(0, FLOOR_Y, 0), BlockPos::new(3, FLOOR_Y, 0)], Vec3::new(0.5, 120., 0.5));
+    s.receive_packet(make_basic_add_entity(EntityKind::Zombie, 123, (3.95, 120., 0.5)));
+    // its box reaches into the cell but the ray to the middle of the face passes beside it
+    s.tick();
+    sent.clear();
+    place_far(&mut s);
+    assert_eq!((used_item_on(&sent), swings(&sent)), (1, 0), "FAIL: sent, no swing");
+}
+
+// Spec: specs/B6-placement-breaking.md §4.10 (patch 48: a sapling needs dirt below, `VegetationBlock#canSurvive`)
+#[test]
+fn a_sapling_swings_on_grass_and_not_on_stone() {
+    let _lock = init();
+    let (mut s, sent) = setup(&[BlockPos::new(0, FLOOR_Y, 0), BlockPos::new(3, FLOOR_Y, 0)], Vec3::new(0.5, 120., 0.5));
+    hold(&mut s, ItemKind::OakSapling, 2);
+    sent.clear();
+    place_far(&mut s);
+    assert_eq!((used_item_on(&sent), swings(&sent)), (1, 0), "stone below: FAIL, no swing");
+
+    s.receive_packet(ClientboundBlockUpdate { pos: BlockPos::new(3, FLOOR_Y, 0), block_state: BlockKind::GrassBlock.into() });
+    s.tick();
+    sent.clear();
+    place_far(&mut s);
+    assert_eq!((used_item_on(&sent), swings(&sent)), (1, 1), "grass below: SUCCESS, swing");
+}
+
+// Spec: specs/B6-placement-breaking.md §4.10 (patch 48: `LivingEntity` blocks building; `ArmorStand` follows its marker flag)
+#[test]
+fn an_armor_stand_in_the_cell_blocks_the_place_unless_it_is_a_marker() {
+    use azalea_entity::{EntityDataItem, EntityDataValue, EntityMetadataItems};
+    use azalea_protocol::packets::game::ClientboundSetEntityData;
+    let _lock = init();
+    let (mut s, sent) = setup(&[BlockPos::new(0, FLOOR_Y, 0), BlockPos::new(3, FLOOR_Y, 0)], Vec3::new(0.5, 120., 0.5));
+    s.receive_packet(make_basic_add_entity(EntityKind::ArmorStand, 124, (3.95, 120., 0.5)));
+    s.tick();
+    sent.clear();
+    place_far(&mut s);
+    assert_eq!((used_item_on(&sent), swings(&sent)), (1, 0), "no flags received: blocks building, FAIL");
+
+    // the marker flag (client flags, bit 16) arrives: it no longer blocks building
+    s.receive_packet(ClientboundSetEntityData {
+        id: 124.into(),
+        packed_items: EntityMetadataItems(vec![EntityDataItem { index: 15, value: EntityDataValue::Byte(16) }]),
+    });
+    s.tick();
+    sent.clear();
+    place_far(&mut s);
+    assert_eq!((used_item_on(&sent), swings(&sent)), (1, 1), "marker: the place succeeds, swing");
 }

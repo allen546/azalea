@@ -42,7 +42,7 @@ use azalea_entity::{
     dimensions::EntityDimensions,
     indexing::EntityIdIndex,
     interpolation::PeerView,
-    metadata::{AbstractBoat, AbstractLiving, AbstractMinecart},
+    metadata::{AbstractBoat, AbstractLiving, AbstractMinecart, ArmorStandMarker},
     LoadedBy,
 };
 use azalea_registry::builtin::EntityKind;
@@ -354,6 +354,54 @@ pub fn predict_place(chunks: &ChunkStorage, req: &PlaceRequest) -> Verdict {
     Verdict::Predict { pos: target, state }
 }
 
+/// What `Minecraft#startUseItem` does with the swing after the client-side try of a place.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientSwing {
+    /// `InteractionResult.Success` with the client swing source: the client swings.
+    Yes,
+    /// `FAIL`, `PASS` or `CONSUME`: no swing (and after `FAIL` no other hand is tried).
+    No,
+    /// The fork cannot compute the client result (an `Unknown` verdict). Known gap: the swing is
+    /// sent as before, as it is right for a success, which is the common case.
+    Unknown,
+}
+
+/// Whether the vanilla client swings after this place. `BlockItem#place` returns `SUCCESS` when it
+/// writes a block and `FAIL` for every refusal (an entity in the way, a cell that cannot be
+/// replaced, an unchanged state, a block that cannot survive there); a spectator gets `CONSUME`
+/// and an empty hand `PASS`, neither swings.
+// Spec: specs/B6-placement-breaking.md §4.10 (patch 48: the swing follows the client result)
+pub fn client_swing(chunks: &ChunkStorage, req: &PlaceRequest, verdict: &Verdict) -> ClientSwing {
+    match verdict {
+        Verdict::Predict { .. } => ClientSwing::Yes,
+        Verdict::Nothing(_) => ClientSwing::No,
+        Verdict::Unknown(UnknownWhy::Family) => match sapling_place_succeeds(chunks, req) {
+            Some(true) => ClientSwing::Yes,
+            Some(false) => ClientSwing::No,
+            None => ClientSwing::Unknown,
+        },
+        Verdict::Unknown(_) => ClientSwing::Unknown,
+    }
+}
+
+/// A sapling is the one item outside the stage 1 families that the client result can be computed
+/// for: no collision (nothing obstructs it) and `VegetationBlock#canSurvive` wants a block of the
+/// `dirt` tag or farmland below the cell. `None` for any other item.
+fn sapling_place_succeeds(chunks: &ChunkStorage, req: &PlaceRequest) -> Option<bool> {
+    if !req.held.ends_with("_sapling") || req.has_block_state_component {
+        return None;
+    }
+    let clicked = chunks.get_block_state(req.clicked)?;
+    let replace_clicked = replaceable(clicked, req.held, true, req.face, req.hit.y - req.clicked.y as f64)?;
+    let target = if replace_clicked { req.clicked } else { req.clicked.offset_with_direction(req.face) };
+    let before = chunks.get_block_state(target)?;
+    if !replace_clicked && !replaceable(before, req.held, false, req.face, req.hit.y - target.y as f64)? {
+        return Some(false);
+    }
+    let below = BlockKind::from(chunks.get_block_state(target.down(1))?);
+    Some(tags::blocks::DIRT.contains(&below) || below == BlockKind::Farmland)
+}
+
 /// Whether placing at `pos` can change a neighbour's shape that the bot's physics reads soon: a
 /// neighbour that reacts (`updateShape`, stage 3) or a redstone-like block two cells away, with
 /// the cell inside the zone. Returns the cell.
@@ -427,6 +475,7 @@ pub struct ObstacleData {
     kind: &'static EntityKindComponent,
     uuid: &'static EntityUuid,
     loaded_by: Option<&'static LoadedBy>,
+    marker: Option<&'static ArmorStandMarker>,
     living: Has<AbstractLiving>,
     boat: Has<AbstractBoat>,
     minecart: Has<AbstractMinecart>,
@@ -466,8 +515,9 @@ pub struct PlaceContext {
 fn blocks_building(d: &ObstacleDataItem) -> Option<bool> {
     let kind = **d.kind;
     if kind == EntityKind::ArmorStand {
-        // blocksBuilding is `!isMarker()`; the marker flag is not read
-        return Some(false);
+        // `LivingEntity` starts with blocksBuilding true; `ArmorStand#onSyncedDataUpdated` sets it to
+        // `!isMarker()` when the client flags arrive. No flags received means the default (not a marker).
+        return d.marker.is_none_or(|m| !m.0).then_some(true);
     }
     let blocks = d.living
         || d.boat

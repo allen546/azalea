@@ -60,7 +60,10 @@ use crate::{
         SkipStartTickProgress,
     },
     inventory::OpenScreen,
-    place_prediction::{Decision, PlaceRefusal, PlaceRequest, PlaceView, UnknownWhy, Verdict, decide, predict_place},
+    place_prediction::{
+        ClientSwing, Decision, PlaceRefusal, PlaceRequest, PlaceView, UnknownWhy, Verdict, client_swing, decide,
+        predict_place,
+    },
     tick_counter::TicksConnected,
     movement::ItemInUse,
     packet::game::SendGamePacketEvent,
@@ -856,32 +859,34 @@ pub fn handle_place_block_queued(
                 // Place prediction (patch 33): the cell the vanilla client writes, or a refusal
                 // when the bot's physics would read a cell that could be wrong.
                 let cells = [queued.position, queued.position.offset_with_direction(queued.direction)];
+                // `Minecraft#startUseItem` swings only for a client-side success (patch 48); with no
+                // verdict (`Unknown`, or the bot not set up) the swing stays, a known gap.
+                let mut swing = true;
                 let decision = match view.context(entity, &world, **position, dims, cells) {
                     Some(cx) => {
-                        let verdict = predict_place(
-                            &world.chunks,
-                            &PlaceRequest {
-                                clicked: queued.position,
-                                face: queued.direction,
-                                hit: r.location,
-                                held,
-                                has_block_state_component: matches!(
-                                    inv.held_item(),
-                                    azalea_inventory::ItemStack::Present(d)
-                                        if d.get_component::<azalea_inventory::components::BlockState>().is_some()
-                                ),
-                                game_mode: cx.game_mode,
-                                yaw: look.y_rot(),
-                                sent_yaw: cx.sent_yaw,
-                                obstacles: &cx.obstacles,
-                            },
-                        );
+                        let request = PlaceRequest {
+                            clicked: queued.position,
+                            face: queued.direction,
+                            hit: r.location,
+                            held,
+                            has_block_state_component: matches!(
+                                inv.held_item(),
+                                azalea_inventory::ItemStack::Present(d)
+                                    if d.get_component::<azalea_inventory::components::BlockState>().is_some()
+                            ),
+                            game_mode: cx.game_mode,
+                            yaw: look.y_rot(),
+                            sent_yaw: cx.sent_yaw,
+                            obstacles: &cx.obstacles,
+                        };
+                        let verdict = predict_place(&world.chunks, &request);
                         // the old target rule and stage 1 must agree on the cell
                         let verdict = match verdict {
                             Verdict::Predict { pos, .. } if pos != target => Verdict::Unknown(UnknownWhy::ReplaceRule),
                             v => v,
                         };
                         tracing::debug!(?verdict, "place prediction");
+                        swing = client_swing(&world.chunks, &request, &verdict) != ClientSwing::No;
                         decide(&world.chunks, verdict, cells, &cx.zone)
                     }
                     // the bot is not fully set up: predict nothing, refuse nothing (as before)
@@ -912,7 +917,9 @@ pub fn handle_place_block_queued(
                     ServerboundUseItemOn { hand: InteractionHand::MainHand, block_hit: r.into(), seq },
                 ));
                 crate::input_log::note(entity, crate::input_log::InputEvent::UseClick);
-                commands.trigger(SwingArmEvent { entity });
+                if swing {
+                    commands.trigger(SwingArmEvent { entity });
+                }
             }
         }
         results.set_place(result);
