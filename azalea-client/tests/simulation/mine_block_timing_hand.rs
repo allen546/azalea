@@ -17,6 +17,7 @@ use azalea_protocol::{
 };
 use azalea_registry::builtin::BlockKind;
 
+// Spec: specs/plans/VANILLA_DIFF_PLAN.md VD2 (patch 47: swings in the destroy delay)
 #[test]
 fn test_mine_block_timing_hand() {
     let _lock = init();
@@ -124,7 +125,18 @@ fn test_mine_block_timing_hand() {
         .into_variant()
     });
 
-    for _ in 0..5 {
+    // Patch 47: `Minecraft#continueAttack` swings in each of the 5 destroy-delay ticks while the key
+    // is held on a block (here the stone below). The test expected none before.
+    for i in 0..5 {
+        // i = 0 is the tick of the stop packet; 1 to 4 are delay ticks
+        if i > 0 {
+            sent_packets.expect(&format!("Swing in the destroy delay {i}"), |p| {
+                p == &ServerboundSwing {
+                    hand: InteractionHand::MainHand,
+                }
+                .into_variant()
+            });
+        }
         sent_packets.expect("MovePlayerPos", |p| {
             matches!(p, ServerboundGamePacket::MovePlayerPos(_))
         });

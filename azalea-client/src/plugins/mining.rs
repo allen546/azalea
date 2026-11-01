@@ -595,12 +595,31 @@ pub fn handle_stop_mining_block_event(
 #[derive(Component, Debug)]
 pub struct SkipStartTickProgress;
 
-// Spec: specs/plans/VANILLA_DIFF_PLAN.md VD2 (patch 46: the delay counts down in `continueDestroyBlock`, so the key is held)
-pub fn decrement_mine_delay(mut query: Query<(Entity, &mut MineDelay)>) {
-    for (entity, mut mine_delay) in &mut query {
+// Spec: specs/plans/VANILLA_DIFF_PLAN.md VD2 (patch 47: `Minecraft#continueAttack` swings while the delay counts)
+/// `MultiPlayerGameMode#continueDestroyBlock` counts `destroyDelay` down and returns true while the
+/// attack key is held on a block that is not air, and `Minecraft#continueAttack` then calls
+/// `LocalPlayer#swing`: one `Swing` per delay tick. Not while an item is in use (`continueAttack`
+/// does nothing then). Grim checks that must still pass: `NoSwingBreak` (a break
+/// needs a swing in its tick) and the packet-order checks (`PacketOrderB`, `Post`): the swing
+/// goes out where the other mining swings do, before the position packet.
+pub fn decrement_mine_delay(
+    mut commands: Commands,
+    mut query: Query<(Entity, &mut MineDelay, &HitResultComponent, &WorldName, Has<crate::movement::ItemInUse>)>,
+    worlds: Res<Worlds>,
+) {
+    for (entity, mut mine_delay, hit_result, world_name, using) in &mut query {
         if **mine_delay > 0 {
             crate::input_log::hold_attack(entity);
             **mine_delay -= 1;
+            let on_block = hit_result.as_block_hit_result_if_not_miss().is_some_and(|hit| {
+                worlds
+                    .get(world_name)
+                    .and_then(|w| w.read().get_block_state(hit.block_pos))
+                    .is_some_and(|state| !state.is_air())
+            });
+            if on_block && !using {
+                commands.trigger(SwingArmEvent { entity });
+            }
         }
     }
 }
