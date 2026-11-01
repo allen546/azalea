@@ -911,6 +911,7 @@ pub fn handle_place_block_queued(
                     entity,
                     ServerboundUseItemOn { hand: InteractionHand::MainHand, block_hit: r.into(), seq },
                 ));
+                crate::input_log::note(entity, crate::input_log::InputEvent::UseClick);
                 commands.trigger(SwingArmEvent { entity });
             }
         }
@@ -1047,6 +1048,7 @@ pub fn handle_use_block_queued(
                     entity,
                     ServerboundUseItemOn { hand: InteractionHand::MainHand, block_hit: r.into(), seq },
                 ));
+                crate::input_log::note(entity, crate::input_log::InputEvent::UseClick);
                 commands.trigger(SwingArmEvent { entity });
             }
         }

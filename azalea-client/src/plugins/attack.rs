@@ -97,6 +97,7 @@ pub fn handle_attack_queued(
                 using_secondary_action: **crouching,
             },
         ));
+        crate::input_log::note(client_entity, crate::input_log::InputEvent::AttackClick);
         commands.trigger(SwingArmEvent {
             entity: client_entity,
         });

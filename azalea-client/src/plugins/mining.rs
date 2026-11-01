@@ -271,6 +271,8 @@ pub fn handle_mining_queued(
         ) {
             continue;
         }
+        // Patch 46: a start is the attack key held down (`Minecraft#continueAttack`).
+        crate::input_log::hold_attack(entity);
         // TODO (when world border is implemented): vanilla ignores if the block
         // is outside of the worldborder
 
@@ -593,9 +595,11 @@ pub fn handle_stop_mining_block_event(
 #[derive(Component, Debug)]
 pub struct SkipStartTickProgress;
 
-pub fn decrement_mine_delay(mut query: Query<&mut MineDelay>) {
-    for mut mine_delay in &mut query {
+// Spec: specs/plans/VANILLA_DIFF_PLAN.md VD2 (patch 46: the delay counts down in `continueDestroyBlock`, so the key is held)
+pub fn decrement_mine_delay(mut query: Query<(Entity, &mut MineDelay)>) {
+    for (entity, mut mine_delay) in &mut query {
         if **mine_delay > 0 {
+            crate::input_log::hold_attack(entity);
             **mine_delay -= 1;
         }
     }
@@ -642,6 +646,7 @@ pub fn continue_mining_block(
         (mut prediction_handler, skip_start_tick),
     ) in query.iter_mut()
     {
+        crate::input_log::hold_attack(entity);
         if skip_start_tick {
             commands.entity(entity).remove::<SkipStartTickProgress>();
             continue;

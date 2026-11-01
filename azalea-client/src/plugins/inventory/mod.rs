@@ -208,6 +208,7 @@ fn handle_open_inventory_event(
         }
     }
     if refusal.is_none() {
+        crate::input_log::note(event.entity, crate::input_log::InputEvent::OpenInventory);
         commands.entity(event.entity).insert(OpenScreen::default());
     }
 }
@@ -271,6 +272,7 @@ fn handle_container_close_event(
         return;
     }
 
+    crate::input_log::note(entity, crate::input_log::InputEvent::Close { window: inventory.id });
     commands.trigger(SendGamePacketEvent::new(
         entity,
         ServerboundContainerClose {
@@ -396,6 +398,15 @@ pub fn handle_container_click_event(
     let Some(world) = worlds.get(world_name) else {
         return;
     };
+    crate::input_log::note(
+        entity,
+        crate::input_log::InputEvent::Click {
+            window: container_click.window_id,
+            slot: slot_num,
+            button: container_click.operation.button_num(),
+            kind: container_click.operation.click_type() as u8,
+        },
+    );
 
     let old_slots = inventory.menu().slots();
     inventory.simulate_click(

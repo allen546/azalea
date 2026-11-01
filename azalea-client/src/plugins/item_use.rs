@@ -161,6 +161,10 @@ pub fn handle_use_item_queued(
                 y_rot: look.y_rot(),
             },
         ));
+        crate::input_log::note(
+            entity,
+            crate::input_log::InputEvent::UseItem { off_hand: queued.hand == InteractionHand::OffHand },
+        );
         if starts_using(stack, hunger, abilities, mode.current) {
             commands.entity(entity).insert(ItemInUse {
                 hand: queued.hand,
@@ -195,6 +199,7 @@ pub fn handle_swap_offhand_queued(
 ) {
     for entity in &query {
         send_player_action(&mut commands, entity, Action::SwapItemWithOffhand);
+        crate::input_log::note(entity, crate::input_log::InputEvent::SwapOffhand);
         commands
             .entity(entity)
             .remove::<SwapOffhandQueued>()

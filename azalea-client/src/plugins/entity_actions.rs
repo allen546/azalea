@@ -751,6 +751,7 @@ pub fn handle_use_entity_queued(
         for p in packets {
             commands.trigger(SendGamePacketEvent::new(entity, p));
         }
+        crate::input_log::note(entity, crate::input_log::InputEvent::UseClick);
         commands.trigger(SwingArmEvent { entity });
     }
 }

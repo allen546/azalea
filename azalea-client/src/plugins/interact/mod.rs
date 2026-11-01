@@ -300,6 +300,7 @@ pub fn handle_start_use_item_queued(
         if mining.is_some() {
             warn!("Got a StartUseItemEvent for a client that was mining");
         }
+        crate::input_log::note(entity, crate::input_log::InputEvent::UseClick);
 
         // TODO: this also skips if LocalPlayer.handsBusy is true, which is used when
         // rowing a boat
