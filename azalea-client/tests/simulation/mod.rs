@@ -35,6 +35,7 @@ mod reply_to_ping_with_pong;
 mod respawn_keeps_attributes;
 mod respawn_like_vanilla;
 mod set_health_before_login;
+mod shared_world_prediction;
 mod teleport_movement;
 mod ticks_alive;
 mod unmodelled_disconnect;
