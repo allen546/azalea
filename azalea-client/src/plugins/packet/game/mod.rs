@@ -905,6 +905,7 @@ impl GamePacketHandler<'_> {
                 to_size: p.new_size,
                 start_tick: _now,
                 lerp_ticks: p.lerp_time,
+                absolute_max_size: p.new_absolute_max_size as f64,
             };
         });
     }
@@ -920,14 +921,7 @@ impl GamePacketHandler<'_> {
                 match border {
                     Some(mut b) => f(&mut b, now),
                     None => {
-                        let mut b = WorldBorderState {
-                            center_x: 0.0,
-                            center_z: 0.0,
-                            from_size: 5.9999968E7,
-                            to_size: 5.9999968E7,
-                            start_tick: now,
-                            lerp_ticks: 0,
-                        };
+                        let mut b = WorldBorderState::vanilla_default(now);
                         f(&mut b, now);
                         commands.entity(self.player).insert(b);
                     }

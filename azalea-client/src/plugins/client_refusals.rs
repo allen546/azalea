@@ -51,6 +51,9 @@ pub enum InputRefusal {
     Riptide,
     /// An item whose `use_effects` changes the use speed or lets the player sprint.
     UseEffects,
+    /// A right-click on a block outside the client's world border (`MultiPlayerGameMode#useItemOn`
+    /// answers FAIL before anything is sent).
+    OutsideBorder,
 }
 
 impl InputRefusal {
@@ -59,6 +62,7 @@ impl InputRefusal {
             InputRefusal::ElytraStart => "elytra_start",
             InputRefusal::Riptide => "riptide",
             InputRefusal::UseEffects => "use_effects",
+            InputRefusal::OutsideBorder => "outside_border",
         }
     }
 
@@ -73,6 +77,9 @@ impl InputRefusal {
             }
             InputRefusal::UseEffects => {
                 "the item's use_effects change the use speed or sprinting, which the fork does not model"
+            }
+            InputRefusal::OutsideBorder => {
+                "the clicked block is outside the world border: a vanilla client refuses the click"
             }
         }
     }

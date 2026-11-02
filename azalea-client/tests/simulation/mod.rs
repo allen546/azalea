@@ -38,3 +38,4 @@ mod set_health_before_login;
 mod teleport_movement;
 mod ticks_alive;
 mod unmodelled_disconnect;
+mod world_border_like_vanilla;

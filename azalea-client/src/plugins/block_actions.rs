@@ -27,7 +27,7 @@ use azalea_core::{
 };
 use azalea_entity::{
     Attributes, Crouching, EntityKindComponent, LookDirection, Position, dimensions::EntityDimensions,
-    inventory::Inventory,
+    inventory::Inventory, unmodelled::WorldBorderState,
 };
 use azalea_physics::{PhysicsSystems, collision::{BlockWithShape, VoxelShape}};
 use azalea_protocol::packets::game::{
@@ -227,6 +227,19 @@ pub enum BlockActionRefusal {
     /// The place is inside the movement zone and a neighbouring block may change its shape
     /// because of it (fences, stairs, vines, ...); stage 1 does not predict that. Nothing was sent.
     PlaceNeighbourReacts,
+    /// The block is outside the client's world border: `MultiPlayerGameMode#useItemOn` answers
+    /// FAIL and `#startDestroyBlock` returns false, so a vanilla client sends no click (patch 51).
+    OutsideBorder,
+}
+
+// Spec: specs/B6-placement-breaking.md §4.10 (patch 51: the client's border check)
+/// `ClientLevel#getWorldBorder().isWithinBounds(pos)` for the bot: the border the server described
+/// (the vanilla default until it does), read at the bot's tick count.
+pub fn block_in_world_border(border: Option<&WorldBorderState>, ticks: u64, pos: BlockPos) -> bool {
+    match border {
+        Some(b) => b.contains_block(pos, ticks),
+        None => WorldBorderState::vanilla_default(0).contains_block(pos, ticks),
+    }
 }
 
 impl BlockActionRefusal {
@@ -244,6 +257,7 @@ impl BlockActionRefusal {
             Self::Dead => "the death screen is open: a vanilla client has no mouse then",
             Self::PlaceNotPredicted => "inside the movement zone, the placed block cannot be predicted",
             Self::PlaceNeighbourReacts => "inside the movement zone, a neighbour block would change shape",
+            Self::OutsideBorder => "the block is outside the world border: a vanilla client refuses the click",
         }
     }
 }
@@ -733,6 +747,7 @@ pub fn handle_place_block_queued(
     )>,
     entities: EvidenceEntities,
     view: PlaceView,
+    borders: Query<&WorldBorderState>,
     ticks: SystemChangeTick,
     mut finished: MessageWriter<BlockActionFinished>,
 ) {
@@ -815,6 +830,8 @@ pub fn handle_place_block_queued(
         }
         let eye = position.up(dims.eye_height.into());
         let range = attrs.block_interaction_range.calculate();
+        // `MultiPlayerGameMode#useItemOn` answers FAIL for a clicked block outside the border,
+        // after the crosshair has hit it and before anything is predicted or sent (patch 51).
         let checked = check_click(
             eye,
             range,
@@ -822,7 +839,14 @@ pub fn handle_place_block_queued(
             Some(queued.direction),
             clicked.outline_shape(),
             &hit_result,
-        );
+        )
+        .and_then(|r| {
+            if block_in_world_border(borders.get(entity).ok(), connected.0, queued.position) {
+                Ok(r)
+            } else {
+                Err(BlockActionRefusal::OutsideBorder)
+            }
+        });
         // The target depends on where the click lands (a slab) and what is held (snow).
         let held = match inv.held_item() {
             azalea_inventory::ItemStack::Present(d) => d.kind.to_str(),
@@ -986,6 +1010,7 @@ pub fn handle_use_block_queued(
         (Ref<LookDirection>, &TicksConnected),
     )>,
     entities: EvidenceEntities,
+    borders: Query<&WorldBorderState>,
     ticks: SystemChangeTick,
 ) {
     for (
@@ -1019,7 +1044,14 @@ pub fn handle_use_block_queued(
         } else if places_instead {
             Err(BlockActionRefusal::CrouchingWithItem)
         } else {
-            check_click(eye, range, queued.position, queued.direction, state.outline_shape(), &hit_result)
+            // the same `useItemOn` border check as a place (patch 51)
+            check_click(eye, range, queued.position, queued.direction, state.outline_shape(), &hit_result).and_then(|r| {
+                if block_in_world_border(borders.get(entity).ok(), connected.0, queued.position) {
+                    Ok(r)
+                } else {
+                    Err(BlockActionRefusal::OutsideBorder)
+                }
+            })
         };
         results.next_id += 1;
         let mut result = UseBlockResult {
@@ -1081,7 +1113,7 @@ pub fn begin_break_result(
             Ref<HitResultComponent>,
             (&LocalGameMode, &Inventory),
             Has<CheckBreakClick>,
-            (Ref<LookDirection>, &TicksConnected, &ClientMovementState, Option<&Crouching>),
+            (Ref<LookDirection>, &TicksConnected, &ClientMovementState, Option<&Crouching>, Option<&WorldBorderState>),
         ),
         Added<MiningQueued>,
     >,
@@ -1100,7 +1132,7 @@ pub fn begin_break_result(
         hit_result,
         (mode, inv),
         checked,
-        (look, connected, mv, crouching),
+        (look, connected, mv, crouching, border),
     ) in &mut query
     {
         commands.entity(entity).remove::<CheckBreakClick>();
@@ -1129,8 +1161,17 @@ pub fn begin_break_result(
         // mining.rs drops a restricted break silently; say so
         let refusal = if check_is_interaction_restricted(&world, queued.position, &mode.current, inv) {
             Some(BlockActionRefusal::NotAllowed)
-        } else if checked {
-            check_click(eye, range, queued.position, None, state.outline_shape(), &hit_result).err()
+        } else if let Some(why) = checked
+            .then(|| check_click(eye, range, queued.position, None, state.outline_shape(), &hit_result).err())
+            .flatten()
+        {
+            Some(why)
+        } else if !block_in_world_border(border, connected.0, queued.position) {
+            // `MultiPlayerGameMode#startDestroyBlock` returns false (patch 51). A break start is
+            // the held attack key (`Minecraft#continueAttack`), which swings only on a true
+            // answer, so nothing goes out.
+            crate::input_log::hold_attack(entity);
+            Some(BlockActionRefusal::OutsideBorder)
         } else {
             None
         };

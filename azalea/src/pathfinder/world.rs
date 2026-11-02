@@ -1300,6 +1300,7 @@ mod tests {
             to_size: 100.0,
             start_tick: 0,
             lerp_ticks: 0,
+            absolute_max_size: azalea_entity::unmodelled::DEFAULT_ABSOLUTE_MAX_SIZE,
         };
         let wall = BorderWall::from_state(&state, 10);
         // the border's east edge is x = 50; a cell [46, 47) is 3 blocks inside

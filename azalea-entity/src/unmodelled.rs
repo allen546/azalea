@@ -115,9 +115,60 @@ pub struct WorldBorderState {
     pub to_size: f64,
     pub start_tick: u64,
     pub lerp_ticks: u64,
+    /// `WorldBorder#absoluteMaxSize` (from `ClientboundInitializeBorder`): the edges never go
+    /// beyond it.
+    pub absolute_max_size: f64,
 }
 
+/// `WorldBorder#absoluteMaxSize` before the server says otherwise.
+pub const DEFAULT_ABSOLUTE_MAX_SIZE: f64 = 29999984.0;
+
 impl WorldBorderState {
+    // Spec: specs/B6-placement-breaking.md §4.10 (patch 51: the client's border check)
+    /// The border of a new `ClientLevel`: 5.999997E7 wide (as a float), centred on the origin.
+    pub fn vanilla_default(now: u64) -> Self {
+        Self {
+            center_x: 0.0,
+            center_z: 0.0,
+            from_size: 5.9999968E7,
+            to_size: 5.9999968E7,
+            start_tick: now,
+            lerp_ticks: 0,
+            absolute_max_size: DEFAULT_ABSOLUTE_MAX_SIZE,
+        }
+    }
+
+    // Spec: specs/B6-placement-breaking.md §4.10 (patch 51: the client's border check)
+    /// `WorldBorder#getMinX()`, `#getMaxX()`, `#getMinZ()`, `#getMaxZ()` as `(min_x, max_x, min_z,
+    /// max_z)` when the bot's tick counter reads `tick`. A moving border (`MovingBorderExtent`)
+    /// reports the size of the level tick before (`getMinX()` lerps by 0 from the previous size),
+    /// and `WorldBorder#tick` has run once for each tick since the packet. The packet is handled
+    /// before the tick's counter increment and `Minecraft#handleKeybinds` before `ClientLevel#tick`,
+    /// so a click in the tick after the packet has seen no border tick yet.
+    pub fn block_bounds_at(&self, tick: u64) -> (f64, f64, f64, f64) {
+        let ticks = tick.saturating_sub(self.start_tick + 1);
+        let size = if self.lerp_ticks == 0 || self.from_size == self.to_size || ticks >= self.lerp_ticks {
+            self.to_size
+        } else {
+            // `Mth.lerp(previous progress, from, to)`
+            let progress = ticks.saturating_sub(1) as f64 / self.lerp_ticks as f64;
+            self.from_size + progress * (self.to_size - self.from_size)
+        };
+        let edge = |c: f64, sign: f64| {
+            (c + sign * size / 2.0).clamp(-self.absolute_max_size, self.absolute_max_size)
+        };
+        (edge(self.center_x, -1.0), edge(self.center_x, 1.0), edge(self.center_z, -1.0), edge(self.center_z, 1.0))
+    }
+
+    // Spec: specs/B6-placement-breaking.md §4.10 (patch 51: the client's border check)
+    /// `WorldBorder#isWithinBounds(BlockPos)`: the block's x and z are at least the minimum and
+    /// under the maximum (the block's own corner, not its centre).
+    pub fn contains_block(&self, pos: BlockPos, tick: u64) -> bool {
+        let (min_x, max_x, min_z, max_z) = self.block_bounds_at(tick);
+        let (x, z) = (pos.x as f64, pos.z as f64);
+        x >= min_x && x < max_x && z >= min_z && z < max_z
+    }
+
     /// The border's side length at `tick` (the local tick count).
     pub fn size_at(&self, tick: u64) -> f64 {
         if self.lerp_ticks == 0 || tick >= self.start_tick + self.lerp_ticks {
@@ -273,7 +324,7 @@ mod tests {
 
     #[test]
     fn world_border_touch_and_lerp() {
-        let mut b = WorldBorderState { center_x: 0.0, center_z: 0.0, from_size: 100.0, to_size: 100.0, start_tick: 0, lerp_ticks: 0 };
+        let mut b = WorldBorderState { center_x: 0.0, center_z: 0.0, from_size: 100.0, to_size: 100.0, start_tick: 0, lerp_ticks: 0, absolute_max_size: DEFAULT_ABSOLUTE_MAX_SIZE };
         let at = |x: f64| Aabb { min: Vec3::new(x - 0.3, 70.0, -0.3), max: Vec3::new(x + 0.3, 71.8, 0.3) };
         assert!(!b.touches(&at(10.0), 5));
         assert!(b.touches(&at(49.8), 5));
@@ -288,5 +339,41 @@ mod tests {
         assert!(b.touches(&at(29.9), 5));
         assert!(!b.touches(&at(29.9), 0));
         assert_eq!(b.size_at(50), 20.0);
+    }
+
+    // Spec: specs/B6-placement-breaking.md §4.10 (patch 51: the client's border check)
+    #[test]
+    fn a_block_is_inside_the_border_by_its_corner() {
+        let b = WorldBorderState { center_x: 0.0, center_z: 0.0, from_size: 10.0, to_size: 10.0, start_tick: 0, lerp_ticks: 0, absolute_max_size: DEFAULT_ABSOLUTE_MAX_SIZE };
+        // the edges are -5 and 5: the block at -5 is in, the block at 5 is out
+        assert!(b.contains_block(BlockPos::new(-5, 70, 0), 9));
+        assert!(b.contains_block(BlockPos::new(4, 70, 4), 9));
+        assert!(!b.contains_block(BlockPos::new(5, 70, 0), 9));
+        assert!(!b.contains_block(BlockPos::new(-6, 70, 0), 9));
+        assert!(!b.contains_block(BlockPos::new(0, 70, 5), 9));
+        // the default border keeps blocks inside the absolute maximum only
+        let d = WorldBorderState::vanilla_default(0);
+        assert!(d.contains_block(BlockPos::new(29999983, 70, 0), 9));
+        assert!(!d.contains_block(BlockPos::new(29999984, 70, 0), 9));
+        assert!(d.contains_block(BlockPos::new(-29999984, 70, 0), 9));
+    }
+
+    // Spec: specs/B6-placement-breaking.md §4.10 (patch 51: a moving border reads the tick before)
+    #[test]
+    fn a_moving_border_reads_the_size_of_the_tick_before() {
+        // shrinking 100 -> 20 over 8 ticks, packet counted at tick 10
+        let b = WorldBorderState { center_x: 0.0, center_z: 0.0, from_size: 100.0, to_size: 20.0, start_tick: 10, lerp_ticks: 8, absolute_max_size: DEFAULT_ABSOLUTE_MAX_SIZE };
+        let max_x = |t| b.block_bounds_at(t).1;
+        // the tick after the packet and the next one: no border tick has run, then one (the
+        // previous size is still the start size)
+        assert_eq!(max_x(11), 50.0);
+        assert_eq!(max_x(12), 50.0);
+        // after 3 border ticks the previous size is the one after 2: 100 - 80 * 2 / 8
+        assert_eq!(max_x(14), 40.0);
+        // after the last tick the border is static at the target
+        assert_eq!(max_x(19), 10.0);
+        assert_eq!(max_x(100), 10.0);
+        assert!(b.contains_block(BlockPos::new(45, 70, 0), 12));
+        assert!(!b.contains_block(BlockPos::new(45, 70, 0), 14));
     }
 }

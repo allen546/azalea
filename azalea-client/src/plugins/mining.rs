@@ -2,7 +2,7 @@ use azalea_block::{BlockState, fluid_state::FluidState};
 use azalea_core::{direction::Direction, game_type::GameMode, position::BlockPos, tick::GameTick};
 use azalea_entity::{
     ActiveEffects, Attributes, FluidOnEyes, Physics, PlayerAbilities, Position,
-    inventory::Inventory, mining::get_mine_progress,
+    inventory::Inventory, mining::get_mine_progress, unmodelled::WorldBorderState,
 };
 use azalea_inventory::ItemStack;
 use azalea_physics::{PhysicsSystems, collision::BlockWithShape};
@@ -244,6 +244,7 @@ pub fn handle_mining_queued(
             &mut MineBlockPos,
         ),
     )>,
+    borders: Query<(&crate::tick_counter::TicksConnected, Option<&WorldBorderState>)>,
 ) {
     for (
         entity,
@@ -280,8 +281,15 @@ pub fn handle_mining_queued(
         }
         // Patch 46: a start is the attack key held down (`Minecraft#continueAttack`).
         crate::input_log::hold_attack(entity);
-        // TODO (when world border is implemented): vanilla ignores if the block
-        // is outside of the worldborder
+        // Patch 51: `MultiPlayerGameMode#startDestroyBlock` returns false for a block outside the
+        // client's border, in survival and in creative; no break starts and nothing goes out.
+        // A start is the held attack key here (above), so `Minecraft#continueAttack` runs: it
+        // swings only when `continueDestroyBlock` answered true, so no swing either.
+        if let Ok((ticks, border)) = borders.get(entity)
+            && !crate::block_actions::block_in_world_border(border, ticks.0, mining_queued.position)
+        {
+            continue;
+        }
 
         if let Some(mining) = &mut mining {
             // this matters if we were previously mining a block without force
@@ -673,6 +681,7 @@ pub fn continue_mining_block(
     mut commands: Commands,
     mut mine_block_progress_events: MessageWriter<MineBlockProgressEvent>,
     worlds: Res<Worlds>,
+    borders: Query<(&crate::tick_counter::TicksConnected, Option<&WorldBorderState>)>,
 ) {
     for (
         entity,
@@ -698,7 +707,14 @@ pub fn continue_mining_block(
             continue;
         }
         if game_mode.current == GameMode::Creative {
-            // TODO: worldborder check
+            // `MultiPlayerGameMode#continueDestroyBlock`: the instabuild branch needs the block
+            // inside the border; outside, it falls to `startDestroyBlock`, which refuses too.
+            // Nothing goes out, no swing, and the delay stays (patch 51).
+            if let Ok((ticks, border)) = borders.get(entity)
+                && !crate::block_actions::block_in_world_border(border, ticks.0, mining.pos)
+            {
+                continue;
+            }
             **mine_delay = 5;
             commands.trigger(SendGamePacketEvent::new(
                 entity,
@@ -722,6 +738,7 @@ pub fn continue_mining_block(
                 current_mining_item,
             )
         {
+            // no border check here: `continueDestroyBlock` on the block being broken has none
             trace!("continue mining block at {:?}", mining.pos);
             let world_lock = worlds.get(world_name).unwrap();
             let world = world_lock.read();

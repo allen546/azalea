@@ -276,8 +276,9 @@ pub fn handle_start_use_item_queued(
         &crate::local_player::WorldHolder,
         Option<&mut crate::respawn::RespawnLog>,
     )>,
+    borders: Query<(&crate::tick_counter::TicksConnected, Option<&azalea_entity::unmodelled::WorldBorderState>)>,
 ) {
-    for (entity, start_use_item, mut prediction_handler, hit_result, look_direction, mining, inventory, world, log) in
+    for (entity, start_use_item, mut prediction_handler, hit_result, look_direction, mining, inventory, world, mut log) in
         query
     {
         commands.entity(entity).remove::<StartUseItemQueued>();
@@ -325,6 +326,19 @@ pub fn handle_start_use_item_queued(
                     miss: false,
                 });
             }
+        }
+
+        // Patch 51: `MultiPlayerGameMode#useItemOn` answers FAIL for a clicked block outside the
+        // client's border, before the prediction starts; `Minecraft#startUseItem` then stops.
+        if let HitResult::Block(r) = &hit_result
+            && !r.miss
+            && let Ok((ticks, border)) = borders.get(entity)
+            && !crate::block_actions::block_in_world_border(border, ticks.0, r.block_pos)
+        {
+            if let Some(log) = log.as_mut() {
+                log.refuse_input(crate::client_refusals::InputRefusal::OutsideBorder);
+            }
+            continue;
         }
 
         match &hit_result {
