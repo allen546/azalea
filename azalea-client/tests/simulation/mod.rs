@@ -11,6 +11,7 @@ mod correct_movement;
 mod correct_sneak_movement;
 mod correct_sprint_sneak_movement;
 mod despawn_entities_when_changing_dimension;
+mod drop_click_swings;
 mod enchantments;
 mod entity_interpolation;
 mod entity_pushes;

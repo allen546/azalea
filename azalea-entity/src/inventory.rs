@@ -90,6 +90,35 @@ impl Inventory {
         }
     }
 
+    // Spec: specs/B3-inventory-crafting.md §4.1 (a drop click swings first; patch 49)
+    /// How many times the client swings for this click, as vanilla's `LivingEntity#drop` does
+    /// on the client side: once for each non-empty stack the click drops (a click outside the
+    /// window with a stack on the cursor, a Throw click on a filled slot with an empty cursor).
+    /// Read before `simulate_click`, from the same state, so an empty stack or an ignored click
+    /// gives 0.
+    pub fn click_swings(&self, operation: &ClickOperation) -> u32 {
+        // a drag in progress turns the click into a reset (`AbstractContainerMenu#doClick`)
+        if self.quick_craft_status != QuickCraftStatusKind::Start {
+            return 0;
+        }
+        match operation {
+            ClickOperation::Pickup(
+                PickupClick::Left { slot: None }
+                | PickupClick::LeftOutside
+                | PickupClick::Right { slot: None }
+                | PickupClick::RightOutside,
+            ) => self.carried.is_present() as u32,
+            ClickOperation::Throw(
+                ThrowClick::Single { slot } | ThrowClick::All { slot },
+            ) if self.carried.is_empty() => {
+                // the whole result of a crafting slot goes at once, so one drop either way
+                (self.menu().slot(*slot as usize).is_some_and(|s| s.is_present())
+                    && self.menu().may_pickup(*slot as usize)) as u32
+            }
+            _ => 0,
+        }
+    }
+
     /// Modify the inventory as if the given operation was performed on it.
     pub fn simulate_click(
         &mut self,

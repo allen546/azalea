@@ -22,6 +22,7 @@ use tracing::warn;
 
 use crate::{
     inventory::equipment_effects::{collect_equipment_changes, handle_equipment_changes},
+    interact::SwingArmEvent,
     mining::Mining,
     movement::ItemInUse,
     packet::game::SendGamePacketEvent,
@@ -407,6 +408,12 @@ pub fn handle_container_click_event(
             kind: container_click.operation.click_type() as u8,
         },
     );
+
+    // Patch 49: `LivingEntity#drop` swings on the client before the click leaves, once for each
+    // non-empty stack the click drops (`LocalPlayer#swing` sends it).
+    for _ in 0..inventory.click_swings(&container_click.operation) {
+        commands.trigger(SwingArmEvent { entity });
+    }
 
     let old_slots = inventory.menu().slots();
     inventory.simulate_click(
