@@ -12,7 +12,7 @@ use azalea_core::{
     position::{BlockPos, Vec3},
 };
 use azalea_registry::{builtin::BlockKind, tags};
-use azalea_world::ChunkStorage;
+use azalea_world::BlockView;
 
 use crate::collision::{BlockWithShape, EMPTY_SHAPE, VoxelShape};
 
@@ -47,7 +47,7 @@ impl ClipContext {
     pub fn fluid_shape(
         &self,
         fluid_state: FluidState,
-        world: &ChunkStorage,
+        world: &impl BlockView,
         pos: BlockPos,
     ) -> &VoxelShape {
         if self.fluid_pick_type.can_pick(&fluid_state) {
@@ -89,7 +89,7 @@ impl FluidPickType {
     }
 }
 
-pub fn clip(chunk_storage: &ChunkStorage, context: ClipContext) -> BlockHitResult {
+pub fn clip(chunk_storage: &impl BlockView, context: ClipContext) -> BlockHitResult {
     traverse_blocks(
         context.from,
         context.to,

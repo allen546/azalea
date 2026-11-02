@@ -34,6 +34,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     ClientInformation,
+    block_actions::BlockActionResults,
     block_update::QueuedServerBlockUpdates,
     chunks,
     client_chat::{ChatPacket, ChatReceivedEvent},
@@ -1324,7 +1325,7 @@ impl GamePacketHandler<'_> {
             // block update as its packet arrives)
             queued.apply_loaded(&world, &mut prediction_handler);
             let player_box = dims.make_bounding_box(**position);
-            if let Some(snap) = prediction_handler.end_prediction_up_to(p.seq, &world, Some(&player_box)) {
+            if let Some(snap) = crate::interact::end_prediction_up_to(&mut prediction_handler, p.seq, &world, Some(&player_box)) {
                 // `Entity#absSnapTo`: the server refused a block the player now stands in.
                 **position = snap;
                 physics.set_old_pos(*position);
@@ -1468,12 +1469,15 @@ impl GamePacketHandler<'_> {
     pub fn forget_level_chunk(&mut self, p: &ClientboundForgetLevelChunk) {
         debug!("Got forget level chunk packet {p:?}");
 
-        as_system::<Query<&WorldHolder>>(self.ecs, |mut query| {
-            let local_player = query.get_mut(self.player).unwrap();
+        as_system::<Query<(&WorldHolder, &mut BlockStatePredictionHandler)>>(self.ecs, |mut query| {
+            let (local_player, mut prediction) = query.get_mut(self.player).unwrap();
 
             let mut partial_world = local_player.partial.write();
 
             partial_world.chunks.limited_set(&p.pos, None);
+            // a forgotten chunk must not show this bot's pending cells again
+            // Spec: specs/B6-placement-breaking.md §4.10
+            prediction.clear_predictions_in_chunk(p.pos);
         });
     }
 
@@ -1654,6 +1658,20 @@ impl GamePacketHandler<'_> {
                     }
                 }
                 commands.entity(self.player).remove::<crate::respawn::DeathScreen>();
+            }
+        });
+
+        // `ClientPacketListener#handleRespawn`: another dimension builds a new `ClientLevel`,
+        // which owns a new `BlockStatePredictionHandler` (no pending cells, sequence from 0).
+        // The same dimension keeps the level, so its pending cells stay.
+        // Spec: specs/B6-placement-breaking.md §4.10
+        // The sequence restarts, so pending results must end now: a new ack would settle them.
+        as_system::<Query<(&mut BlockStatePredictionHandler, &mut BlockActionResults, Option<&WorldName>)>>(self.ecs, |mut query| {
+            if let Ok((mut prediction, mut results, world_name)) = query.get_mut(self.player)
+                && world_name.is_some_and(|n| **n != p.common.dimension)
+            {
+                prediction.reset();
+                results.end_unacked_after_reset();
             }
         });
 

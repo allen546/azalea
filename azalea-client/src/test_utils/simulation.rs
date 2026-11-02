@@ -236,6 +236,18 @@ impl Simulation {
             .get_block_state(pos)
     }
 
+    /// The block as this client reads it: shared server data plus the client's own pending
+    /// predictions (patch 53). [`Self::get_block_state`] reads the shared world alone.
+    pub fn bot_block_state(&self, pos: BlockPos) -> Option<BlockState> {
+        let world = self.app.world();
+        let holder = world.get::<WorldHolder>(self.entity).unwrap();
+        let pending = world
+            .get::<azalea_world::BlockStatePredictionHandler>(self.entity)
+            .unwrap();
+        let shared = holder.shared.read();
+        azalea_world::BotWorld::new(&shared, pending).get_block_state(pos)
+    }
+
     pub fn disconnect(&mut self) {
         // send DisconnectEvent
         self.app.world_mut().write_message(DisconnectEvent {

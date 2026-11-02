@@ -11,7 +11,7 @@ use azalea_core::{
     tick::GameTick,
 };
 use azalea_registry::{builtin::BlockKind, tags};
-use azalea_world::{ChunkStorage, WorldName, Worlds};
+use azalea_world::{BlockStatePredictionHandler, BlockView, BotWorld, WorldName, Worlds};
 use bevy_app::{App, Plugin, PostUpdate, Update};
 use bevy_ecs::prelude::*;
 pub use components::*;
@@ -106,24 +106,32 @@ pub fn add_dead(
 
 pub fn update_fluid_on_eyes(
     mut query: Query<
-        (&mut FluidOnEyes, &Position, &EntityDimensions, &WorldName),
+        (
+            &mut FluidOnEyes,
+            &Position,
+            &EntityDimensions,
+            &WorldName,
+            Option<&BlockStatePredictionHandler>,
+        ),
         With<metadata::AbstractLiving>,
     >,
     worlds: Res<Worlds>,
 ) {
     query
         .par_iter_mut()
-        .for_each(|(mut fluid_on_eyes, position, dimensions, world_name)| {
+        .for_each(|(mut fluid_on_eyes, position, dimensions, world_name, pending)| {
             let Some(world) = worlds.get(world_name) else {
                 return;
             };
 
             let adjusted_eye_y = position.y + (dimensions.eye_height as f64) - 0.1111111119389534;
             let eye_block_pos = BlockPos::from(position.with_y(adjusted_eye_y));
-            let fluid_at_eye = world
-                .read()
-                .get_fluid_state(eye_block_pos)
-                .unwrap_or_default();
+            let world = world.read();
+            let world = match pending {
+                Some(pending) => BotWorld::new(&world, pending),
+                None => BotWorld::truth(&world),
+            };
+            let fluid_at_eye = world.get_fluid_state(eye_block_pos).unwrap_or_default();
             let fluid_cutoff_y = (eye_block_pos.y as f32 + fluid_at_eye.height()) as f64;
             if fluid_cutoff_y > adjusted_eye_y {
                 **fluid_on_eyes = fluid_at_eye.kind;
@@ -134,10 +142,13 @@ pub fn update_fluid_on_eyes(
 }
 
 pub fn update_on_climbable(
-    mut query: Query<(&mut OnClimbable, &Position, &WorldName), With<LocalEntity>>,
+    mut query: Query<
+        (&mut OnClimbable, &Position, &WorldName, Option<&BlockStatePredictionHandler>),
+        With<LocalEntity>,
+    >,
     worlds: Res<Worlds>,
 ) {
-    for (mut on_climbable, position, world_name) in query.iter_mut() {
+    for (mut on_climbable, position, world_name, pending) in query.iter_mut() {
         // TODO: there's currently no gamemode component that can be accessed from here,
         // maybe LocalGameMode should be replaced with two components, maybe called
         // EntityGameMode and PreviousGameMode?
@@ -151,6 +162,7 @@ pub fn update_on_climbable(
         };
 
         let world = world.read();
+        let world = BotWorld::of(&world, pending);
 
         let block_pos = BlockPos::from(position);
         let block_at_feet = world.get_block_state(block_pos).unwrap_or_default();
@@ -166,7 +178,7 @@ pub fn update_on_climbable(
 fn is_trapdoor_usable_as_ladder(
     block_state: BlockState,
     block_pos: BlockPos,
-    world: &azalea_world::World,
+    world: &BotWorld,
 ) -> bool {
     // trapdoor must be open
     if !block_state
@@ -293,7 +305,7 @@ pub fn update_in_loaded_chunk(
 }
 
 /// Get the position of the block below the entity, but a little lower.
-pub fn on_pos_legacy(chunk_storage: &ChunkStorage, position: Position) -> BlockPos {
+pub fn on_pos_legacy(chunk_storage: &impl BlockView, position: Position) -> BlockPos {
     on_pos(0.2, chunk_storage, position)
 }
 
@@ -309,7 +321,7 @@ pub fn on_pos_legacy(chunk_storage: &ChunkStorage, position: Position) -> BlockP
 //    }
 // }
 // return var5;
-pub fn on_pos(offset: f32, chunk_storage: &ChunkStorage, pos: Position) -> BlockPos {
+pub fn on_pos(offset: f32, chunk_storage: &impl BlockView, pos: Position) -> BlockPos {
     let x = pos.x.floor() as i32;
     let y = (pos.y - offset as f64).floor() as i32;
     let z = pos.z.floor() as i32;
@@ -386,7 +398,7 @@ mod tests {
                 .get_block_state(BlockPos::new(0, 1, 0))
                 .unwrap_or_default(),
             BlockPos::new(0, 1, 0),
-            &world,
+            &azalea_world::BotWorld::truth(&world),
         );
 
         assert!(trapdoor_matches_ladder);

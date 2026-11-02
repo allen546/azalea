@@ -19,7 +19,7 @@ use azalea_entity::{
     metadata::Sprinting,
 };
 use azalea_registry::builtin::BlockKind;
-use azalea_world::{ChunkStorage, World};
+use azalea_world::{BlockView, BotWorld};
 use bevy_ecs::{entity::Entity, world::Mut};
 pub use blocks::BlockWithShape;
 pub use discrete_voxel_shape::*;
@@ -46,7 +46,7 @@ pub enum MoverType {
 fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
     let entity_bounding_box = ctx.physics.bounding_box;
     let entity_collisions = get_entity_collisions(
-        ctx.world,
+        ctx.world.world,
         &entity_bounding_box.expand_towards(movement),
         Some(ctx.source_entity),
         ctx.aabb_query,
@@ -115,7 +115,7 @@ fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
 /// override: no factor while flying).
 // Spec: specs/B1-movement.md §4.2
 pub fn block_speed_factor(
-    world: &World,
+    world: &BotWorld,
     position: Vec3,
     abilities: Option<&PlayerAbilities>,
 ) -> f32 {
@@ -123,7 +123,6 @@ pub fn block_speed_factor(
         return 1.;
     }
     let block_at = world
-        .chunks
         .get_block_state(BlockPos::from(position))
         .unwrap_or_default();
     let factor = block_at.behavior().speed_factor;
@@ -135,7 +134,6 @@ pub fn block_speed_factor(
         return factor;
     }
     let below = world
-        .chunks
         .get_block_state(crate::get_block_pos_below_that_affects_movement(
             Position::new(position),
         ))
@@ -145,7 +143,7 @@ pub fn block_speed_factor(
 
 pub struct MoveCtx<'world, 'state, 'a, 'b> {
     pub mover_type: MoverType,
-    pub world: &'a World,
+    pub world: &'a BotWorld<'a>,
     pub position: Mut<'a, Position>,
     pub physics: &'a mut Physics,
     pub source_entity: Entity,
@@ -239,7 +237,7 @@ pub fn move_colliding(ctx: &mut MoveCtx, mut movement: Vec3) {
 
     // TODO: minecraft checks for a "minor" horizontal collision here
 
-    let block_pos_below = azalea_entity::on_pos_legacy(&world.chunks, **position);
+    let block_pos_below = azalea_entity::on_pos_legacy(world, **position);
     let block_state_below = world.get_block_state(block_pos_below).unwrap_or_default();
 
     check_fall_damage(
@@ -394,7 +392,7 @@ fn is_above_ground(ctx: &CanFallAtLeastCtx, max_up_step: f32) -> bool {
 
 pub struct CanFallAtLeastCtx<'world, 'state, 'a, 'b> {
     physics: &'a Physics,
-    world: &'a World,
+    world: &'a BotWorld<'a>,
     source_entity: Entity,
     aabb_query: &'a AabbQuery<'world, 'state, 'b>,
     collidable_entity_query: &'a CollidableEntityQuery<'world, 'state>,
@@ -433,7 +431,7 @@ fn can_fall_at_least(
 fn collide_bounding_box(
     movement: Vec3,
     entity_bounding_box: &Aabb,
-    world: &World,
+    world: &BotWorld,
     entity_collisions: &[VoxelShape],
 ) -> Vec3 {
     let mut collision_boxes: Vec<VoxelShape> = Vec::with_capacity(entity_collisions.len() + 1);
@@ -495,7 +493,7 @@ fn collide_with_shapes(
 ///
 /// The world and position are required so it can check if the block above is
 /// also the same fluid type.
-pub fn fluid_shape(fluid: &FluidState, world: &ChunkStorage, pos: BlockPos) -> &'static VoxelShape {
+pub fn fluid_shape(fluid: &FluidState, world: &impl BlockView, pos: BlockPos) -> &'static VoxelShape {
     if fluid.amount == 9 {
         let fluid_state_above = world.get_fluid_state(pos.up(1)).unwrap_or_default();
         if fluid_state_above.kind == fluid.kind {

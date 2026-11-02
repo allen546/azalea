@@ -7,19 +7,34 @@ use azalea_core::{
     position::{BlockPos, ChunkBlockPos, ChunkPos, ChunkSectionBlockPos, ChunkSectionPos, Vec3},
 };
 use azalea_inventory::ItemStack;
-use azalea_world::{Chunk, World};
+use azalea_world::{BotWorld, Chunk, World};
 use bevy_ecs::entity::Entity;
 use parking_lot::RwLock;
 
 use super::{BLOCK_SHAPE, Shapes};
 use crate::collision::{Aabb, BlockWithShape, VoxelShape};
 
-pub fn get_block_collisions(world: &World, aabb: &Aabb) -> Vec<VoxelShape> {
-    let mut state = BlockCollisionsState::new(world, aabb, EntityCollisionContext::of(None));
+pub fn get_block_collisions(world: &BotWorld, aabb: &Aabb) -> Vec<VoxelShape> {
+    collisions(world, aabb, EntityCollisionContext::of(None))
+}
+
+pub fn get_block_and_liquid_collisions(world: &BotWorld, aabb: &Aabb) -> Vec<VoxelShape> {
+    collisions(world, aabb, EntityCollisionContext::of(None).with_include_liquids(true))
+}
+
+// Spec: specs/B6-placement-breaking.md §4.10
+fn collisions(world: &BotWorld, aabb: &Aabb, context: EntityCollisionContext) -> Vec<VoxelShape> {
+    let mut state = BlockCollisionsState::new(world.world, aabb, context);
     let mut block_collisions = Vec::new();
 
+    // A per-query test, not a per-cell one: a bot with no pending cell in the box takes the
+    // unchanged path below, with its section cache.
+    if world.has_override_in(state.origin, state.end) {
+        return collisions_with_overrides(world, state);
+    }
+
     let initial_chunk_pos = ChunkPos::from(state.cursor.origin());
-    let initial_chunk = world.chunks.get(&initial_chunk_pos);
+    let initial_chunk = world.world.chunks.get(&initial_chunk_pos);
     let initial_chunk = initial_chunk.as_deref().map(RwLock::read);
 
     while let Some(item) = state.cursor.next() {
@@ -34,27 +49,19 @@ pub fn get_block_collisions(world: &World, aabb: &Aabb) -> Vec<VoxelShape> {
     block_collisions
 }
 
-pub fn get_block_and_liquid_collisions(world: &World, aabb: &Aabb) -> Vec<VoxelShape> {
-    let mut state = BlockCollisionsState::new(
-        world,
-        aabb,
-        EntityCollisionContext::of(None).with_include_liquids(true),
-    );
+/// The slow path: reads every cell through the bot's overlay. Kept out of line so the
+/// nothing-pending path compiles as it did before patch 53.
+#[cold]
+#[inline(never)]
+fn collisions_with_overrides(world: &BotWorld, mut state: BlockCollisionsState) -> Vec<VoxelShape> {
     let mut block_collisions = Vec::new();
-
-    let initial_chunk_pos = ChunkPos::from(state.cursor.origin());
-    let initial_chunk = world.chunks.get(&initial_chunk_pos);
-    let initial_chunk = initial_chunk.as_deref().map(RwLock::read);
-
     while let Some(item) = state.cursor.next() {
-        state.compute_next(
-            item,
-            &mut block_collisions,
-            initial_chunk_pos,
-            initial_chunk.as_deref(),
-        );
+        if item.iteration_type == CursorIterationType::Corner {
+            continue;
+        }
+        let block_state = world.get_block_state(item.pos).unwrap_or(BlockState::AIR);
+        state.collide_block(item.pos, block_state, &mut block_collisions);
     }
-
     block_collisions
 }
 
@@ -63,6 +70,8 @@ pub struct BlockCollisionsState<'a> {
     pub aabb: &'a Aabb,
     pub entity_shape: VoxelShape,
     pub cursor: Cursor3d,
+    origin: BlockPos,
+    end: BlockPos,
 
     _context: EntityCollisionContext,
 
@@ -93,6 +102,16 @@ impl<'a> BlockCollisionsState<'a> {
             self.get_block_state(item.pos)
         };
 
+        self.collide_block(item.pos, block_state, block_collisions);
+    }
+
+    #[inline(always)]
+    fn collide_block(
+        &mut self,
+        pos: BlockPos,
+        block_state: BlockState,
+        block_collisions: &mut Vec<VoxelShape>,
+    ) {
         if block_state.is_air() {
             // fast path since we can't collide with air
             return;
@@ -103,19 +122,19 @@ impl<'a> BlockCollisionsState<'a> {
         // if it's a full block do a faster collision check
         if block_state.is_collision_shape_full() {
             if !self.aabb.intersects_aabb(&Aabb {
-                min: item.pos.to_vec3_floored(),
-                max: (item.pos + 1).to_vec3_floored(),
+                min: pos.to_vec3_floored(),
+                max: (pos + 1).to_vec3_floored(),
             }) {
                 return;
             }
 
-            block_collisions.push(BLOCK_SHAPE.move_relative(item.pos.to_vec3_floored()));
+            block_collisions.push(BLOCK_SHAPE.move_relative(pos.to_vec3_floored()));
             return;
         }
 
         let block_shape = self.get_block_shape(block_state);
 
-        let block_shape = block_shape.move_relative(item.pos.to_vec3_floored());
+        let block_shape = block_shape.move_relative(pos.to_vec3_floored());
         // if the entity shape and block shape don't collide, continue
         if !Shapes::matches_anywhere(&block_shape, &self.entity_shape, |a, b| a && b) {
             return;
@@ -144,6 +163,8 @@ impl<'a> BlockCollisionsState<'a> {
             aabb,
             entity_shape: VoxelShape::from(aabb),
             cursor,
+            origin,
+            end,
 
             _context: context,
 

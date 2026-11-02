@@ -31,7 +31,7 @@ use azalea_protocol::{
     },
 };
 use azalea_registry::builtin::{EntityKind, MobEffect};
-use azalea_world::World;
+use azalea_world::{BlockStatePredictionHandler, BotWorld};
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
 
@@ -341,7 +341,7 @@ pub fn local_player_ai_step(
             &mut Crouching,
             &mut Attributes,
             Has<ItemInUse>,
-            &ActiveEffects,
+            (&ActiveEffects, &BlockStatePredictionHandler),
         ),
         (With<HasClientLoaded>, With<LocalEntity>),
     >,
@@ -363,7 +363,7 @@ pub fn local_player_ai_step(
         mut crouching,
         mut attributes,
         item_in_use,
-        active_effects,
+        (active_effects, pending),
     ) in query.iter_mut()
     {
         // server ai step
@@ -374,6 +374,7 @@ pub fn local_player_ai_step(
         let is_sleeping = sleeping_pos.is_some();
 
         let world = world_holder.shared.read();
+        let world = BotWorld::new(&world, pending);
         let ctx = CanPlayerFitCtx {
             world: &world,
             entity,
@@ -631,15 +632,17 @@ pub fn update_pose(
         &LocalGameMode,
         &WorldHolder,
         &Position,
+        &BlockStatePredictionHandler,
     )>,
     aabb_query: AabbQuery,
     collidable_entity_query: CollidableEntityQuery,
 ) {
-    for (entity, mut pose, physics, physics_state, game_mode, world_holder, position) in
+    for (entity, mut pose, physics, physics_state, game_mode, world_holder, position, pending) in
         query.iter_mut()
     {
         let world = world_holder.shared.read();
-        let world = &*world;
+        let world = BotWorld::new(&world, pending);
+        let world = &world;
         let ctx = CanPlayerFitCtx {
             world,
             entity,
@@ -684,7 +687,7 @@ pub fn update_pose(
 }
 
 struct CanPlayerFitCtx<'world, 'state, 'a, 'b> {
-    world: &'a World,
+    world: &'a BotWorld<'a>,
     entity: Entity,
     position: Position,
     aabb_query: &'a AabbQuery<'world, 'state, 'b>,

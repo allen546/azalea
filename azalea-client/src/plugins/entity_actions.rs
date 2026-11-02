@@ -517,17 +517,22 @@ fn crosshair(
     eye: Vec3,
     bbox: &Aabb,
     world: &World,
+    pending: Option<&azalea_world::BlockStatePredictionHandler>,
     attrs: &Attributes,
     aabb_query: &AabbQuery,
     pickable: &MaybePickableEntityQuery,
     peers: Option<&PeerView>,
 ) -> HitResult {
+    let world = match pending {
+        Some(pending) => azalea_world::BotWorld::new(world, pending),
+        None => azalea_world::BotWorld::truth(world),
+    };
     pick(PickOpts {
         source_entity: source,
         look_direction: look,
         eye_position: eye,
         aabb: bbox,
-        world,
+        world: &world,
         entity_pick_range: attrs.entity_interaction_range.calculate(),
         block_pick_range: attrs.block_interaction_range.calculate(),
         aabb_query,
@@ -555,6 +560,7 @@ pub fn handle_look_at_entity_queued(
     boxes: Query<&LastBoundingBox>,
     aabb_query: AabbQuery,
     pickable: MaybePickableEntityQuery,
+    pendings: Query<&azalea_world::BlockStatePredictionHandler>,
 ) {
     for (entity, queued, mut look, world, position, dims, attrs, physics, ids, mut peers) in &mut query {
         commands.entity(entity).remove::<LookAtEntityQueued>();
@@ -577,7 +583,7 @@ pub fn handle_look_at_entity_queued(
         let world = world.shared.read();
         let current = *look;
         let aim = aim_at_entity(eye, &target_box, current, target, |l| {
-            crosshair(entity, l, eye, &physics.bounding_box, &world, attrs, &aabb_query, &pickable, view)
+            crosshair(entity, l, eye, &physics.bounding_box, &world, pendings.get(entity).ok(), attrs, &aabb_query, &pickable, view)
         });
         if let Some(aim) = aim {
             look.update(aim);
@@ -634,6 +640,7 @@ pub fn handle_use_entity_queued(
     )>,
     aabb_query: AabbQuery,
     pickable: MaybePickableEntityQuery,
+    pendings: Query<&azalea_world::BlockStatePredictionHandler>,
 ) {
     for (
         entity,
@@ -695,7 +702,7 @@ pub fn handle_use_entity_queued(
         }
         let world = world.shared.read();
         let eye = position.up(dims.eye_height.into());
-        let hit = crosshair(entity, *look, eye, &physics.bounding_box, &world, attrs, &aabb_query, &pickable, view);
+        let hit = crosshair(entity, *look, eye, &physics.bounding_box, &world, pendings.get(entity).ok(), attrs, &aabb_query, &pickable, view);
         let range = attrs.entity_interaction_range.calculate();
         let checked = check_entity_click(eye, view_vector(*look), range, target, &target_box, &hit);
         // Patch 28: what this check saw, kept for a refusal. The pick above is fresh, so the hit
@@ -730,7 +737,7 @@ pub fn handle_use_entity_queued(
             let crouched_eye = position.up(CROUCH_EYE_HEIGHT);
             let current = *look;
             let aim = aim_at_entity(crouched_eye, &target_box, current, target, |l| {
-                crosshair(entity, l, crouched_eye, &physics.bounding_box, &world, attrs, &aabb_query, &pickable, view)
+                crosshair(entity, l, crouched_eye, &physics.bounding_box, &world, pendings.get(entity).ok(), attrs, &aabb_query, &pickable, view)
             });
             if let Some(aim) = aim {
                 look.update(aim);

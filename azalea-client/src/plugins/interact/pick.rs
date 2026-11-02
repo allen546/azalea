@@ -20,7 +20,7 @@ use azalea_physics::{
     collision::VoxelShape,
     collision::entity_collisions::{AabbQuery, get_entities},
 };
-use azalea_world::{World, WorldName, Worlds};
+use azalea_world::{BlockStatePredictionHandler, BlockView, BotWorld, WorldName, Worlds};
 use bevy_ecs::prelude::*;
 use derive_more::{Deref, DerefMut};
 
@@ -63,6 +63,7 @@ pub fn update_hit_result_component(
             &Physics,
             &Attributes,
             Option<&PeerView>,
+            &BlockStatePredictionHandler,
         ),
         With<LocalEntity>,
     >,
@@ -70,7 +71,7 @@ pub fn update_hit_result_component(
     aabb_query: AabbQuery,
     pickable_query: MaybePickableEntityQuery,
 ) {
-    for (entity, hit_result_ref, position, dimensions, look_direction, world_name, physics, attributes, peers) in
+    for (entity, hit_result_ref, position, dimensions, look_direction, world_name, physics, attributes, peers, pending) in
         &mut query
     {
         let Some(hit_result) = cast_hit_result(
@@ -82,6 +83,7 @@ pub fn update_hit_result_component(
             physics,
             attributes,
             peers,
+            pending,
             &worlds,
             &aabb_query,
             &pickable_query,
@@ -114,6 +116,7 @@ pub fn insert_initial_hit_result_component(
             &WorldName,
             &Physics,
             &Attributes,
+            &BlockStatePredictionHandler,
         ),
         (With<LocalEntity>, Without<HitResultComponent>),
     >,
@@ -121,7 +124,7 @@ pub fn insert_initial_hit_result_component(
     aabb_query: AabbQuery,
     pickable_query: MaybePickableEntityQuery,
 ) {
-    for (entity, position, dimensions, look_direction, world_name, physics, attributes) in &query {
+    for (entity, position, dimensions, look_direction, world_name, physics, attributes, pending) in &query {
         if let Some(hit_result) = cast_hit_result(
             entity,
             position,
@@ -131,6 +134,7 @@ pub fn insert_initial_hit_result_component(
             physics,
             attributes,
             None,
+            pending,
             &worlds,
             &aabb_query,
             &pickable_query,
@@ -152,6 +156,7 @@ fn cast_hit_result(
     physics: &Physics,
     attributes: &Attributes,
     peers: Option<&PeerView>,
+    pending: &BlockStatePredictionHandler,
     worlds: &Worlds,
     aabb_query: &AabbQuery,
     pickable_query: &MaybePickableEntityQuery,
@@ -161,6 +166,7 @@ fn cast_hit_result(
     let eye_position = position.up(dimensions.eye_height.into());
     let world_lock = worlds.get(world_name)?;
     let world = world_lock.read();
+    let world = BotWorld::new(&world, pending);
     Some(pick(PickOpts {
         source_entity: entity,
         look_direction: *look_direction,
@@ -207,7 +213,7 @@ pub struct PickOpts<'world, 'state, 'a, 'b, 'c> {
     pub look_direction: LookDirection,
     pub eye_position: Vec3,
     pub aabb: &'a Aabb,
-    pub world: &'a World,
+    pub world: &'a BotWorld<'a>,
     pub entity_pick_range: f64,
     pub block_pick_range: f64,
     pub aabb_query: &'a AabbQuery<'world, 'state, 'b>,
@@ -235,7 +241,7 @@ pub fn pick(opts: PickOpts<'_, '_, '_, '_, '_>) -> HitResult {
     let block_hit_result = pick_block(
         opts.look_direction,
         opts.eye_position,
-        &opts.world.chunks,
+        opts.world,
         max_range,
     );
     let block_hit_result_dist_squared = block_hit_result
@@ -286,7 +292,7 @@ pub fn pick(opts: PickOpts<'_, '_, '_, '_, '_>) -> HitResult {
         source_entity: opts.source_entity,
         eye_position: opts.eye_position,
         end_position,
-        world: opts.world,
+        world: opts.world.world,
         pick_range_squared: max_range_squared,
         predicate: &is_pickable,
         aabb: &pick_aabb,
@@ -333,7 +339,7 @@ fn filter_hit_result(hit_result: HitResult, eye_position: Vec3, range: f64) -> H
 pub fn pick_block(
     look_direction: LookDirection,
     eye_position: Vec3,
-    chunks: &azalea_world::ChunkStorage,
+    chunks: &impl BlockView,
     pick_range: f64,
 ) -> BlockHitResult {
     let view_vector = view_vector(look_direction);
@@ -360,7 +366,7 @@ pub fn pick_block(
 /// `HopperBlock#getInteractionShape` (per `FACING`), `ComposterBlock#getInteractionShape`,
 /// `ScaffoldingBlock#getInteractionShape`; logic from `BlockGetter#clipWithInteractionOverride`.
 fn with_interaction_override(
-    chunks: &azalea_world::ChunkStorage,
+    chunks: &impl BlockView,
     from: Vec3,
     to: Vec3,
     hit: BlockHitResult,

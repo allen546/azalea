@@ -8,7 +8,7 @@ use azalea_core::{
 };
 use azalea_entity::{HasClientLoaded, LocalEntity, Physics, Position};
 use azalea_registry::builtin::BlockKind;
-use azalea_world::{World, WorldName, Worlds};
+use azalea_world::{BlockStatePredictionHandler, BotWorld, WorldName, Worlds};
 use bevy_ecs::prelude::*;
 
 use crate::collision::{BlockWithShape, legacy_blocks_motion};
@@ -16,16 +16,17 @@ use crate::collision::{BlockWithShape, legacy_blocks_motion};
 #[allow(clippy::type_complexity)]
 pub fn update_in_water_state_and_do_fluid_pushing(
     mut query: Query<
-        (&mut Physics, &Position, &WorldName),
+        (&mut Physics, &Position, &WorldName, Option<&BlockStatePredictionHandler>),
         (With<LocalEntity>, With<HasClientLoaded>),
     >,
     worlds: Res<Worlds>,
 ) {
-    for (mut physics, position, world_name) in &mut query {
+    for (mut physics, position, world_name, pending) in &mut query {
         let Some(world_lock) = worlds.get(world_name) else {
             continue;
         };
         let world = world_lock.read();
+        let world = BotWorld::of(&world, pending);
 
         // reset the heights since they're going to be set in
         // update_in_water_state_and_do_water_current_pushing
@@ -38,6 +39,7 @@ pub fn update_in_water_state_and_do_fluid_pushing(
         // is very inefficient, so for now we're doing this instead
 
         let is_ultrawarm = world
+            .world
             .registries
             .dimension_type
             .map
@@ -60,7 +62,7 @@ pub fn update_in_water_state_and_do_fluid_pushing(
 }
 fn update_in_water_state_and_do_water_current_pushing(
     physics: &mut Physics,
-    world: &World,
+    world: &BotWorld,
     _position: Position,
 ) {
     // TODO: implement vehicles and boats
@@ -86,7 +88,7 @@ fn update_in_water_state_and_do_water_current_pushing(
 
 fn update_fluid_height_and_do_fluid_pushing(
     physics: &mut Physics,
-    world: &World,
+    world: &BotWorld,
     checking_fluid: FluidKind,
     fluid_push_factor: f64,
 ) -> bool {
@@ -180,7 +182,7 @@ pub fn update_swimming() {
 }
 
 // FlowingFluid.getFlow
-pub fn get_fluid_flow(fluid: &FluidState, world: &World, pos: BlockPos) -> Vec3 {
+pub fn get_fluid_flow(fluid: &FluidState, world: &BotWorld, pos: BlockPos) -> Vec3 {
     let mut z_flow: f64 = 0.;
     let mut x_flow: f64 = 0.;
 
@@ -244,7 +246,7 @@ pub fn get_fluid_flow(fluid: &FluidState, world: &World, pos: BlockPos) -> Vec3 
 // i don't really get what this is for
 fn is_solid_face(
     fluid: &FluidState,
-    world: &World,
+    world: &BotWorld,
     adjacent_pos: BlockPos,
     direction: Direction,
 ) -> bool {
@@ -272,7 +274,7 @@ fn is_solid_face(
 // Spec: specs/B1-movement.md §4.6 (Falls, swimming, climbing)
 fn is_face_sturdy(
     block_state: BlockState,
-    _world: &World,
+    _world: &BotWorld,
     _pos: BlockPos,
     _direction: Direction,
 ) -> bool {

@@ -86,11 +86,12 @@ pub fn derive_unmodelled_contacts(
             Option<&WorldBorderState>,
             Option<&mut UnmodelledContacts>,
             Option<&FallFlying>,
+            &azalea_world::BlockStatePredictionHandler,
         ),
         With<LocalEntity>,
     >,
 ) {
-    for (entity, physics, world_holder, ticks, vehicle, border, contacts, fall_flying) in &mut query {
+    for (entity, physics, world_holder, ticks, vehicle, border, contacts, fall_flying, pending) in &mut query {
         let mut list = Vec::new();
         if vehicle.is_some() {
             list.push(UnmodelledInput::Passenger);
@@ -100,7 +101,10 @@ pub fn derive_unmodelled_contacts(
         if border.is_some_and(|b| b.touches(&physics.bounding_box, ticks.0)) {
             list.push(UnmodelledInput::WorldBorder);
         }
-        list.extend(unmodelled_block_contacts(&world_holder.shared.read(), &physics.bounding_box));
+        list.extend({
+            let world = world_holder.shared.read();
+            unmodelled_block_contacts(&azalea_world::BotWorld::new(&world, pending), &physics.bounding_box)
+        });
         match contacts {
             Some(mut c) => {
                 if c.0 != list {

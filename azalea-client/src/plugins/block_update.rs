@@ -15,7 +15,11 @@ impl Plugin for BlockUpdatePlugin {
             Update,
             // has to be after ReceiveChunkEvent is handled so if we get chunk+blockupdate in one
             // Update then the block update actually gets applied
-            handle_block_update_event.after(handle_receive_chunk_event),
+            handle_block_update_event
+                .after(handle_receive_chunk_event)
+                // patch 53: readers of the bot's pending cells run after the writers
+                .before(azalea_entity::update_on_climbable)
+                .before(crate::interact::pick::insert_initial_hit_result_component),
         );
     }
 }
@@ -49,8 +53,10 @@ impl QueuedServerBlockUpdates {
         for (pos, block_state) in self.list.drain(..) {
             if world.get_block_state(pos).is_none() {
                 kept.push((pos, block_state));
-            } else if !prediction.update_known_server_state(pos, block_state) {
+            } else {
+                // the shared world holds server data only; a pending cell also keeps it for the ack
                 world.chunks.set_block_state(pos, block_state);
+                prediction.update_known_server_state(pos, block_state);
             }
         }
         self.list = kept;
@@ -67,9 +73,8 @@ pub fn handle_block_update_event(
     for (mut queued, world_holder, mut prediction_handler) in query.iter_mut() {
         let world = world_holder.shared.read();
         for (pos, block_state) in queued.list.drain(..) {
-            if !prediction_handler.update_known_server_state(pos, block_state) {
-                world.chunks.set_block_state(pos, block_state);
-            }
+            world.chunks.set_block_state(pos, block_state);
+            prediction_handler.update_known_server_state(pos, block_state);
         }
     }
 }

@@ -8,7 +8,7 @@ use azalea_inventory::ItemStack;
 use azalea_physics::{PhysicsSystems, collision::BlockWithShape};
 use azalea_protocol::packets::game::s_player_action::{self, ServerboundPlayerAction};
 use azalea_registry::builtin::{BlockKind, ItemKind};
-use azalea_world::{WorldName, Worlds};
+use azalea_world::{BotWorld, WorldName, Worlds};
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
 use derive_more::{Deref, DerefMut};
@@ -272,7 +272,7 @@ pub fn handle_mining_queued(
 
         let world = world_holder.shared.read();
         if check_is_interaction_restricted(
-            &world,
+            &BotWorld::new(&world, &sequence_number),
             mining_queued.position,
             &game_mode.current,
             inventory,
@@ -338,7 +338,7 @@ pub fn handle_mining_queued(
                 ));
             }
 
-            let target_block_state = world
+            let target_block_state = BotWorld::new(&world, &sequence_number)
                 .get_block_state(mining_queued.position)
                 .unwrap_or_default();
 
@@ -530,7 +530,12 @@ pub fn handle_finish_mining_block_observer(
     ) = query.get_mut(finish_mining_block.entity).unwrap();
     let world_lock = worlds.get(world_name).unwrap();
     let world = world_lock.read();
-    if check_is_interaction_restricted(&world, event.position, &game_mode.current, inventory) {
+    if check_is_interaction_restricted(
+        &BotWorld::new(&world, &prediction_handler),
+        event.position,
+        &game_mode.current,
+        inventory,
+    ) {
         return;
     }
 
@@ -543,7 +548,7 @@ pub fn handle_finish_mining_block_observer(
         }
     }
 
-    let Some(block_state) = world.get_block_state(event.position) else {
+    let Some(block_state) = BotWorld::new(&world, &prediction_handler).get_block_state(event.position) else {
         return;
     };
 
@@ -563,10 +568,12 @@ pub fn handle_finish_mining_block_observer(
     // when we break a waterlogged block we want to keep the water there
     let fluid_state = FluidState::from(block_state);
     let block_state_for_fluid = BlockState::from(fluid_state);
-    let old_state = world
-        .set_block_state(event.position, block_state_for_fluid)
+    // Null: the predicted break goes into this bot's own handler, never the shared world (patch 53).
+    let old_state = BotWorld::new(&world, &prediction_handler)
+        .get_block_state(event.position)
         .unwrap_or_default();
     prediction_handler.retain_known_server_state(event.position, old_state, **player_pos);
+    prediction_handler.set_predicted(event.position, block_state_for_fluid);
 }
 
 /// Abort mining a block.
@@ -642,15 +649,18 @@ pub struct MineDelayTicked;
 /// swing still goes out before the position packet.
 pub fn swing_in_mine_delay(
     mut commands: Commands,
-    query: Query<(Entity, &HitResultComponent, &WorldName, Has<crate::movement::ItemInUse>), With<MineDelayTicked>>,
+    query: Query<
+        (Entity, &HitResultComponent, &WorldName, Has<crate::movement::ItemInUse>, &BlockStatePredictionHandler),
+        With<MineDelayTicked>,
+    >,
     worlds: Res<Worlds>,
 ) {
-    for (entity, hit_result, world_name, using) in &query {
+    for (entity, hit_result, world_name, using, pending) in &query {
         commands.entity(entity).remove::<MineDelayTicked>();
         let on_block = hit_result.as_block_hit_result_if_not_miss().is_some_and(|hit| {
             worlds
                 .get(world_name)
-                .and_then(|w| w.read().get_block_state(hit.block_pos))
+                .and_then(|w| BotWorld::new(&w.read(), pending).get_block_state(hit.block_pos))
                 .is_some_and(|state| !state.is_air())
         });
         if on_block && !using {
@@ -742,7 +752,9 @@ pub fn continue_mining_block(
             trace!("continue mining block at {:?}", mining.pos);
             let world_lock = worlds.get(world_name).unwrap();
             let world = world_lock.read();
-            let target_block_state = world.get_block_state(mining.pos).unwrap_or_default();
+            let target_block_state = BotWorld::new(&world, &prediction_handler)
+                .get_block_state(mining.pos)
+                .unwrap_or_default();
 
             trace!("target_block_state: {target_block_state:?}");
 

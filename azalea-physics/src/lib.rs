@@ -23,7 +23,7 @@ use azalea_entity::{
     dimensions::EntityDimensions, metadata::Sprinting, move_relative,
 };
 use azalea_registry::builtin::{BlockKind, EntityKind, MobEffect};
-use azalea_world::{World, WorldName, Worlds};
+use azalea_world::{BlockStatePredictionHandler, BotWorld, WorldName, Worlds};
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
 use clip::box_traverse_blocks;
@@ -80,6 +80,7 @@ pub fn ai_step(
             &WorldName,
             &EntityKindComponent,
             &ClientMovementState,
+            Option<&BlockStatePredictionHandler>,
         ),
         (With<LocalEntity>, With<HasClientLoaded>),
     >,
@@ -96,6 +97,7 @@ pub fn ai_step(
         world_name,
         entity_kind,
         client_movement,
+        pending,
     ) in &mut query
     {
         let is_player = **entity_kind == EntityKind::Player;
@@ -162,6 +164,7 @@ pub fn ai_step(
                             *sprinting,
                             world_name,
                             &worlds,
+                            pending,
                             active_effects,
                             attributes,
                         );
@@ -199,6 +202,7 @@ pub fn apply_effects_from_blocks(
             &Position,
             &EntityDimensions,
             &WorldName,
+            Option<&BlockStatePredictionHandler>,
             &ActiveEffects,
             Option<&PlayerAbilities>,
         ),
@@ -206,11 +210,12 @@ pub fn apply_effects_from_blocks(
     >,
     worlds: Res<Worlds>,
 ) {
-    for (mut physics, position, dimensions, world_name, active_effects, abilities) in &mut query {
+    for (mut physics, position, dimensions, world_name, pending, active_effects, abilities) in &mut query {
         let Some(world_lock) = worlds.get(world_name) else {
             continue;
         };
         let world = world_lock.read();
+        let world = BotWorld::of(&world, pending);
 
         // if !is_affected_by_blocks {
         //     continue
@@ -267,7 +272,7 @@ pub fn apply_effects_from_blocks(
 fn check_inside_blocks(
     physics: &mut Physics,
     dimensions: &EntityDimensions,
-    world: &World,
+    world: &BotWorld,
     movements: &[EntityMovement],
     active_effects: &ActiveEffects,
     abilities: Option<&PlayerAbilities>,
@@ -277,7 +282,6 @@ fn check_inside_blocks(
     // longs).
     let mut visited_blocks = HashSet::<BlockPos>::new();
     let in_block_state = world
-        .chunks
         .get_block_state(BlockPos::from(
             movements.last().map_or(Vec3::ZERO, |m| m.to),
         ))
@@ -396,7 +400,7 @@ fn collided_with_shape_moving_from(
 
 // BlockBehavior.entityInside
 fn handle_entity_inside_block(
-    world: &World,
+    world: &BotWorld,
     block: BlockState,
     block_pos: BlockPos,
     physics: &mut Physics,
@@ -480,6 +484,7 @@ pub fn jump_from_ground(
     sprinting: Sprinting,
     world_name: &WorldName,
     worlds: &Worlds,
+    pending: Option<&BlockStatePredictionHandler>,
     active_effects: &ActiveEffects,
     attributes: &Attributes,
 ) {
@@ -487,6 +492,7 @@ pub fn jump_from_ground(
         .get(world_name)
         .expect("All entities should be in a valid world");
     let world = world_lock.read();
+    let world = BotWorld::of(&world, pending);
 
     let base_jump = jump_power(&world, position, attributes);
     let jump_power = base_jump + jump_boost_power(active_effects);
@@ -559,7 +565,6 @@ fn handle_relative_friction_and_calculate_movement(ctx: &mut MoveCtx, block_fric
     if ctx.physics.horizontal_collision || *ctx.jumping {
         let block_at_feet: BlockKind = ctx
             .world
-            .chunks
             .get_block_state(BlockPos::from(*ctx.position))
             .unwrap_or_default()
             .into();
@@ -579,7 +584,7 @@ fn handle_on_climbable(
     velocity: Vec3,
     on_climbable: OnClimbable,
     position: Position,
-    world: &World,
+    world: &BotWorld,
     pose: Option<Pose>,
 ) -> Vec3 {
     if !*on_climbable {
@@ -599,7 +604,6 @@ fn handle_on_climbable(
         && pose == Some(Pose::Crouching)
         && BlockKind::from(
             world
-                .chunks
                 .get_block_state(position.into())
                 .unwrap_or_default(),
         ) != BlockKind::Scaffolding
@@ -631,10 +635,9 @@ fn get_friction_influenced_speed(
 
 /// Returns the what the entity's jump should be multiplied by based on the
 /// block they're standing on.
-fn block_jump_factor(world: &World, position: Position) -> f32 {
-    let block_at_pos = world.chunks.get_block_state(position.into());
+fn block_jump_factor(world: &BotWorld, position: Position) -> f32 {
+    let block_at_pos = world.get_block_state(position.into());
     let block_below = world
-        .chunks
         .get_block_state(get_block_pos_below_that_affects_movement(position));
 
     let block_at_pos_jump_factor = if let Some(block) = block_at_pos {
@@ -659,7 +662,7 @@ fn block_jump_factor(world: &World, position: Position) -> f32 {
 // public double getJumpBoostPower() {
 //     return this.hasEffect(MobEffects.JUMP) ? (double)(0.1F *
 // (float)(this.getEffect(MobEffects.JUMP).getAmplifier() + 1)) : 0.0D; }
-fn jump_power(world: &World, position: Position, attributes: &Attributes) -> f32 {
+fn jump_power(world: &BotWorld, position: Position, attributes: &Attributes) -> f32 {
     attributes.jump_strength.calculate() as f32 * block_jump_factor(world, position)
 }
 

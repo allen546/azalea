@@ -1,7 +1,5 @@
 pub mod pick;
 
-use std::collections::HashMap;
-
 use azalea_block::BlockState;
 use azalea_core::{
     aabb::Aabb,
@@ -93,132 +91,34 @@ impl Plugin for InteractPlugin {
     }
 }
 
-/// A component that contains information about our local block state
-/// predictions.
-#[derive(Clone, Component, Debug, Default)]
-pub struct BlockStatePredictionHandler {
-    /// The total number of changes that this client has made to blocks.
+pub use azalea_world::BlockStatePredictionHandler;
+
+/// Settle the pending cells up to `seq` and, when the player's box meets a cell whose shown
+/// state changed, return the position the player had when the cell was first retained (vanilla
+/// `ClientLevel#syncBlockState`: `Entity#isColliding` then `absSnapTo`). The caller moves the
+/// player there. `player_box` is the player's box now; `None` skips the snap-back.
+// Spec: specs/B6-placement-breaking.md §4.10 (write and roll back)
+pub fn end_prediction_up_to(
+    handler: &mut BlockStatePredictionHandler,
     seq: u32,
-    /// The highest sequence number the server has acknowledged with
-    /// [`ClientboundBlockChangedAck`].
-    ///
-    /// [`ClientboundBlockChangedAck`]: azalea_protocol::packets::game::ClientboundBlockChangedAck
-    acked_seq: u32,
-    server_state: HashMap<BlockPos, ServerVerifiedState>,
-}
-#[derive(Clone, Debug)]
-struct ServerVerifiedState {
-    seq: u32,
-    block_state: BlockState,
-    /// Used for teleporting the player back if we're colliding with the block
-    /// that got placed back.
-    player_pos: Vec3,
-}
-
-impl BlockStatePredictionHandler {
-    /// The sequence number of the latest change this client sent.
-    pub fn seq(&self) -> u32 {
-        self.seq
-    }
-
-    /// The highest sequence number the server has acknowledged so far.
-    pub fn acked_seq(&self) -> u32 {
-        self.acked_seq
-    }
-
-    /// Get the next sequence number that we're going to use and increment the
-    /// value.
-    pub fn start_predicting(&mut self) -> u32 {
-        self.seq += 1;
-        self.seq
-    }
-
-    /// Should be called right before the client updates a block with its
-    /// prediction.
-    ///
-    /// This is used to make sure that we can rollback to this state if the
-    /// server acknowledges the sequence number (with
-    /// [`ClientboundBlockChangedAck`]) without having sent a block update.
-    ///
-    /// [`ClientboundBlockChangedAck`]: azalea_protocol::packets::game::ClientboundBlockChangedAck
-    pub fn retain_known_server_state(
-        &mut self,
-        pos: BlockPos,
-        old_state: BlockState,
-        player_pos: Vec3,
-    ) {
-        self.server_state
-            .entry(pos)
-            .and_modify(|s| s.seq = self.seq)
-            .or_insert(ServerVerifiedState {
-                seq: self.seq,
-                block_state: old_state,
-                player_pos,
-            });
-    }
-
-    /// Save this update as the correct server state so when the server sends a
-    /// [`ClientboundBlockChangedAck`] we don't roll back this new update.
-    ///
-    /// This should be used when we receive a block update from the server.
-    ///
-    /// [`ClientboundBlockChangedAck`]: azalea_protocol::packets::game::ClientboundBlockChangedAck
-    pub fn update_known_server_state(&mut self, pos: BlockPos, state: BlockState) -> bool {
-        if let Some(s) = self.server_state.get_mut(&pos) {
-            s.block_state = state;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Settle every retained cell up to `seq`: write back the server's state where it differs
-    /// and, when the player's box meets a cell whose state changed, return the position the
-    /// player had when the cell was first retained (vanilla `ClientLevel#syncBlockState`:
-    /// `Entity#isColliding` then `absSnapTo`). The caller moves the player there.
-    ///
-    /// `player_box` is the player's box now; `None` skips the snap-back.
-    // Spec: specs/B6-placement-breaking.md §4.10 (write and roll back)
-    pub fn end_prediction_up_to(
-        &mut self,
-        seq: u32,
-        world: &World,
-        player_box: Option<&Aabb>,
-    ) -> Option<Vec3> {
-        self.acked_seq = self.acked_seq.max(seq);
-        // oldest first, so the newest prediction decides the snap when several cells collide
-        let mut settled: Vec<(BlockPos, ServerVerifiedState)> = self
-            .server_state
-            .iter()
-            .filter(|(_, s)| s.seq <= seq)
-            .map(|(p, s)| (*p, s.clone()))
-            .collect();
-        settled.sort_by_key(|(p, s)| (s.seq, p.x, p.y, p.z));
-        let mut snap = None;
-        for (pos, state) in settled {
-            self.server_state.remove(&pos);
-
-            // syncBlockState
-            let client_block_state = world.get_block_state(pos).unwrap_or_default();
-            let server_block_state = state.block_state;
-            if client_block_state == server_block_state {
-                continue;
-            }
-            world.set_block_state(pos, server_block_state);
-            if let Some(player_box) = player_box {
-                let cell = Vec3::new(pos.x as f64, pos.y as f64, pos.z as f64);
-                let colliding = server_block_state
-                    .collision_shape()
-                    .to_aabbs()
-                    .iter()
-                    .any(|b| b.move_relative(cell).intersects_aabb(player_box));
-                if colliding {
-                    snap = Some(state.player_pos);
-                }
+    world: &World,
+    player_box: Option<&Aabb>,
+) -> Option<Vec3> {
+    let mut snap = None;
+    for (pos, server_block_state, player_pos) in handler.settle_up_to(seq, world) {
+        if let Some(player_box) = player_box {
+            let cell = Vec3::new(pos.x as f64, pos.y as f64, pos.z as f64);
+            let colliding = server_block_state
+                .collision_shape()
+                .to_aabbs()
+                .iter()
+                .any(|b| b.move_relative(cell).intersects_aabb(player_box));
+            if colliding {
+                snap = Some(player_pos);
             }
         }
-        snap
     }
+    snap
 }
 
 /// An event that makes one of our clients simulate a right-click.
@@ -514,7 +414,7 @@ pub fn handle_entity_interact(
 /// The world, block position, and inventory are used for the adventure mode
 /// check.
 pub fn check_is_interaction_restricted(
-    world: &World,
+    world: &azalea_world::BotWorld,
     block_pos: BlockPos,
     game_mode: &GameMode,
     inventory: &Inventory,
@@ -527,7 +427,7 @@ pub fn check_is_interaction_restricted(
             let held_item = inventory.held_item();
             match &held_item {
                 ItemStack::Present(item) => {
-                    let block = world.chunks.get_block_state(block_pos);
+                    let block = world.get_block_state(block_pos);
                     let Some(block) = block else {
                         // block isn't loaded so just say that it is restricted
                         return true;
@@ -625,7 +525,7 @@ fn update_attributes_for_gamemode(
 mod prediction_tests {
     use azalea_core::position::ChunkPos;
     use azalea_registry::builtin::BlockKind;
-    use azalea_world::{Chunk, PartialChunkStorage};
+    use azalea_world::{BotWorld, Chunk, PartialChunkStorage};
 
     use super::*;
 
@@ -647,22 +547,45 @@ mod prediction_tests {
     fn far_box() -> Aabb {
         Aabb { min: Vec3::new(10.0, 64.0, 10.0), max: Vec3::new(10.6, 65.8, 10.6) }
     }
+    /// Predict `state` at `POS` the way the action systems do: retain what the bot shows, then
+    /// show the prediction to this bot only.
+    fn predict(h: &mut BlockStatePredictionHandler, world: &World, state: BlockState, at: Vec3) {
+        let old = BotWorld::new(world, h).get_block_state(POS).unwrap_or_default();
+        h.retain_known_server_state(POS, old, at);
+        h.set_predicted(POS, state);
+    }
+    fn shown(h: &BlockStatePredictionHandler, world: &World) -> Option<BlockState> {
+        BotWorld::new(world, h).get_block_state(POS)
+    }
 
     // Spec: specs/B6-placement-breaking.md §4.10 (write and roll back)
     #[test]
-    fn ack_with_the_same_state_keeps_the_prediction() {
+    fn a_prediction_is_shown_to_this_bot_only() {
+        let (world, _keep) = world();
+        let mut h = BlockStatePredictionHandler::default();
+        let other = BlockStatePredictionHandler::default();
+        h.start_predicting();
+        predict(&mut h, &world, stone(), Vec3::ZERO);
+        assert_eq!(shown(&h, &world), Some(stone()));
+        // the shared world and another bot's view still show the server's block
+        assert_eq!(world.get_block_state(POS), Some(BlockState::AIR));
+        assert_eq!(shown(&other, &world), Some(BlockState::AIR));
+    }
+
+    #[test]
+    fn ack_with_the_same_state_keeps_the_shown_block() {
         let (world, _keep) = world();
         let mut h = BlockStatePredictionHandler::default();
         let seq = h.start_predicting();
-        let old = world.set_block_state(POS, stone()).unwrap();
-        h.retain_known_server_state(POS, old, Vec3::ZERO);
-        // the server's update arrives while the cell is retained: known state only, world untouched
+        predict(&mut h, &world, stone(), Vec3::ZERO);
+        // the server's update arrives while the cell is retained: it writes the shared world and
+        // the retained state
+        world.set_block_state(POS, stone());
         assert!(h.update_known_server_state(POS, stone()));
-        assert_eq!(world.get_block_state(POS), Some(stone()));
-        assert_eq!(h.end_prediction_up_to(seq, &world, Some(&far_box())), None);
-        assert_eq!(world.get_block_state(POS), Some(stone()));
+        assert_eq!(end_prediction_up_to(&mut h, seq, &world, Some(&far_box())), None);
+        assert_eq!(shown(&h, &world), Some(stone()));
         assert_eq!(h.acked_seq(), seq);
-        // settled: the cell is not retained any more, so an update goes straight to the world
+        // settled: the cell is not retained any more
         assert!(!h.update_known_server_state(POS, dirt()));
     }
 
@@ -671,18 +594,17 @@ mod prediction_tests {
         let (world, _keep) = world();
         let mut h = BlockStatePredictionHandler::default();
         let seq = h.start_predicting();
-        let old = world.set_block_state(POS, stone()).unwrap();
-        h.retain_known_server_state(POS, old, Vec3::ZERO);
-        // no update came: the server refused, so the ack restores the old state
-        assert_eq!(h.end_prediction_up_to(seq, &world, Some(&far_box())), None);
-        assert_eq!(world.get_block_state(POS), Some(old));
+        predict(&mut h, &world, stone(), Vec3::ZERO);
+        // no update came: the server refused, so the ack drops the prediction
+        assert_eq!(end_prediction_up_to(&mut h, seq, &world, Some(&far_box())), None);
+        assert_eq!(shown(&h, &world), Some(BlockState::AIR));
         // the server put something else there before the ack
         let seq = h.start_predicting();
-        let old = world.set_block_state(POS, stone()).unwrap();
-        h.retain_known_server_state(POS, old, Vec3::ZERO);
+        predict(&mut h, &world, stone(), Vec3::ZERO);
+        world.set_block_state(POS, dirt());
         h.update_known_server_state(POS, dirt());
-        h.end_prediction_up_to(seq, &world, Some(&far_box()));
-        assert_eq!(world.get_block_state(POS), Some(dirt()));
+        end_prediction_up_to(&mut h, seq, &world, Some(&far_box()));
+        assert_eq!(shown(&h, &world), Some(dirt()));
     }
 
     #[test]
@@ -690,16 +612,14 @@ mod prediction_tests {
         let (world, _keep) = world();
         let mut h = BlockStatePredictionHandler::default();
         let s1 = h.start_predicting();
-        let old = world.set_block_state(POS, stone()).unwrap();
-        h.retain_known_server_state(POS, old, Vec3::ZERO);
+        predict(&mut h, &world, stone(), Vec3::ZERO);
         let s2 = h.start_predicting();
-        let old2 = world.set_block_state(POS, dirt()).unwrap();
-        h.retain_known_server_state(POS, old2, Vec3::new(9.0, 9.0, 9.0));
+        predict(&mut h, &world, dirt(), Vec3::new(9.0, 9.0, 9.0));
         // an ack for the first sequence leaves the cell retained (its sequence was refreshed)
-        h.end_prediction_up_to(s1, &world, None);
-        assert_eq!(world.get_block_state(POS), Some(dirt()));
-        h.end_prediction_up_to(s2, &world, None);
-        assert_eq!(world.get_block_state(POS), Some(old));
+        end_prediction_up_to(&mut h, s1, &world, None);
+        assert_eq!(shown(&h, &world), Some(dirt()));
+        end_prediction_up_to(&mut h, s2, &world, None);
+        assert_eq!(shown(&h, &world), Some(BlockState::AIR));
     }
 
     #[test]
@@ -708,18 +628,58 @@ mod prediction_tests {
         let mut h = BlockStatePredictionHandler::default();
         let seq = h.start_predicting();
         let before = Vec3::new(2.5, 66.0, 2.5);
-        // the server will say the cell is stone (it was air here), so the player at `before` is inside
-        let old = world.set_block_state(POS, BlockState::AIR).unwrap_or_default();
-        h.retain_known_server_state(POS, stone(), before);
-        let _ = old;
+        // the server says the cell is stone, the bot predicted air: the player at `before` is inside
+        world.set_block_state(POS, stone());
+        predict(&mut h, &world, BlockState::AIR, before);
         let inside = Aabb { min: Vec3::new(2.2, 64.2, 2.2), max: Vec3::new(2.8, 66.0, 2.8) };
-        assert_eq!(h.end_prediction_up_to(seq, &world, Some(&inside)), Some(before));
-        assert_eq!(world.get_block_state(POS), Some(stone()));
+        assert_eq!(end_prediction_up_to(&mut h, seq, &world, Some(&inside)), Some(before));
+        assert_eq!(shown(&h, &world), Some(stone()));
         // standing beside it: no snap
         let seq = h.start_predicting();
-        world.set_block_state(POS, BlockState::AIR);
-        h.retain_known_server_state(POS, stone(), before);
-        assert_eq!(h.end_prediction_up_to(seq, &world, Some(&far_box())), None);
-        assert_eq!(world.get_block_state(POS), Some(stone()));
+        predict(&mut h, &world, BlockState::AIR, before);
+        assert_eq!(end_prediction_up_to(&mut h, seq, &world, Some(&far_box())), None);
+        assert_eq!(shown(&h, &world), Some(stone()));
+    }
+
+    // Edge case a: this bot's chunk packet re-sent while a cell is pending (vanilla
+    // `ClientPacketListener#updateLevelChunk` replaces the chunk, so the packet's block wins).
+    #[test]
+    fn a_resent_chunk_turns_the_override_off_and_keeps_the_retained_state() {
+        let (world, _keep) = world();
+        let mut h = BlockStatePredictionHandler::default();
+        let seq = h.start_predicting();
+        predict(&mut h, &world, stone(), Vec3::ZERO);
+        h.clear_predictions_in_chunk(ChunkPos::new(0, 0));
+        assert_eq!(shown(&h, &world), Some(BlockState::AIR), "the packet's block wins");
+        // the retained state is still there for the ack
+        assert!(h.update_known_server_state(POS, BlockState::AIR));
+        end_prediction_up_to(&mut h, seq, &world, None);
+        assert!(!h.update_known_server_state(POS, BlockState::AIR));
+    }
+
+    // Edge case b: a cell in another chunk is not touched, and a forgotten chunk's cell is not
+    // shown again.
+    #[test]
+    fn clearing_one_chunk_leaves_other_chunks_alone() {
+        let (world, _keep) = world();
+        let mut h = BlockStatePredictionHandler::default();
+        h.start_predicting();
+        predict(&mut h, &world, stone(), Vec3::ZERO);
+        h.clear_predictions_in_chunk(ChunkPos::new(5, 5));
+        assert_eq!(shown(&h, &world), Some(stone()));
+        h.clear_predictions_in_chunk(ChunkPos::new(0, 0));
+        assert_eq!(shown(&h, &world), Some(BlockState::AIR));
+    }
+
+    // Edge case d (unit part): a new level starts with a new handler.
+    #[test]
+    fn reset_drops_pending_cells_and_the_sequence() {
+        let (world, _keep) = world();
+        let mut h = BlockStatePredictionHandler::default();
+        h.start_predicting();
+        predict(&mut h, &world, stone(), Vec3::ZERO);
+        h.reset();
+        assert_eq!(shown(&h, &world), Some(BlockState::AIR));
+        assert_eq!(h.seq(), 0);
     }
 }

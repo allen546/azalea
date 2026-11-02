@@ -20,6 +20,7 @@ use azalea_protocol::{
         },
     },
 };
+use azalea_registry::{DataRegistry, data::DimensionKind, identifier::Identifier};
 use azalea_registry::builtin::{BlockKind, EntityKind, ItemKind};
 use bevy_ecs::prelude::*;
 
@@ -85,10 +86,10 @@ fn a_placed_block_is_written_at_once_and_follows_the_server_after_the_ack() {
     insert(&mut s, PlaceBlockQueued { position: floor, direction: Direction::Up, auto_crouch: false });
     s.tick();
     assert_eq!(used_item_on(&sent), 1);
-    assert_eq!(s.get_block_state(target), Some(BlockKind::Dirt.into()), "written in the tick of the click");
+    assert_eq!(s.bot_block_state(target), Some(BlockKind::Dirt.into()), "written in the tick of the click");
     s.receive_packet(ClientboundBlockChangedAck { seq: 1 });
     s.tick();
-    assert_eq!(s.get_block_state(target), Some(BlockState::AIR), "rolled back to the server's state");
+    assert_eq!(s.bot_block_state(target), Some(BlockState::AIR), "rolled back to the server's state");
     let r = s.component::<BlockActionResults>().last_place.unwrap();
     assert_eq!(r.outcome, BlockActionOutcome::Refused);
     assert_eq!(r.refusal, None);
@@ -97,11 +98,11 @@ fn a_placed_block_is_written_at_once_and_follows_the_server_after_the_ack() {
     look_at(&mut s, floor, Direction::Up);
     insert(&mut s, PlaceBlockQueued { position: floor, direction: Direction::Up, auto_crouch: false });
     s.tick();
-    assert_eq!(s.get_block_state(target), Some(BlockKind::Dirt.into()));
+    assert_eq!(s.bot_block_state(target), Some(BlockKind::Dirt.into()));
     s.receive_packet(ClientboundBlockUpdate { pos: target, block_state: BlockKind::Dirt.into() });
     s.receive_packet(ClientboundBlockChangedAck { seq: 2 });
     s.tick();
-    assert_eq!(s.get_block_state(target), Some(BlockKind::Dirt.into()));
+    assert_eq!(s.bot_block_state(target), Some(BlockKind::Dirt.into()));
     assert_eq!(s.component::<BlockActionResults>().last_place.unwrap().outcome, BlockActionOutcome::Accepted);
 }
 
@@ -123,7 +124,7 @@ fn inside_the_movement_zone_a_place_that_cannot_be_predicted_is_refused_and_noth
     insert(&mut s, PlaceBlockQueued { position: floor, direction: Direction::Up, auto_crouch: false });
     s.tick();
     assert_eq!(used_item_on(&sent), 0);
-    assert_eq!(s.get_block_state(floor.up(1)), Some(BlockState::AIR));
+    assert_eq!(s.bot_block_state(floor.up(1)), Some(BlockState::AIR));
     let r = s.component::<BlockActionResults>().last_place.unwrap();
     assert_eq!((r.outcome, r.refusal), (BlockActionOutcome::Refused, Some(BlockActionRefusal::PlaceNotPredicted)));
     assert!(r.evidence.is_some(), "a refusal carries its evidence (patch 28)");
@@ -159,7 +160,7 @@ fn a_sneaking_bot_walks_onto_the_block_it_just_placed() {
     s.tick();
     let r = s.component::<BlockActionResults>().last_place.unwrap();
     assert_eq!((r.outcome, r.refusal), (BlockActionOutcome::Pending, None), "{r:?}");
-    assert_eq!(s.get_block_state(support.north(1)), Some(BlockKind::Dirt.into()));
+    assert_eq!(s.bot_block_state(support.north(1)), Some(BlockKind::Dirt.into()));
     // no server update yet: the bot still walks on, onto the block it wrote
     s.with_component_mut::<ClientMovementState>(|m| m.move_direction = WalkDirection::Backward);
     for _ in 0..40 {
@@ -285,4 +286,27 @@ fn a_place_goes_out_before_the_destroy_delay_swing_of_the_same_tick() {
     s.tick();
     let swings = sent.list.lock().iter().filter(|p| matches!(p, ServerboundGamePacket::Swing(_))).count();
     assert_eq!(swings, 1);
+}
+
+// Spec: specs/B6-placement-breaking.md §4.10 (a dimension change restarts the sequence)
+// A new `ClientLevel` restarts the sequence at 0. EXPECTED: a place pending at the respawn ends as
+// refused with `NoAck`, so the next ack (number 1 again) cannot settle it as acked.
+#[test]
+fn a_pending_place_ends_unacked_at_a_dimension_change_and_a_new_ack_does_not_settle_it() {
+    let _lock = init();
+    let floor = BlockPos::new(1, FLOOR_Y, 0);
+    let (mut s, _sent) = setup(&[BlockPos::new(0, FLOOR_Y, 0), floor], Vec3::new(0.5, 120., 0.5));
+    look_at(&mut s, floor, Direction::Up);
+    insert(&mut s, PlaceBlockQueued { position: floor, direction: Direction::Up, auto_crouch: false });
+    s.tick();
+    let old = s.component::<BlockActionResults>().last_place.unwrap();
+    assert_eq!((old.outcome, old.seq), (BlockActionOutcome::Pending, Some(1)));
+
+    s.receive_packet(make_basic_respawn_packet(DimensionKind::new_raw(0), Identifier::new("azalea:other")));
+    s.receive_packet(ClientboundBlockChangedAck { seq: 1 });
+    s.tick();
+    let r = s.component::<BlockActionResults>().block_result(old.id).unwrap();
+    assert_eq!(r.outcome, BlockActionOutcome::Refused);
+    assert_eq!(r.refusal, Some(BlockActionRefusal::NoAck));
+    assert_eq!(r.ack_ticks, None, "an ack of the new sequence is not the ack of the old action");
 }

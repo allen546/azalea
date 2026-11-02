@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 uuid.workspace = true
 
 [dependencies]
@@ -20,6 +21,10 @@ bevy_app.workspace = true
 bevy_ecs.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
+
+[[bench]]
+name = "collision_queries"
+harness = false
 
 [lints]
 workspace = true

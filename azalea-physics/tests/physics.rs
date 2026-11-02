@@ -505,7 +505,7 @@ fn test_falling_water_beside_a_wall_flows_down() {
     let flow_at = |pos: BlockPos| {
         let world = world_lock.read();
         let fluid = world.get_fluid_state(pos).unwrap();
-        azalea_physics::fluids::get_fluid_flow(&fluid, &world, pos)
+        azalea_physics::fluids::get_fluid_flow(&fluid, &azalea_world::BotWorld::truth(&world), pos)
     };
     let open = flow_at(pos);
     assert!(open.y == 0. && open.x < -0.9, "no wall: a plain horizontal flow, got {open:?}");
@@ -1099,4 +1099,50 @@ mod unloaded_chunk {
         assert_eq!(f(-64., -64), 0.0);
         assert_eq!(f(-100., -64), 0.0);
     }
+}
+
+// Patch 53. A bot's pending cell shows in its own collision query and in nobody else's.
+// EXPECTED: a box over a predicted stone meets one shape through the bot's view and none through
+// shared truth; a predicted air over real stone removes the shape for that bot only; a box far
+// from every pending cell takes the unchanged path and gets the same answer as shared truth.
+// Spec: specs/B6-placement-breaking.md §4.10
+#[test]
+fn collision_reads_the_bots_own_pending_cells() {
+    use azalea_block::BlockState;
+    use azalea_core::aabb::Aabb;
+    use azalea_physics::collision::world_collisions::get_block_collisions;
+    use azalea_world::{BlockStatePredictionHandler, BotWorld};
+
+    let mut world = World::default();
+    world.chunks = azalea_world::ChunkStorage::new(384, -64);
+    let mut partial = PartialWorld::default();
+    partial.chunks.set(&ChunkPos::new(0, 0), Some(Chunk::default()), &mut world.chunks);
+
+    let predicted = BlockPos::new(2, 63, 2);
+    let real = BlockPos::new(8, 63, 8);
+    world.chunks.set_block_state(real, BlockKind::Stone.into());
+    let over = |c: BlockPos| Aabb {
+        min: Vec3::new(c.x as f64 + 0.2, c.y as f64 + 0.9, c.z as f64 + 0.2),
+        max: Vec3::new(c.x as f64 + 0.8, c.y as f64 + 2.8, c.z as f64 + 0.8),
+    };
+
+    let mut a = BlockStatePredictionHandler::default();
+    a.start_predicting();
+    a.retain_known_server_state(predicted, BlockState::AIR, Vec3::ZERO);
+    a.set_predicted(predicted, BlockKind::Stone.into());
+    a.retain_known_server_state(real, BlockKind::Stone.into(), Vec3::ZERO);
+    a.set_predicted(real, BlockState::AIR);
+    let nothing = BlockStatePredictionHandler::default();
+
+    let mine = BotWorld::new(&world, &a);
+    let other = BotWorld::new(&world, &nothing);
+    assert_eq!(get_block_collisions(&mine, &over(predicted)).len(), 1, "A stands on its prediction");
+    assert_eq!(get_block_collisions(&other, &over(predicted)).len(), 0, "B does not");
+    assert_eq!(get_block_collisions(&mine, &over(real)).len(), 0, "A broke the real block");
+    assert_eq!(get_block_collisions(&other, &over(real)).len(), 1, "B still has it");
+    let far = BlockPos::new(14, 63, 14);
+    assert_eq!(
+        get_block_collisions(&mine, &over(far)).len(),
+        get_block_collisions(&other, &over(far)).len()
+    );
 }

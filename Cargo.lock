@@ -516,6 +516,7 @@ dependencies = [
  "azalea-world",
  "bevy_app",
  "bevy_ecs",
+ "criterion",
  "parking_lot",
  "tracing",
  "uuid",

@@ -46,7 +46,7 @@ use azalea_entity::{
     LoadedBy,
 };
 use azalea_registry::builtin::EntityKind;
-use azalea_world::ChunkStorage;
+use azalea_world::BlockView;
 use bevy_ecs::{prelude::*, query::QueryData, system::SystemParam};
 
 use crate::{
@@ -254,7 +254,7 @@ fn replaceable(state: BlockState, held: &str, replacing_clicked: bool, face: Dir
 
 /// The state a place writes, or why not. Follows `BlockItem#place` for a plain block item.
 // Spec: specs/B6-placement-breaking.md §4.10 (the placed state)
-pub fn predict_place(chunks: &ChunkStorage, req: &PlaceRequest) -> Verdict {
+pub fn predict_place(chunks: &impl BlockView, req: &PlaceRequest) -> Verdict {
     // MultiPlayerGameMode#performUseItemOn: spectators do nothing locally.
     match req.game_mode {
         GameMode::Spectator => return Verdict::Nothing("spectator: the client does nothing"),
@@ -371,7 +371,7 @@ pub enum ClientSwing {
 /// replaced, an unchanged state, a block that cannot survive there); a spectator gets `CONSUME`
 /// and an empty hand `PASS`, neither swings.
 // Spec: specs/B6-placement-breaking.md §4.10 (patch 48: the swing follows the client result)
-pub fn client_swing(chunks: &ChunkStorage, req: &PlaceRequest, verdict: &Verdict) -> ClientSwing {
+pub fn client_swing(chunks: &impl BlockView, req: &PlaceRequest, verdict: &Verdict) -> ClientSwing {
     match verdict {
         Verdict::Predict { .. } => ClientSwing::Yes,
         Verdict::Nothing(_) => ClientSwing::No,
@@ -387,7 +387,7 @@ pub fn client_swing(chunks: &ChunkStorage, req: &PlaceRequest, verdict: &Verdict
 /// A sapling is the one item outside the stage 1 families that the client result can be computed
 /// for: no collision (nothing obstructs it) and `VegetationBlock#canSurvive` wants a block of the
 /// `dirt` tag or farmland below the cell. `None` for any other item.
-fn sapling_place_succeeds(chunks: &ChunkStorage, req: &PlaceRequest) -> Option<bool> {
+fn sapling_place_succeeds(chunks: &impl BlockView, req: &PlaceRequest) -> Option<bool> {
     if !req.held.ends_with("_sapling") || req.has_block_state_component {
         return None;
     }
@@ -406,7 +406,7 @@ fn sapling_place_succeeds(chunks: &ChunkStorage, req: &PlaceRequest) -> Option<b
 /// neighbour that reacts (`updateShape`, stage 3) or a redstone-like block two cells away, with
 /// the cell inside the zone. Returns the cell.
 // Spec: specs/B6-placement-breaking.md §4.10 (neighbour shape updates are stage 3)
-pub fn reactive_neighbour_in_zone(chunks: &ChunkStorage, pos: BlockPos, zone: &Aabb) -> Option<BlockPos> {
+pub fn reactive_neighbour_in_zone(chunks: &impl BlockView, pos: BlockPos, zone: &Aabb) -> Option<BlockPos> {
     for dx in -1..=1 {
         for dy in -1..=1 {
             for dz in -1..=1 {
@@ -450,7 +450,7 @@ pub enum Decision {
 /// that cannot be computed is sent unpredicted. `cells` are the cells the place may touch (the
 /// clicked cell and the one beside it).
 // Spec: specs/B6-placement-breaking.md §4.10 (the safety rule)
-pub fn decide(chunks: &ChunkStorage, verdict: Verdict, cells: [BlockPos; 2], zone: &Aabb) -> Decision {
+pub fn decide(chunks: &impl BlockView, verdict: Verdict, cells: [BlockPos; 2], zone: &Aabb) -> Decision {
     match verdict {
         Verdict::Predict { pos, state } => match reactive_neighbour_in_zone(chunks, pos, zone) {
             Some(cell) => Decision::Refuse(PlaceRefusal::NeighbourReacts(cell)),

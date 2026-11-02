@@ -24,7 +24,7 @@ fn test_mine_block_rollback() {
         block_state: BlockKind::Tnt.into(),
     });
     simulation.tick();
-    assert_eq!(simulation.get_block_state(pos), Some(BlockKind::Tnt.into()));
+    assert_eq!(simulation.bot_block_state(pos), Some(BlockKind::Tnt.into()));
     println!("set serverside tnt");
 
     simulation.write_message(StartMiningBlockEvent {
@@ -33,12 +33,12 @@ fn test_mine_block_rollback() {
         force: true,
     });
     simulation.tick();
-    assert_eq!(simulation.get_block_state(pos), Some(BlockKind::Air.into()));
+    assert_eq!(simulation.bot_block_state(pos), Some(BlockKind::Air.into()));
     println!("set clientside air");
 
     // server didn't send the new block, so the change should be rolled back
     simulation.receive_packet(ClientboundBlockChangedAck { seq: 1 });
     simulation.tick();
-    assert_eq!(simulation.get_block_state(pos), Some(BlockKind::Tnt.into()));
+    assert_eq!(simulation.bot_block_state(pos), Some(BlockKind::Tnt.into()));
     println!("reset serverside tnt");
 }

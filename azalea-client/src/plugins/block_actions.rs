@@ -41,7 +41,7 @@ use azalea_registry::{
     builtin::{BlockKind, MenuKind},
     tags,
 };
-use azalea_world::ChunkStorage;
+use azalea_world::{BlockView, BotWorld};
 use std::collections::VecDeque;
 
 use bevy_app::{App, Plugin};
@@ -439,6 +439,29 @@ impl BlockActionResults {
         }
     }
 
+    // Spec: specs/B6-placement-breaking.md §4.10 (a dimension change restarts the sequence)
+    /// The prediction handler was reset (new dimension): the sequence restarts at 0, so an ack
+    /// can no longer cover a sent action. End every pending sent place and break as refused with
+    /// `NoAck`, and every pending use as `NoScreen`, so a new ack never settles an old result.
+    pub fn end_unacked_after_reset(&mut self) {
+        let blocks = [self.last_place.as_mut(), self.last_break.as_mut()]
+            .into_iter()
+            .flatten()
+            .chain(self.older_blocks.iter_mut().map(|(_, r)| r));
+        for r in blocks {
+            if r.outcome == BlockActionOutcome::Pending && r.seq.is_some() {
+                r.outcome = BlockActionOutcome::Refused;
+                r.refusal = Some(BlockActionRefusal::NoAck);
+            }
+        }
+        let uses = self.last_use.as_mut().into_iter().chain(self.older_uses.iter_mut());
+        for r in uses {
+            if r.outcome == UseBlockOutcome::Pending && r.seq.is_some() {
+                r.outcome = UseBlockOutcome::NoScreen;
+            }
+        }
+    }
+
     fn keep_older(&mut self, is_break: bool, mut old: BlockActionResult) {
         // Not sent yet: nothing will ever settle it.
         if old.outcome == BlockActionOutcome::Pending && old.seq.is_none() {
@@ -576,14 +599,15 @@ pub fn handle_look_at_block_queued(
         &Position,
         &EntityDimensions,
         &Attributes,
+        &BlockStatePredictionHandler,
     )>,
 ) {
-    for (entity, queued, mut look, world, position, dims, attrs) in &mut query {
+    for (entity, queued, mut look, world, position, dims, attrs, pending) in &mut query {
         commands.entity(entity).remove::<LookAtBlockQueued>();
         let eye = position.up(dims.eye_height.into());
         let range = attrs.block_interaction_range.calculate();
         let world = world.shared.read();
-        if let Some(aim) = aim_at_block(&world.chunks, eye, range, *look, queued.position, queued.direction) {
+        if let Some(aim) = aim_at_block(&BotWorld::new(&world, pending), eye, range, *look, queued.position, queued.direction) {
             look.update(aim);
         }
     }
@@ -594,7 +618,7 @@ pub fn handle_look_at_block_queued(
 /// points of each outline box's faces (middle first, kept just inside the box so rounding cannot
 /// slip past it) and keeps the first whose real ray, interaction shape included, lands there.
 pub fn aim_at_block(
-    chunks: &ChunkStorage,
+    chunks: &impl BlockView,
     eye: Vec3,
     range: f64,
     current: LookDirection,
@@ -768,6 +792,8 @@ pub fn handle_place_block_queued(
     ) in &mut query
     {
         let world = world.shared.read();
+        // this bot's view: shared server data plus its own pending cells
+        let bot = BotWorld::new(&world, &prediction);
         // What the checks below see, kept for a refusal (patch 28).
         let look_after_hit = look.last_changed().is_newer_than(hit_result.last_changed(), ticks.this_run());
         let evidence = |mv: &ClientMovementState, look: LookDirection| {
@@ -782,7 +808,7 @@ pub fn handle_place_block_queued(
                 &entities,
             )
         };
-        let clicked = world.get_block_state(queued.position).unwrap_or_default();
+        let clicked = bot.get_block_state(queued.position).unwrap_or_default();
         // Crouch handling: a standing click on a block that uses the click would use it, not place.
         if !holding
             && hands_loaded(inv)
@@ -797,7 +823,7 @@ pub fn handle_place_block_queued(
                 let crouched_eye = position.up(CROUCH_EYE_HEIGHT);
                 let range = attrs.block_interaction_range.calculate();
                 if let Some(aim) =
-                    aim_at_block(&world.chunks, crouched_eye, range, *look, queued.position, Some(queued.direction))
+                    aim_at_block(&bot, crouched_eye, range, *look, queued.position, Some(queued.direction))
                 {
                     look.update(aim);
                 }
@@ -858,7 +884,7 @@ pub fn handle_place_block_queued(
         } else {
             queued.position.offset_with_direction(queued.direction)
         };
-        let before = world.get_block_state(target).unwrap_or_default();
+        let before = bot.get_block_state(target).unwrap_or_default();
         results.next_id += 1;
         let mut result = BlockActionResult {
             id: results.next_id,
@@ -903,15 +929,15 @@ pub fn handle_place_block_queued(
                             sent_yaw: cx.sent_yaw,
                             obstacles: &cx.obstacles,
                         };
-                        let verdict = predict_place(&world.chunks, &request);
+                        let verdict = predict_place(&bot, &request);
                         // the old target rule and stage 1 must agree on the cell
                         let verdict = match verdict {
                             Verdict::Predict { pos, .. } if pos != target => Verdict::Unknown(UnknownWhy::ReplaceRule),
                             v => v,
                         };
                         tracing::debug!(?verdict, "place prediction");
-                        swing = client_swing(&world.chunks, &request, &verdict) != ClientSwing::No;
-                        decide(&world.chunks, verdict, cells, &cx.zone)
+                        swing = client_swing(&bot, &request, &verdict) != ClientSwing::No;
+                        decide(&bot, verdict, cells, &cx.zone)
                     }
                     // the bot is not fully set up: predict nothing, refuse nothing (as before)
                     None => Decision::Send { write: None },
@@ -931,10 +957,12 @@ pub fn handle_place_block_queued(
                 let seq = prediction.start_predicting();
                 result.seq = Some(seq);
                 // `ClientLevel#setBlock` while predicting: retain the server's state, then write
+                // Null: the prediction goes into this bot's own handler, never the shared world (patch 53).
                 if let Decision::Send { write: Some((pos, state)) } = decision
-                    && let Some(old) = world.set_block_state(pos, state)
+                    && let Some(old) = BotWorld::new(&world, &prediction).get_block_state(pos)
                 {
                     prediction.retain_known_server_state(pos, old, **position);
+                    prediction.set_predicted(pos, state);
                 }
                 commands.trigger(SendGamePacketEvent::new(
                     entity,
@@ -1031,7 +1059,7 @@ pub fn handle_use_block_queued(
     {
         commands.entity(entity).remove::<UseBlockQueued>();
         let world = world.shared.read();
-        let state = world.get_block_state(queued.position).unwrap_or_default();
+        let state = BotWorld::new(&world, &prediction).get_block_state(queued.position).unwrap_or_default();
         let eye = position.up(dims.eye_height.into());
         let range = attrs.block_interaction_range.calculate();
         // Vanilla places the held item instead of using the block when crouching with either hand
@@ -1106,6 +1134,7 @@ pub fn begin_break_result(
             Entity,
             &MiningQueued,
             &mut BlockActionResults,
+            &BlockStatePredictionHandler,
             &WorldHolder,
             &Position,
             &EntityDimensions,
@@ -1125,6 +1154,7 @@ pub fn begin_break_result(
         entity,
         queued,
         mut results,
+        prediction,
         world,
         position,
         dims,
@@ -1142,7 +1172,7 @@ pub fn begin_break_result(
             continue;
         }
         let world = world.shared.read();
-        let state = world.get_block_state(queued.position).unwrap_or_default();
+        let state = BotWorld::new(&world, &prediction).get_block_state(queued.position).unwrap_or_default();
         let eye = position.up(dims.eye_height.into());
         let range = attrs.block_interaction_range.calculate();
         results.next_id += 1;
@@ -1159,7 +1189,7 @@ pub fn begin_break_result(
             before: state,
         };
         // mining.rs drops a restricted break silently; say so
-        let refusal = if check_is_interaction_restricted(&world, queued.position, &mode.current, inv) {
+        let refusal = if check_is_interaction_restricted(&BotWorld::new(&world, &prediction), queued.position, &mode.current, inv) {
             Some(BlockActionRefusal::NotAllowed)
         } else if let Some(why) = checked
             .then(|| check_click(eye, range, queued.position, None, state.outline_shape(), &hit_result).err())
@@ -1325,7 +1355,7 @@ pub fn settle_block_actions(
     mut finished: MessageWriter<BlockActionFinished>,
 ) {
     for (entity, mut results, prediction, world, mining, queued) in &mut query {
-        let block_at = |p: BlockPos| world.shared.read().get_block_state(p).unwrap_or_default();
+        let block_at = |p: BlockPos| BotWorld::new(&world.shared.read(), prediction).get_block_state(p).unwrap_or_default();
         for (is_break, result) in results.settle(prediction.acked_seq(), mining || queued, &block_at) {
             finished.write(BlockActionFinished { entity, is_break, result });
         }
