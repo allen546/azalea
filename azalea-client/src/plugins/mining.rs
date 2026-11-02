@@ -62,6 +62,13 @@ impl Plugin for MiningPlugin {
                     .after(crate::interact::pick::insert_initial_hit_result_component)
                     .after(crate::attack::handle_attack_event),
             )
+            .add_systems(
+                GameTick,
+                swing_in_mine_delay
+                    .after(crate::item_use::handle_swap_offhand_queued)
+                    .before(crate::item_use::tick_item_in_use)
+                    .before(PhysicsSystems),
+            )
             .add_observer(handle_finish_mining_block_observer);
     }
 }
@@ -598,28 +605,48 @@ pub struct SkipStartTickProgress;
 // Spec: specs/plans/VANILLA_DIFF_PLAN.md VD2 (patch 47: `Minecraft#continueAttack` swings while the delay counts)
 /// `MultiPlayerGameMode#continueDestroyBlock` counts `destroyDelay` down and returns true while the
 /// attack key is held on a block that is not air, and `Minecraft#continueAttack` then calls
-/// `LocalPlayer#swing`: one `Swing` per delay tick. Not while an item is in use (`continueAttack`
-/// does nothing then). Grim checks that must still pass: `NoSwingBreak` (a break
-/// needs a swing in its tick) and the packet-order checks (`PacketOrderB`, `Post`): the swing
-/// goes out where the other mining swings do, before the position packet.
+/// `LocalPlayer#swing`: one `Swing` per delay tick. This system counts the delay down, in the
+/// mining chain, and marks the tick; [`swing_in_mine_delay`] sends the swing (patch 50).
 pub fn decrement_mine_delay(
     mut commands: Commands,
-    mut query: Query<(Entity, &mut MineDelay, &HitResultComponent, &WorldName, Has<crate::movement::ItemInUse>)>,
-    worlds: Res<Worlds>,
+    mut query: Query<(Entity, &mut MineDelay)>,
 ) {
-    for (entity, mut mine_delay, hit_result, world_name, using) in &mut query {
+    for (entity, mut mine_delay) in &mut query {
         if **mine_delay > 0 {
             crate::input_log::hold_attack(entity);
             **mine_delay -= 1;
-            let on_block = hit_result.as_block_hit_result_if_not_miss().is_some_and(|hit| {
-                worlds
-                    .get(world_name)
-                    .and_then(|w| w.read().get_block_state(hit.block_pos))
-                    .is_some_and(|state| !state.is_air())
-            });
-            if on_block && !using {
-                commands.trigger(SwingArmEvent { entity });
-            }
+            commands.entity(entity).insert(MineDelayTicked);
+        }
+    }
+}
+
+/// Set by [`decrement_mine_delay`] in a tick that counted the destroy delay down.
+#[derive(Component, Debug)]
+pub struct MineDelayTicked;
+
+// Spec: specs/B6-placement-breaking.md §4.10 (patch 50: the order of the delay swing in one tick)
+/// The swing of `Minecraft#continueAttack`. `Minecraft#handleKeybinds` runs `startUseItem` before
+/// `continueAttack`, so a use click of the same tick (`UseItemOn` and its swing, or `UseItem`)
+/// goes out first and the delay swing after it. Runs after every use handler and before the item
+/// in use ticks. Not while an item is in use (`continueAttack` does nothing then), checked here
+/// after the use click could have started one. Grim checks that must still pass: `NoSwingBreak`
+/// (a break needs a swing in its tick) and the packet-order checks (`PacketOrderB`, `Post`): the
+/// swing still goes out before the position packet.
+pub fn swing_in_mine_delay(
+    mut commands: Commands,
+    query: Query<(Entity, &HitResultComponent, &WorldName, Has<crate::movement::ItemInUse>), With<MineDelayTicked>>,
+    worlds: Res<Worlds>,
+) {
+    for (entity, hit_result, world_name, using) in &query {
+        commands.entity(entity).remove::<MineDelayTicked>();
+        let on_block = hit_result.as_block_hit_result_if_not_miss().is_some_and(|hit| {
+            worlds
+                .get(world_name)
+                .and_then(|w| w.read().get_block_state(hit.block_pos))
+                .is_some_and(|state| !state.is_air())
+        });
+        if on_block && !using {
+            commands.trigger(SwingArmEvent { entity });
         }
     }
 }

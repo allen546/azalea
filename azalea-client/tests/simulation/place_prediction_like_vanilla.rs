@@ -254,3 +254,35 @@ fn an_armor_stand_in_the_cell_blocks_the_place_unless_it_is_a_marker() {
     place_far(&mut s);
     assert_eq!((used_item_on(&sent), swings(&sent)), (1, 1), "marker: the place succeeds, swing");
 }
+
+// Spec: specs/B6-placement-breaking.md §4.10 (patch 50: the order of the delay swing in one tick)
+#[test]
+fn a_place_goes_out_before_the_destroy_delay_swing_of_the_same_tick() {
+    use azalea_client::mining::MineDelay;
+    let _lock = init();
+    let floor = BlockPos::new(1, FLOOR_Y, 0);
+    let (mut s, sent) = setup(&[BlockPos::new(0, FLOOR_Y, 0), floor], Vec3::new(0.5, 120., 0.5));
+    look_at(&mut s, floor, Direction::Up);
+    // the destroy delay of a break that just ended is counting down, the crosshair is on stone
+    s.with_component_mut::<MineDelay>(|mut d| **d = 3);
+    sent.clear();
+    insert(&mut s, PlaceBlockQueued { position: floor, direction: Direction::Up, auto_crouch: false });
+    s.tick();
+    // `Minecraft#handleKeybinds`: `startUseItem` (UseItemOn, its swing), then `continueAttack` (the delay swing)
+    let kinds: Vec<&str> = sent
+        .list
+        .lock()
+        .iter()
+        .filter_map(|p| match p {
+            ServerboundGamePacket::UseItemOn(_) => Some("UseItemOn"),
+            ServerboundGamePacket::Swing(_) => Some("Swing"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kinds, ["UseItemOn", "Swing", "Swing"]);
+    // and the delay swing still comes in a tick with no click
+    sent.clear();
+    s.tick();
+    let swings = sent.list.lock().iter().filter(|p| matches!(p, ServerboundGamePacket::Swing(_))).count();
+    assert_eq!(swings, 1);
+}
