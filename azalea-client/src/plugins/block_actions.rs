@@ -17,7 +17,7 @@
 //!
 //! [`ClientboundBlockChangedAck`]: azalea_protocol::packets::game::ClientboundBlockChangedAck
 
-use azalea_block::BlockState;
+use azalea_block::{BlockState, PlaceFamily, place_family};
 use azalea_core::{
     direction::Direction,
     entity_id::MinecraftEntityId,
@@ -73,7 +73,7 @@ use crate::{
 pub(crate) const CROUCH_EYE_HEIGHT: f64 = 1.27;
 
 /// Without an ack this many ticks after the action was sent, it is judged on the block alone.
-const ACK_TIMEOUT_TICKS: u32 = 60;
+pub const ACK_TIMEOUT_TICKS: u32 = 60;
 
 // Spec: specs/B6-placement-breaking.md §4.6 (acknowledgement and readback of block actions)
 pub struct BlockActionsPlugin;
@@ -146,6 +146,7 @@ pub fn refuse_block_actions_while_dead(
             ack_ticks: None,
             elapsed_ticks: 0,
             before: BlockState::default(),
+            place_kind: None,
         };
         if let Some(q) = break_q {
             results.next_id += 1;
@@ -188,10 +189,11 @@ pub fn refuse_block_actions_while_dead(
 pub enum BlockActionOutcome {
     /// Sent; the server's answer has not been read yet.
     Pending,
-    /// The server acknowledged it and the block is as intended.
+    /// The server acknowledged it and the cell holds what the action leaves.
     Accepted,
     /// The client's own checks refused it (nothing sent, see `refusal`), or the server acknowledged
-    /// it and the block is unchanged, or no answer came in time (`refusal` is `NoAck`).
+    /// it and the block is unchanged, or the cell holds another block (`OtherBlock`), or no answer
+    /// came in time (`NoAck`).
     Refused,
     /// A break that was aborted: by [`StopMiningQueued`], or mining ended without finishing.
     Cancelled,
@@ -208,8 +210,10 @@ pub enum BlockActionRefusal {
     NotLookingAtIt,
     /// Breaking is not allowed here (adventure mode without CanDestroy, spectator).
     NotAllowed,
-    /// Sent, but no acknowledgement came within [`ACK_TIMEOUT_TICKS`] and the block did not change.
+    /// Sent, but no acknowledgement came within [`ACK_TIMEOUT_TICKS`]; the block is not judged.
     NoAck,
+    /// Acknowledged, but the cell holds a block this action does not leave: another actor changed it.
+    OtherBlock,
     /// Crouching with an item in hand: a vanilla right-click would place the item, not use the block.
     CrouchingWithItem,
     /// A screen is open; a vanilla client has no crosshair then.
@@ -250,6 +254,7 @@ impl BlockActionRefusal {
             Self::NotLookingAtIt => "crosshair does not hit it",
             Self::NotAllowed => "breaking not allowed in this game mode",
             Self::NoAck => "no ack",
+            Self::OtherBlock => "the cell holds another block",
             Self::CrouchingWithItem => "crouching with an item in hand would place it",
             Self::ScreenOpen => "a screen is open",
             Self::Busy => "mining or using an item",
@@ -358,6 +363,9 @@ pub struct BlockActionResult {
     pub elapsed_ticks: u32,
     /// The target block's state when we clicked.
     before: BlockState,
+    /// Place only: the block kind the item leaves, for a family place prediction knows. `None`:
+    /// not known, so any change from `before` counts (B6 §4.10 stages 2 and 3).
+    place_kind: Option<BlockKind>,
 }
 
 // Spec: specs/B6-placement-breaking.md §4.6 (acknowledgement and readback)
@@ -843,6 +851,7 @@ pub fn handle_place_block_queued(
                 ack_ticks: None,
                 elapsed_ticks: 0,
                 before: clicked,
+                place_kind: None,
             };
             finished.write(BlockActionFinished { entity, is_break: false, result });
             results.set_place(result);
@@ -897,6 +906,7 @@ pub fn handle_place_block_queued(
             ack_ticks: None,
             elapsed_ticks: 0,
             before,
+            place_kind: held.parse().ok().filter(|&k| place_family(k) != PlaceFamily::Unknown),
         };
         match checked {
             Err(why) => {
@@ -1187,6 +1197,7 @@ pub fn begin_break_result(
             ack_ticks: None,
             elapsed_ticks: 0,
             before: state,
+            place_kind: None,
         };
         // mining.rs drops a restricted break silently; say so
         let refusal = if check_is_interaction_restricted(&BotWorld::new(&world, &prediction), queued.position, &mode.current, inv) {
@@ -1273,14 +1284,48 @@ pub fn handle_stop_mining_queued(
     }
 }
 
+/// A sent place that has not settled: what a break of the same cell must allow for.
+#[derive(Clone, Copy)]
+struct PlaceInFlight {
+    seq: u32,
+    position: BlockPos,
+    kind: Option<BlockKind>,
+}
+
+// Spec: specs/B6-placement-breaking.md §4.6 (settle from the ack and the block left behind)
+/// Whether the item for block `kind` can leave `cell`. Sponges change in the tick they are placed:
+/// `SpongeBlock#onPlace` absorbs water, `WetSpongeBlock#onPlace` dries where water evaporates.
+fn place_leaves(kind: BlockKind, cell: BlockKind) -> bool {
+    cell == kind || matches!((kind, cell), (BlockKind::Sponge, BlockKind::WetSponge) | (BlockKind::WetSponge, BlockKind::Sponge))
+}
+
+// Spec: specs/B6-placement-breaking.md §4.6 (settle from the ack and the block left behind)
+/// Whether `cell` is what the action leaves. A break leaves air, or the fluid the block held
+/// (`Level#removeBlock`; `IceBlock#playerDestroy` leaves water); a place leaves the item's block.
+fn leaves(r: &BlockActionResult, is_break: bool, cell: BlockState) -> bool {
+    if cell == r.before {
+        return false;
+    }
+    if is_break {
+        // Not `BlockState::is_air`: it is false for cave and void air.
+        return matches!(
+            BlockKind::from(cell),
+            BlockKind::Air | BlockKind::CaveAir | BlockKind::VoidAir | BlockKind::Water | BlockKind::Lava | BlockKind::BubbleColumn
+        );
+    }
+    r.place_kind.is_none_or(|k| place_leaves(k, BlockKind::from(cell)))
+}
+
 // Spec: specs/B6-placement-breaking.md §4.6 (settle from the ack and the block left behind)
 /// One tick for a pending place or break that has been sent: counts, and settles it when the ack
 /// covers its sequence number (vanilla `BlockStatePredictionHandler#endPredictionsUpTo` settles
 /// every prediction up to the acked number at once) or the timeout passed. True when it settled.
 fn settle_sent_block(
     r: &mut BlockActionResult,
+    is_break: bool,
     acked_seq: u32,
-    block_at: &dyn Fn(BlockPos) -> BlockState,
+    places: &[PlaceInFlight],
+    block_at: &dyn Fn(BlockPos) -> Option<BlockState>,
 ) -> bool {
     let Some(seq) = r.seq else { return false };
     r.elapsed_ticks += 1;
@@ -1288,18 +1333,33 @@ fn settle_sent_block(
     if acked && r.ack_ticks.is_none() {
         r.ack_ticks = Some(r.elapsed_ticks);
     }
-    if !(acked || r.elapsed_ticks > ACK_TIMEOUT_TICKS) {
-        return false;
-    }
-    r.outcome = if block_at(r.position) != r.before {
-        BlockActionOutcome::Accepted
-    } else {
-        // a timeout is not the server saying no
-        if !acked {
-            r.refusal = Some(BlockActionRefusal::NoAck);
+    if !acked {
+        if r.elapsed_ticks <= ACK_TIMEOUT_TICKS {
+            return false;
         }
-        BlockActionOutcome::Refused
-    };
+        // No word from the server. A timeout is not the server saying no, but the bot cannot call
+        // it done: the block it would read may be its own prediction.
+        r.outcome = BlockActionOutcome::Refused;
+        r.refusal = Some(BlockActionRefusal::NoAck);
+        return true;
+    }
+    // An unloaded cell cannot confirm anything: it counts as unchanged.
+    let cell = block_at(r.position).unwrap_or(r.before);
+    // One ack can cover this break and a later place of ours in the same cell: the cell then
+    // shows the place, and a place there can only have worked if the break did.
+    let replaced_by_us = is_break
+        && cell != r.before
+        && places.iter().any(|p| {
+            p.position == r.position && p.seq > seq && p.seq <= acked_seq && p.kind.is_none_or(|k| place_leaves(k, BlockKind::from(cell)))
+        });
+    if leaves(r, is_break, cell) || replaced_by_us {
+        r.outcome = BlockActionOutcome::Accepted;
+    } else {
+        r.outcome = BlockActionOutcome::Refused;
+        if cell != r.before {
+            r.refusal = Some(BlockActionRefusal::OtherBlock);
+        }
+    }
     true
 }
 
@@ -1312,12 +1372,21 @@ impl BlockActionResults {
         &mut self,
         acked_seq: u32,
         mining: bool,
-        block_at: &dyn Fn(BlockPos) -> BlockState,
+        block_at: &dyn Fn(BlockPos) -> Option<BlockState>,
     ) -> Vec<(bool, BlockActionResult)> {
         let mut done = Vec::new();
+        let places: Vec<PlaceInFlight> = self
+            .older_blocks
+            .iter()
+            .filter(|(is_break, _)| !is_break)
+            .map(|(_, r)| r)
+            .chain(self.last_place.iter())
+            .filter(|r| r.outcome == BlockActionOutcome::Pending)
+            .filter_map(|r| Some(PlaceInFlight { seq: r.seq?, position: r.position, kind: r.place_kind }))
+            .collect();
         // Older results first: they were sent first.
         for (is_break, r) in self.older_blocks.iter_mut() {
-            if r.outcome == BlockActionOutcome::Pending && settle_sent_block(r, acked_seq, block_at) {
+            if r.outcome == BlockActionOutcome::Pending && settle_sent_block(r, *is_break, acked_seq, &places, block_at) {
                 done.push((*is_break, *r));
             }
         }
@@ -1333,7 +1402,7 @@ impl BlockActionResults {
                     r.outcome = BlockActionOutcome::Cancelled;
                     done.push((is_break, *r));
                 }
-            } else if settle_sent_block(r, acked_seq, block_at) {
+            } else if settle_sent_block(r, is_break, acked_seq, &places, block_at) {
                 done.push((is_break, *r));
             }
         }
@@ -1355,7 +1424,8 @@ pub fn settle_block_actions(
     mut finished: MessageWriter<BlockActionFinished>,
 ) {
     for (entity, mut results, prediction, world, mining, queued) in &mut query {
-        let block_at = |p: BlockPos| BotWorld::new(&world.shared.read(), prediction).get_block_state(p).unwrap_or_default();
+        // The server's data, not the bot's view: the view can hold a later prediction of this bot.
+        let block_at = |p: BlockPos| world.shared.read().get_block_state(p);
         for (is_break, result) in results.settle(prediction.acked_seq(), mining || queued, &block_at) {
             finished.write(BlockActionFinished { entity, is_break, result });
         }
@@ -1514,6 +1584,7 @@ mod tests {
             ack_ticks: None,
             elapsed_ticks: 0,
             before: BlockState::from(BlockKind::Netherrack),
+            place_kind: None,
         };
         if is_break { results.set_break(r) } else { results.set_place(r) }
         r.id
@@ -1525,7 +1596,7 @@ mod tests {
 
     #[test]
     fn one_ack_settles_every_older_in_flight_break() {
-        let air = |_: BlockPos| BlockState::AIR;
+        let air = |_: BlockPos| Some(BlockState::AIR);
         let mut results = BlockActionResults::default();
         // Three instant breaks on consecutive ticks, none acked: each replaces the last record.
         let ids: Vec<u32> = (1..=3).map(|n| sent(&mut results, true, n, n as i32)).collect();
@@ -1551,7 +1622,7 @@ mod tests {
     fn a_cumulative_ack_covers_places_and_breaks_together_and_judges_each_block() {
         // Place at x=1 stays unchanged (server refused), break at x=2 changes.
         let world = |p: BlockPos| {
-            if p.x == 2 { BlockState::AIR } else { BlockState::from(BlockKind::Netherrack) }
+            Some(if p.x == 2 { BlockState::AIR } else { BlockState::from(BlockKind::Netherrack) })
         };
         let mut results = BlockActionResults::default();
         let p1 = sent(&mut results, false, 1, 1);
@@ -1565,9 +1636,96 @@ mod tests {
         assert_eq!(outcome(&results, p2), BlockActionOutcome::Refused);
     }
 
+    /// One sent result and an ack for it, with the cell holding `cell` (`None`: unloaded).
+    fn judged(is_break: bool, place_kind: Option<BlockKind>, cell: Option<BlockKind>) -> BlockActionResult {
+        let mut results = BlockActionResults::default();
+        let id = sent(&mut results, is_break, 1, 1);
+        if !is_break {
+            results.last_place.as_mut().unwrap().place_kind = place_kind;
+        }
+        let at = move |_: BlockPos| cell.map(BlockState::from);
+        assert_eq!(results.settle(1, false, &at).len(), 1);
+        results.block_result(id).unwrap()
+    }
+
+    #[test]
+    fn an_acked_break_that_left_another_block_is_refused() {
+        let r = judged(true, None, Some(BlockKind::Bedrock));
+        assert_eq!(r.outcome, BlockActionOutcome::Refused);
+        assert_eq!(r.refusal, Some(BlockActionRefusal::OtherBlock));
+    }
+
+    #[test]
+    fn an_acked_break_may_leave_air_or_the_fluid() {
+        for kind in [BlockKind::Air, BlockKind::CaveAir, BlockKind::Water, BlockKind::Lava] {
+            assert_eq!(judged(true, None, Some(kind)).outcome, BlockActionOutcome::Accepted, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn an_acked_break_of_an_unloaded_cell_is_not_done() {
+        let r = judged(true, None, None);
+        assert_eq!(r.outcome, BlockActionOutcome::Refused);
+        assert_eq!(r.refusal, None);
+    }
+
+    #[test]
+    fn an_acked_place_is_judged_by_the_kind_when_it_is_known() {
+        let good = judged(false, Some(BlockKind::Dirt), Some(BlockKind::Dirt));
+        assert_eq!(good.outcome, BlockActionOutcome::Accepted);
+        let bad = judged(false, Some(BlockKind::Dirt), Some(BlockKind::Bedrock));
+        assert_eq!(bad.outcome, BlockActionOutcome::Refused);
+        assert_eq!(bad.refusal, Some(BlockActionRefusal::OtherBlock));
+        // An unknown family (a torch can leave a wall torch): any change counts, a known gap.
+        assert_eq!(judged(false, None, Some(BlockKind::WallTorch)).outcome, BlockActionOutcome::Accepted);
+    }
+
+    #[test]
+    fn a_sponge_may_leave_its_wet_or_dry_twin() {
+        assert_eq!(judged(false, Some(BlockKind::Sponge), Some(BlockKind::WetSponge)).outcome, BlockActionOutcome::Accepted);
+        assert_eq!(judged(false, Some(BlockKind::WetSponge), Some(BlockKind::Sponge)).outcome, BlockActionOutcome::Accepted);
+        assert_eq!(judged(false, Some(BlockKind::Sponge), Some(BlockKind::Dirt)).outcome, BlockActionOutcome::Refused);
+    }
+
+    #[test]
+    fn a_timeout_is_refused_even_when_the_view_shows_the_prediction() {
+        // The bot's own predicted air, no ack: the old rule read this as a done break.
+        let air = |_: BlockPos| Some(BlockState::AIR);
+        let mut results = BlockActionResults::default();
+        let id = sent(&mut results, true, 1, 1);
+        for _ in 0..=ACK_TIMEOUT_TICKS {
+            results.settle(0, false, &air);
+        }
+        let r = results.block_result(id).unwrap();
+        assert_eq!(r.outcome, BlockActionOutcome::Refused);
+        assert_eq!(r.refusal, Some(BlockActionRefusal::NoAck));
+    }
+
+    #[test]
+    fn a_break_and_a_later_place_in_one_cell_under_one_ack_are_both_done() {
+        let dirt = |_: BlockPos| Some(BlockState::from(BlockKind::Dirt));
+        let mut results = BlockActionResults::default();
+        let b = sent(&mut results, true, 1, 1);
+        let p = sent(&mut results, false, 2, 1);
+        results.last_place.as_mut().unwrap().place_kind = Some(BlockKind::Dirt);
+        assert_eq!(results.settle(2, false, &dirt).len(), 2);
+        assert_eq!(outcome(&results, b), BlockActionOutcome::Accepted);
+        assert_eq!(outcome(&results, p), BlockActionOutcome::Accepted);
+    }
+
+    #[test]
+    fn a_later_place_not_yet_acked_does_not_excuse_a_break() {
+        let bedrock = |_: BlockPos| Some(BlockState::from(BlockKind::Bedrock));
+        let mut results = BlockActionResults::default();
+        let b = sent(&mut results, true, 1, 1);
+        let _p = sent(&mut results, false, 2, 1);
+        assert_eq!(results.settle(1, false, &bedrock).len(), 1);
+        assert_eq!(outcome(&results, b), BlockActionOutcome::Refused);
+    }
+
     #[test]
     fn a_replaced_in_flight_result_times_out_without_an_ack() {
-        let same = |_: BlockPos| BlockState::from(BlockKind::Netherrack);
+        let same = |_: BlockPos| Some(BlockState::from(BlockKind::Netherrack));
         let mut results = BlockActionResults::default();
         let a = sent(&mut results, false, 1, 1);
         let _b = sent(&mut results, false, 2, 2);
@@ -1581,7 +1739,7 @@ mod tests {
 
     #[test]
     fn a_break_replaced_before_it_sent_is_cancelled() {
-        let same = |_: BlockPos| BlockState::from(BlockKind::Netherrack);
+        let same = |_: BlockPos| Some(BlockState::from(BlockKind::Netherrack));
         let mut results = BlockActionResults::default();
         results.next_id += 1;
         let unsent = BlockActionResult {
@@ -1595,6 +1753,7 @@ mod tests {
             ack_ticks: None,
             elapsed_ticks: 0,
             before: BlockState::AIR,
+            place_kind: None,
         };
         results.set_break(unsent);
         let b = sent(&mut results, true, 1, 1);

@@ -1,6 +1,6 @@
 use azalea_client::{
     ClientMovementState, WalkDirection,
-    block_actions::{BlockActionOutcome, BlockActionRefusal, BlockActionResults, LookAtBlockQueued, PlaceBlockQueued},
+    block_actions::{ACK_TIMEOUT_TICKS, BlockActionOutcome, BlockActionRefusal, BlockActionResults, BreakBlockQueued, LookAtBlockQueued, PlaceBlockQueued},
     test_utils::prelude::*,
 };
 use azalea_block::BlockState;
@@ -309,4 +309,66 @@ fn a_pending_place_ends_unacked_at_a_dimension_change_and_a_new_ack_does_not_set
     assert_eq!(r.outcome, BlockActionOutcome::Refused);
     assert_eq!(r.refusal, Some(BlockActionRefusal::NoAck));
     assert_eq!(r.ack_ticks, None, "an ack of the new sequence is not the ack of the old action");
+}
+
+// Spec: specs/B6-placement-breaking.md §4.6 (settle from the ack and the block left behind)
+#[test]
+fn an_acked_place_that_left_another_block_is_refused() {
+    let _lock = init();
+    let floor = BlockPos::new(1, FLOOR_Y, 0);
+    let (mut s, _sent) = setup(&[BlockPos::new(0, FLOOR_Y, 0), floor], Vec3::new(0.5, 120., 0.5));
+    let target = floor.up(1);
+    look_at(&mut s, floor, Direction::Up);
+    insert(&mut s, PlaceBlockQueued { position: floor, direction: Direction::Up, auto_crouch: false });
+    s.tick();
+    s.receive_packet(ClientboundBlockUpdate { pos: target, block_state: BlockKind::Bedrock.into() });
+    s.receive_packet(ClientboundBlockChangedAck { seq: 1 });
+    s.tick();
+    let r = s.component::<BlockActionResults>().last_place.unwrap();
+    assert_eq!(r.outcome, BlockActionOutcome::Refused);
+    assert_eq!(r.refusal, Some(BlockActionRefusal::OtherBlock));
+}
+
+/// A TNT block (no break time) under the crosshair, broken once: the finishing packet is out.
+fn break_tnt(s: &mut Simulation, cell: BlockPos) {
+    s.receive_packet(ClientboundBlockUpdate { pos: cell, block_state: BlockKind::Tnt.into() });
+    s.tick();
+    look_at(s, cell, Direction::Up);
+    insert(s, BreakBlockQueued { position: cell });
+    s.tick();
+    s.tick();
+    assert_eq!(s.bot_block_state(cell), Some(BlockState::AIR), "the bot's own prediction");
+    assert!(s.component::<BlockActionResults>().last_break.unwrap().seq.is_some(), "the break was sent");
+}
+
+// Spec: specs/B6-placement-breaking.md §4.6 (settle from the ack and the block left behind)
+#[test]
+fn an_acked_break_that_left_another_block_is_refused() {
+    let _lock = init();
+    let floor = BlockPos::new(1, FLOOR_Y, 0);
+    let (mut s, _sent) = setup(&[BlockPos::new(0, FLOOR_Y, 0), floor], Vec3::new(0.5, 120., 0.5));
+    break_tnt(&mut s, floor);
+    let seq = s.component::<BlockActionResults>().last_break.unwrap().seq.unwrap();
+    s.receive_packet(ClientboundBlockUpdate { pos: floor, block_state: BlockKind::Bedrock.into() });
+    s.receive_packet(ClientboundBlockChangedAck { seq });
+    s.tick();
+    let r = s.component::<BlockActionResults>().last_break.unwrap();
+    assert_eq!(r.outcome, BlockActionOutcome::Refused);
+    assert_eq!(r.refusal, Some(BlockActionRefusal::OtherBlock));
+}
+
+// Spec: specs/B6-placement-breaking.md §4.6 (the fork's ack timeout: `Refused`, "no ack")
+#[test]
+fn a_break_with_no_ack_is_refused_while_the_view_shows_the_prediction() {
+    let _lock = init();
+    let floor = BlockPos::new(1, FLOOR_Y, 0);
+    let (mut s, _sent) = setup(&[BlockPos::new(0, FLOOR_Y, 0), floor], Vec3::new(0.5, 120., 0.5));
+    break_tnt(&mut s, floor);
+    for _ in 0..=ACK_TIMEOUT_TICKS {
+        s.tick();
+    }
+    assert_eq!(s.bot_block_state(floor), Some(BlockState::AIR), "the prediction still shows");
+    let r = s.component::<BlockActionResults>().last_break.unwrap();
+    assert_eq!(r.outcome, BlockActionOutcome::Refused);
+    assert_eq!(r.refusal, Some(BlockActionRefusal::NoAck));
 }
