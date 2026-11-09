@@ -92,7 +92,7 @@ impl Heightmap {
         &mut self,
         pos: &ChunkBlockPos,
         block_state: BlockState,
-        sections: &[Section],
+        sections: &[std::sync::Arc<Section>],
     ) -> bool {
         let first_available_y = self.get_first_available(pos.x, pos.z);
         if pos.y <= first_available_y - 2 {

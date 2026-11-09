@@ -75,7 +75,7 @@ pub struct BlockCollisionsState<'a> {
 
     _context: EntityCollisionContext,
 
-    cached_sections: Vec<(ChunkSectionPos, azalea_world::Section)>,
+    cached_sections: Vec<(ChunkSectionPos, std::sync::Arc<azalea_world::Section>)>,
     cached_block_shapes: Vec<(BlockState, &'static VoxelShape)>,
 }
 

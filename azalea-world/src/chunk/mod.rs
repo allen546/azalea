@@ -1,4 +1,5 @@
 pub mod partial;
+pub mod section_store;
 pub mod storage;
 
 use std::{
@@ -6,6 +7,7 @@ use std::{
     fmt::Debug,
     io,
     io::{Cursor, Write},
+    sync::Arc,
 };
 
 use azalea_block::block_state::{BlockState, BlockStateIntegerRepr};
@@ -30,7 +32,8 @@ const SECTION_HEIGHT: u32 = 16;
 /// [`ChunkStorage`]: crate::ChunkStorage
 #[derive(Debug)]
 pub struct Chunk {
-    pub sections: Box<[Section]>,
+    /// Immutable and shared by content ([`section_store`]); an edit stores a new section.
+    pub sections: Box<[Arc<Section>]>,
     /// Heightmaps are used for identifying the surface blocks in a chunk.
     /// Usually for clients only `WorldSurface` and `MotionBlocking` are
     /// present.
@@ -60,7 +63,7 @@ pub fn calculate_chunk_storage_range(view_distance: u32) -> u32 {
 impl Default for Chunk {
     fn default() -> Self {
         Chunk {
-            sections: vec![Section::default(); (384 / 16) as usize].into(),
+            sections: vec![section_store::intern(Section::default()); (384 / 16) as usize].into(),
             heightmaps: HashMap::new(),
         }
     }
@@ -77,7 +80,7 @@ impl Chunk {
         let mut sections = Vec::with_capacity(section_count as usize);
         for _ in 0..section_count {
             let section = Section::azalea_read(buf)?;
-            sections.push(section);
+            sections.push(section_store::intern(section));
         }
         let sections = sections.into_boxed_slice();
 
@@ -113,13 +116,53 @@ impl Chunk {
             return BlockState::AIR;
         };
         let chunk_section_pos = ChunkSectionBlockPos::from(pos);
-        let previous_state = section.get_and_set_block_state(chunk_section_pos, state);
+        let mut edited = Section::clone(section);
+        let previous_state = edited.get_and_set_block_state(chunk_section_pos, state);
+        *section = section_store::intern(edited);
 
         for heightmap in self.heightmaps.values_mut() {
             heightmap.update(pos, state, &self.sections);
         }
 
         previous_state
+    }
+
+    /// Apply edits in order, copying and storing each touched section once, not once per edit.
+    ///
+    /// Returns the previous state of each edit. The result equals applying the edits one by one;
+    /// the heightmaps are updated after the sections hold the final content.
+    // Spec: specs/plans/LOAD_CONTRACT.md "Swarm world design" item 5
+    pub fn set_block_states(
+        &mut self,
+        edits: &[(ChunkBlockPos, BlockState)],
+        min_y: i32,
+    ) -> Vec<BlockState> {
+        let mut working: HashMap<u32, Section> = HashMap::new();
+        let mut previous = Vec::with_capacity(edits.len());
+        for (pos, state) in edits {
+            let index = section_index(pos.y, min_y);
+            let Some(shared) = self.sections.get(index as usize) else {
+                warn!("Tried to set block state {state:?} at out-of-bounds relative chunk position {pos:?}");
+                previous.push(BlockState::AIR);
+                continue;
+            };
+            let section = working
+                .entry(index)
+                .or_insert_with(|| Section::clone(shared));
+            previous.push(section.get_and_set_block_state(ChunkSectionBlockPos::from(pos), *state));
+        }
+        for (index, section) in working {
+            self.sections[index as usize] = section_store::intern(section);
+        }
+        for (pos, state) in edits {
+            if section_index(pos.y, min_y) as usize >= self.sections.len() {
+                continue;
+            }
+            for heightmap in self.heightmaps.values_mut() {
+                heightmap.update(pos, *state, &self.sections);
+            }
+        }
+        previous
     }
 
     pub fn set_block_state(&mut self, pos: &ChunkBlockPos, state: BlockState, min_y: i32) {
@@ -131,7 +174,9 @@ impl Chunk {
             return;
         };
         let chunk_section_pos = ChunkSectionBlockPos::from(pos);
-        section.get_and_set_block_state(chunk_section_pos, state);
+        let mut edited = Section::clone(section);
+        edited.get_and_set_block_state(chunk_section_pos, state);
+        *section = section_store::intern(edited);
 
         for heightmap in self.heightmaps.values_mut() {
             heightmap.update(pos, state, &self.sections);
@@ -158,7 +203,7 @@ impl Chunk {
 /// `None` if the position is out of bounds.
 #[inline]
 pub fn get_block_state_from_sections(
-    sections: &[Section],
+    sections: &[Arc<Section>],
     pos: &ChunkBlockPos,
     min_y: i32,
 ) -> Option<BlockState> {
@@ -303,5 +348,74 @@ mod tests {
         assert_eq!(cur.position(), buf.len() as u64);
 
         assert_eq!(section, deserialized_section);
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use azalea_core::position::ChunkBlockPos;
+    use azalea_registry::builtin::BlockKind;
+
+    use super::*;
+
+    fn chunk() -> Chunk {
+        let mut c = Chunk::default();
+        c.heightmaps.insert(
+            HeightmapKind::WorldSurface,
+            Heightmap::new(HeightmapKind::WorldSurface, 384, -64, Box::new([0; 37])),
+        );
+        c
+    }
+
+    // Spec: specs/plans/LOAD_CONTRACT.md "Swarm world design" item 5
+    #[test]
+    fn a_batch_equals_the_same_edits_one_by_one() {
+        let stone: BlockState = BlockKind::Stone.into();
+        let edits = vec![
+            (ChunkBlockPos::new(1, 10, 1), stone),
+            (ChunkBlockPos::new(2, 11, 1), stone),
+            (ChunkBlockPos::new(1, 10, 1), BlockState::AIR),
+            (ChunkBlockPos::new(3, 100, 3), stone),
+            (ChunkBlockPos::new(3, 100, 3), BlockState::AIR),
+            (ChunkBlockPos::new(3, 12, 3), stone),
+        ];
+        let (mut one, mut batch) = (chunk(), chunk());
+        let seq: Vec<_> = edits.iter().map(|(p, s)| one.get_and_set_block_state(p, *s, -64)).collect();
+        let prev = batch.set_block_states(&edits, -64);
+        assert_eq!(seq, prev);
+        for (a, b) in one.sections.iter().zip(batch.sections.iter()) {
+            assert_eq!(a, b);
+        }
+        assert_eq!(
+            one.heightmaps[&HeightmapKind::WorldSurface].get_first_available(3, 3),
+            batch.heightmaps[&HeightmapKind::WorldSurface].get_first_available(3, 3)
+        );
+    }
+
+    #[test]
+    fn a_batch_stores_each_touched_section_once() {
+        let stone: BlockState = BlockKind::Stone.into();
+        let mut c = chunk();
+        let untouched = c.sections[8].clone();
+        let edits: Vec<_> = (0..10).map(|x| (ChunkBlockPos::new(x, 10, 0), stone)).collect();
+        let before = section_store::INTERN_CALLS.with(|c| c.get());
+        c.set_block_states(&edits, -64);
+        // Ten edits in one section make one store call, not ten.
+        assert_eq!(section_store::INTERN_CALLS.with(|c| c.get()) - before, 1);
+        assert!(Arc::ptr_eq(&untouched, &c.sections[8]));
+    }
+
+    // Spec: specs/plans/LOAD_CONTRACT.md "Build order" step 3
+    #[test]
+    fn one_chunks_write_never_changes_what_another_chunk_reads() {
+        let stone: BlockState = BlockKind::Stone.into();
+        let (mut a, b) = (chunk(), chunk());
+        let pos = ChunkBlockPos::new(1, 10, 1);
+        assert!(Arc::ptr_eq(&a.sections[8], &b.sections[8]), "equal content shares one section");
+        let _ = a.get_and_set_block_state(&pos, stone, -64);
+        assert_eq!(a.get_block_state(&pos, -64), Some(stone));
+        assert_eq!(b.get_block_state(&pos, -64), Some(BlockState::AIR));
+        a.set_block_states(&[(pos, BlockState::AIR)], -64);
+        assert_eq!(b.get_block_state(&pos, -64), Some(BlockState::AIR));
     }
 }

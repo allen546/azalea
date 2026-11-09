@@ -50,15 +50,18 @@ impl QueuedServerBlockUpdates {
         prediction: &mut BlockStatePredictionHandler,
     ) {
         let mut kept = Vec::new();
+        let mut edits = Vec::new();
         for (pos, block_state) in self.list.drain(..) {
             if world.get_block_state(pos).is_none() {
                 kept.push((pos, block_state));
             } else {
-                // the shared world holds server data only; a pending cell also keeps it for the ack
-                world.chunks.set_block_state(pos, block_state);
+                // the world holds server data only; a pending cell also keeps it for the ack
+                edits.push((pos, block_state));
                 prediction.update_known_server_state(pos, block_state);
             }
         }
+        // One frame's edits go in together: one section copy per section (design item 5).
+        world.chunks.set_block_states(&edits);
         self.list = kept;
     }
 }
@@ -72,8 +75,10 @@ pub fn handle_block_update_event(
 ) {
     for (mut queued, world_holder, mut prediction_handler) in query.iter_mut() {
         let world = world_holder.shared.read();
-        for (pos, block_state) in queued.list.drain(..) {
-            world.chunks.set_block_state(pos, block_state);
+        // Spec: specs/plans/LOAD_CONTRACT.md "Swarm world design" item 5
+        let edits: Vec<_> = queued.list.drain(..).collect();
+        world.chunks.set_block_states(&edits);
+        for (pos, block_state) in edits {
             prediction_handler.update_known_server_state(pos, block_state);
         }
     }

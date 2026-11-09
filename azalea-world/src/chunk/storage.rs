@@ -60,6 +60,35 @@ pub trait ChunkStorageTrait: Send + Sync + Any {
         let mut chunk = chunk.write();
         Some(chunk.get_and_set_block_state(&ChunkBlockPos::from(pos), state, self.min_y()))
     }
+    /// Set many blocks. Edits in one chunk share one write lock, and each touched section is
+    /// copied and stored once. Same result as calling [`Self::set_block_state`] in order.
+    // Spec: specs/plans/LOAD_CONTRACT.md "Swarm world design" item 5
+    fn set_block_states(&self, edits: &[(BlockPos, BlockState)]) -> Vec<Option<BlockState>> {
+        let mut out = vec![None; edits.len()];
+        let mut by_chunk: Vec<(ChunkPos, Vec<usize>)> = Vec::new();
+        for (i, (pos, _)) in edits.iter().enumerate() {
+            if pos.y < self.min_y() || pos.y >= (self.min_y() + self.height() as i32) {
+                continue;
+            }
+            let cp = ChunkPos::from(*pos);
+            match by_chunk.iter_mut().find(|(c, _)| *c == cp) {
+                Some((_, v)) => v.push(i),
+                None => by_chunk.push((cp, vec![i])),
+            }
+        }
+        for (cp, indexes) in by_chunk {
+            let Some(chunk) = self.get(&cp) else { continue };
+            let local: Vec<(ChunkBlockPos, BlockState)> = indexes
+                .iter()
+                .map(|&i| (ChunkBlockPos::from(edits[i].0), edits[i].1))
+                .collect();
+            let previous = chunk.write().set_block_states(&local, self.min_y());
+            for (&i, prev) in indexes.iter().zip(previous) {
+                out[i] = Some(prev);
+            }
+        }
+        out
+    }
     fn get_fluid_state(&self, pos: BlockPos) -> Option<FluidState> {
         let block_state = self.get_block_state(pos)?;
         Some(FluidState::from(block_state))
