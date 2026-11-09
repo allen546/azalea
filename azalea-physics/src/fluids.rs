@@ -8,7 +8,7 @@ use azalea_core::{
 };
 use azalea_entity::{HasClientLoaded, LocalEntity, Physics, Position};
 use azalea_registry::builtin::BlockKind;
-use azalea_world::{BlockStatePredictionHandler, BotWorld, WorldName, Worlds};
+use azalea_world::{BlockStatePredictionHandler, BlockView, BotWorld, WorldName, Worlds};
 use bevy_ecs::prelude::*;
 
 use crate::collision::{BlockWithShape, legacy_blocks_motion};
@@ -122,7 +122,7 @@ fn update_fluid_height_and_do_fluid_pushing(
                 if fluid_at_cur_pos.kind != checking_fluid {
                     continue;
                 }
-                let fluid_max_y = (cur_y as f32 + fluid_at_cur_pos.height()) as f64;
+                let fluid_max_y = (cur_y as f32 + world.fluid_height_at(cur_pos, &fluid_at_cur_pos)) as f64;
                 if fluid_max_y < checking_liquids_aabb.min.y {
                     continue;
                 }

@@ -20,6 +20,18 @@ pub trait BlockView {
     fn get_fluid_state(&self, pos: BlockPos) -> Option<FluidState> {
         self.get_block_state(pos).map(FluidState::from)
     }
+
+    /// `FluidState#getHeight(BlockGetter, BlockPos)` for the fluid at `pos`: a full block when the
+    /// cell above holds the same fluid (`FlowingFluid#getHeight`, `hasSameAbove`), else its own
+    /// height. The flow code (`FlowingFluid#getFlow`) uses the own height instead.
+    // Spec: specs/B1-movement.md §4.6 (patch 64: fluid height with the fluid above)
+    fn fluid_height_at(&self, pos: BlockPos, fluid: &FluidState) -> f32 {
+        let above = self.get_fluid_state(pos.up(1));
+        match above {
+            Some(a) if fluid.amount > 0 && a.amount > 0 && a.kind == fluid.kind => 1.0,
+            _ => fluid.height(),
+        }
+    }
 }
 
 impl BlockView for ChunkStorage {

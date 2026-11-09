@@ -480,6 +480,50 @@ fn test_falling_water_pushes_a_neighbour_away() {
     assert!(x > 8.5 + 0.005, "the falling neighbour should push the bot east, x is {x}");
 }
 
+// A fluid cell with the same fluid above is a full block high (`FlowingFluid#getHeight`,
+// `hasSameAbove`), so the bot's fluid height counts to the top of the cell, not the surface it would
+// have alone. Spec: specs/B1-movement.md §4.6 (patch 64)
+#[test]
+fn test_fluid_height_counts_a_full_cell_when_the_same_fluid_is_above() {
+    let mut app = make_test_app();
+    let world_lock = insert_overworld(&mut app);
+    let mut partial_world = PartialWorld::default();
+    partial_world.chunks.set(
+        &ChunkPos { x: 0, z: 0 },
+        Some(Chunk::default()),
+        &mut world_lock.write().chunks,
+    );
+    let setblock = |y: i32, b: BlockState| {
+        world_lock.write().chunks.set_block_state(BlockPos { x: 8, y, z: 8 }, b);
+    };
+    let water_level = |level: BlockStateIntegerRepr| {
+        BlockState::from(azalea_block::blocks::Water { level: WaterLevel::from(level) })
+    };
+    setblock(63, azalea_block::blocks::Stone.into());
+    // a column: flowing level 1 (8/9 high alone), flowing level 6 (2/9 alone), a source on top
+    setblock(64, water_level(1));
+    setblock(65, water_level(6));
+    setblock(66, water_level(0));
+    let entity = app
+        .world_mut()
+        .spawn((
+            EntityBundle::new(
+                Uuid::nil(),
+                Vec3 { x: 8.5, y: 64., z: 8.5 },
+                EntityKind::Player,
+                WorldName::new("minecraft:overworld"),
+            ),
+            MinecraftEntityId(0),
+            LocalEntity,
+            HasClientLoaded,
+        ))
+        .id();
+    app.world_mut().run_schedule(GameTick);
+    app.update();
+    let h = app.world_mut().get::<azalea_entity::Physics>(entity).unwrap().water_fluid_height;
+    assert!(h > 1.9, "water above both cells: the column reaches the top of cell 65, height {h}");
+}
+
 // Falling water beside a solid wall flows mostly down (`FlowingFluid#getFlow`: the horizontal part
 // is normalised, then 6 down is added, then the sum is normalised). Spec: specs/B1-movement.md §4.6
 #[test]

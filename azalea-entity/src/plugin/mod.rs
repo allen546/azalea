@@ -136,7 +136,8 @@ pub fn update_fluid_on_eyes(
                 None => BotWorld::truth(&world),
             };
             let fluid_at_eye = world.get_fluid_state(eye_block_pos).unwrap_or_default();
-            let fluid_cutoff_y = (eye_block_pos.y as f32 + fluid_at_eye.height()) as f64;
+            let fluid_cutoff_y =
+                (eye_block_pos.y as f32 + world.fluid_height_at(eye_block_pos, &fluid_at_eye)) as f64;
             if fluid_cutoff_y > adjusted_eye_y {
                 **fluid_on_eyes = fluid_at_eye.kind;
             } else {
