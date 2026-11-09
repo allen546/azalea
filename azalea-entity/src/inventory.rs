@@ -90,6 +90,57 @@ impl Inventory {
         }
     }
 
+    // Spec: specs/B3-inventory-crafting.md §4.1 (patch 63: throw-all loops like `AbstractContainerMenu#doClick`)
+    /// A Throw click on `slot` with an empty cursor, as `doClick` does it: take the click's count
+    /// (one item, or the whole stack for `all`; a crafting result always leaves whole), drop it,
+    /// and for `all` take again while the slot holds the same item again, stopping when the
+    /// player cannot drop (`Player#canDropItems`, true for a vanilla player). Returns how many
+    /// stacks were dropped, which is how many times the client swings (`LivingEntity#drop`).
+    /// `after_take` runs after each take, for a slot that the client refills at once (the
+    /// result slot of a trade menu); the fork models none, so callers pass a no-op.
+    pub fn throw_drops(
+        &mut self,
+        slot_index: usize,
+        all: bool,
+        mut after_take: impl FnMut(&mut Self, usize),
+    ) -> u32 {
+        let is_result = self.menu().is_crafting_result(slot_index);
+        // `l` is read once, before the first take
+        let Some(first_count) = self.menu().slot(slot_index).map(|s| s.count()) else { return 0 };
+        let l = if all || is_result { first_count } else { 1 };
+        let mut drops = 0;
+        loop {
+            if !self.can_drop_items() {
+                break;
+            }
+            let Some(slot) = self.menu_mut().slot_mut(slot_index) else { break };
+            // Null fork: `ItemStack::split` empties the slot when the last item goes, so the
+            // click reports an empty slot, not a 0-count one.
+            let dropped = slot.split(l.max(0) as u32);
+            if dropped.is_empty() {
+                break;
+            }
+            drops += 1;
+            if is_result {
+                self.took_from(slot_index);
+            }
+            after_take(self, slot_index);
+            let same = match (&dropped, self.menu().slot(slot_index)) {
+                (ItemStack::Present(d), Some(ItemStack::Present(now))) => d.is_same_item_and_components(now),
+                _ => false,
+            };
+            if !all || !same {
+                break;
+            }
+        }
+        drops
+    }
+
+    /// `Player#canDropItems`: true for every vanilla player.
+    fn can_drop_items(&self) -> bool {
+        true
+    }
+
     // Spec: specs/B3-inventory-crafting.md §4.1 (a drop click swings first; patch 49)
     /// How many times the client swings for this click, as vanilla's `LivingEntity#drop` does
     /// on the client side: once for each non-empty stack the click drops (a click outside the
@@ -111,9 +162,11 @@ impl Inventory {
             ClickOperation::Throw(
                 ThrowClick::Single { slot } | ThrowClick::All { slot },
             ) if self.carried.is_empty() => {
-                // the whole result of a crafting slot goes at once, so one drop either way
-                (self.menu().slot(*slot as usize).is_some_and(|s| s.is_present())
-                    && self.menu().may_pickup(*slot as usize)) as u32
+                if !self.menu().may_pickup(*slot as usize) {
+                    return 0;
+                }
+                let all = matches!(operation, ClickOperation::Throw(ThrowClick::All { .. }));
+                self.clone().throw_drops(*slot as usize, all, |_, _| {})
             }
             _ => 0,
         }
@@ -453,28 +506,9 @@ impl Inventory {
                 if self.carried.is_present() {
                     return;
                 }
-
-                let (ThrowClick::Single { slot: slot_index }
-                | ThrowClick::All { slot: slot_index }) = c;
-                let slot_index = *slot_index as usize;
-
-                let is_result = self.menu().is_crafting_result(slot_index);
-                let Some(slot) = self.menu_mut().slot_mut(slot_index) else {
-                    return;
-                };
-                // a crafting result always leaves whole (`ResultContainer#removeItem`)
-                let dropping_count = match c {
-                    ThrowClick::Single { .. } if !is_result => 1,
-                    _ => slot.count(),
-                };
-
-                // Null fork: `ItemStack::split` empties the slot when the last item goes, so the
-                // click reports an empty slot, not a 0-count one.
-                let dropping = slot.split(dropping_count as u32);
-                // player.drop(dropping, true);
-                if is_result && dropping.is_present() {
-                    self.took_from(slot_index);
-                }
+                let (ThrowClick::Single { slot } | ThrowClick::All { slot }) = c;
+                // No slot of the fork's menus refills on the client; the server sends the next stack.
+                self.throw_drops(*slot as usize, matches!(c, ThrowClick::All { .. }), |_, _| {});
             }
             // Null fork: vanilla `doClick` PICKUP_ALL. Takes only what fits on the cursor, and
             // never from a crafting result.
@@ -850,6 +884,37 @@ mod tests {
         click(&mut inv, PickupClick::Right { slot: Some(9) });
         assert_eq!(inv.carried, ItemStack::new(ItemKind::Cobblestone, 32));
         assert_eq!(inv.inventory_menu.slot(9), Some(&ItemStack::new(ItemKind::Cobblestone, 31)));
+    }
+
+    // Spec: specs/B3-inventory-crafting.md §4.1 (patch 63: throw-all loops while the slot refills)
+    #[test]
+    fn throw_all_loops_while_the_slot_holds_the_same_item_and_single_does_not() {
+        let refill = |inv: &mut Inventory, left: &mut i32| {
+            if *left > 0 {
+                *left -= 1;
+                *inv.inventory_menu.slot_mut(9).unwrap() = ItemStack::new(ItemKind::Stone, 4);
+            }
+        };
+        let mut inv = player(&[(9, ItemKind::Stone, 4)]);
+        let mut left = 2;
+        assert_eq!(inv.throw_drops(9, true, |i, _| refill(i, &mut left)), 3, "first take plus two refills");
+        assert_eq!(inv.inventory_menu.slot(9), Some(&ItemStack::Empty));
+
+        let mut inv = player(&[(9, ItemKind::Stone, 4)]);
+        let mut left = 2;
+        assert_eq!(inv.throw_drops(9, false, |i, _| refill(i, &mut left)), 1, "single throws once");
+        assert_eq!(inv.inventory_menu.slot(9), Some(&ItemStack::new(ItemKind::Stone, 4)));
+
+        // a refill with another item ends the loop
+        let mut inv = player(&[(9, ItemKind::Stone, 4)]);
+        let n = inv.throw_drops(9, true, |i, _| {
+            *i.inventory_menu.slot_mut(9).unwrap() = ItemStack::new(ItemKind::Dirt, 1);
+        });
+        assert_eq!(n, 1);
+        // an ordinary throw-all drops once and the click swings once
+        let mut inv = player(&[(9, ItemKind::Stone, 4)]);
+        assert_eq!(inv.click_swings(&ThrowClick::All { slot: 9 }.into()), 1);
+        assert_eq!(inv.throw_drops(9, true, |_, _| {}), 1);
     }
 
     #[test]
