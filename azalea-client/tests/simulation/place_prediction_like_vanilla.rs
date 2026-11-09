@@ -232,6 +232,25 @@ fn a_sapling_swings_on_grass_and_not_on_stone() {
     assert_eq!((used_item_on(&sent), swings(&sent)), (1, 1), "grass below: SUCCESS, swing");
 }
 
+// Spec: specs/B6-placement-breaking.md §4.10 (patch 61: redstone wire needs a sturdy top face below, `RedStoneWireBlock#canSurvive`)
+#[test]
+fn redstone_dust_on_a_bottom_slab_is_sent_with_no_swing() {
+    let _lock = init();
+    let (mut s, sent) = setup(&[BlockPos::new(0, FLOOR_Y, 0), BlockPos::new(3, FLOOR_Y, 0)], Vec3::new(0.5, 120., 0.5));
+    hold(&mut s, ItemKind::Redstone, 2);
+    sent.clear();
+    place_far(&mut s);
+    assert_eq!((used_item_on(&sent), swings(&sent)), (1, 1), "stone below: SUCCESS, swing");
+
+    let mut slab: Box<dyn azalea_block::BlockTrait> = BlockKind::StoneSlab.into();
+    slab.set_property("type", "bottom").unwrap();
+    s.receive_packet(ClientboundBlockUpdate { pos: BlockPos::new(3, FLOOR_Y, 0), block_state: slab.as_block_state() });
+    s.tick();
+    sent.clear();
+    place_far(&mut s);
+    assert_eq!((used_item_on(&sent), swings(&sent)), (1, 0), "bottom slab below: FAIL, sent, no swing");
+}
+
 // Spec: specs/B6-placement-breaking.md §4.10 (patch 48: `LivingEntity` blocks building; `ArmorStand` follows its marker flag)
 #[test]
 fn an_armor_stand_in_the_cell_blocks_the_place_unless_it_is_a_marker() {

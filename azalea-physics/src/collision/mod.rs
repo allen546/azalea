@@ -4,6 +4,7 @@ pub mod entity_collisions;
 mod mergers;
 pub mod offset;
 mod shape;
+mod sturdy;
 pub mod world_collisions;
 
 use std::{ops::Add, sync::LazyLock};
@@ -27,6 +28,7 @@ pub use offset::{BlockShapeAt, block_offset};
 pub use discrete_voxel_shape::*;
 use entity_collisions::{CollidableEntityQuery, get_entity_collisions};
 pub use shape::*;
+pub use sturdy::is_face_sturdy;
 use tracing::warn;
 
 use self::world_collisions::get_block_collisions;

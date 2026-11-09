@@ -919,8 +919,10 @@ pub fn handle_place_block_queued(
                 // Place prediction (patch 33): the cell the vanilla client writes, or a refusal
                 // when the bot's physics would read a cell that could be wrong.
                 let cells = [queued.position, queued.position.offset_with_direction(queued.direction)];
-                // `Minecraft#startUseItem` swings only for a client-side success (patch 48); with no
-                // verdict (`Unknown`, or the bot not set up) the swing stays, a known gap.
+                // `Minecraft#startUseItem` swings only for a client-side success (patch 48, 58); with no
+                // client result (an `Unknown` the fork cannot work out, or the bot not set up) the
+                // swing stays, a known gap. The block-use path swings after every UseItemOn: right for
+                // a container (the client result is SUCCESS), see ledger row 58.
                 let mut swing = true;
                 let decision = match view.context(entity, &world, **position, dims, cells) {
                     Some(cx) => {

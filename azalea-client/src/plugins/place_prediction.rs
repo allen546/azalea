@@ -108,6 +108,7 @@ pub struct Obstacle {
 }
 
 /// Everything one place needs.
+#[derive(Clone, Copy)]
 pub struct PlaceRequest<'a> {
     pub clicked: BlockPos,
     pub face: Direction,
@@ -360,7 +361,7 @@ pub enum ClientSwing {
     Yes,
     /// `FAIL`, `PASS` or `CONSUME`: no swing (and after `FAIL` no other hand is tried).
     No,
-    /// The fork cannot compute the client result (an `Unknown` verdict). Known gap: the swing is
+    /// The fork cannot compute the client result (an `Unknown` verdict it cannot resolve). Known gap: the swing is
     /// sent as before, as it is right for a success, which is the common case.
     Unknown,
 }
@@ -377,8 +378,21 @@ pub fn client_swing(chunks: &impl BlockView, req: &PlaceRequest, verdict: &Verdi
         Verdict::Unknown(UnknownWhy::Family) => match sapling_place_succeeds(chunks, req) {
             Some(true) => ClientSwing::Yes,
             Some(false) => ClientSwing::No,
-            None => ClientSwing::Unknown,
+            None => match redstone_wire_place_succeeds(chunks, req) {
+                Some(true) => ClientSwing::Yes,
+                Some(false) => ClientSwing::No,
+                None => ClientSwing::Unknown,
+            },
         },
+        // The facing differs only in the state written, not in whether the place succeeds: work
+        // the result out as if the server's yaw were the current one.
+        Verdict::Unknown(UnknownWhy::FacingYaw) => {
+            match predict_place(chunks, &PlaceRequest { sent_yaw: req.yaw, ..*req }) {
+                Verdict::Predict { .. } => ClientSwing::Yes,
+                Verdict::Nothing(_) => ClientSwing::No,
+                Verdict::Unknown(_) => ClientSwing::Unknown,
+            }
+        }
         Verdict::Unknown(_) => ClientSwing::Unknown,
     }
 }
@@ -399,6 +413,30 @@ fn sapling_place_succeeds(chunks: &impl BlockView, req: &PlaceRequest) -> Option
     }
     let below = BlockKind::from(chunks.get_block_state(target.down(1))?);
     Some(tags::blocks::DIRT.contains(&below) || below == BlockKind::Farmland)
+}
+
+/// Redstone dust (`minecraft:redstone` is an `ItemNameBlockItem` for `redstone_wire`): no
+/// collision, so nothing obstructs it, and `RedStoneWireBlock#canSurvive` wants a sturdy top face
+/// below the cell (`BlockStateBase#isFaceSturdy`) or a hopper. A bottom slab has no sturdy top,
+/// so that place fails on the client (patch 61). `None` for any other item, or a block below
+/// whose support shape the fork does not model.
+// Spec: specs/B6-placement-breaking.md §4.10 (patch 61: redstone wire swing)
+fn redstone_wire_place_succeeds(chunks: &impl BlockView, req: &PlaceRequest) -> Option<bool> {
+    if req.held != "minecraft:redstone" || req.has_block_state_component {
+        return None;
+    }
+    let clicked = chunks.get_block_state(req.clicked)?;
+    let replace_clicked = replaceable(clicked, req.held, true, req.face, req.hit.y - req.clicked.y as f64)?;
+    let target = if replace_clicked { req.clicked } else { req.clicked.offset_with_direction(req.face) };
+    let before = chunks.get_block_state(target)?;
+    if !replace_clicked && !replaceable(before, req.held, false, req.face, req.hit.y - target.y as f64)? {
+        return Some(false);
+    }
+    let below = chunks.get_block_state(target.down(1))?;
+    if BlockKind::from(below) == BlockKind::Hopper {
+        return Some(true);
+    }
+    azalea_physics::collision::is_face_sturdy(below, Direction::Up)
 }
 
 /// Whether placing at `pos` can change a neighbour's shape that the bot's physics reads soon: a
@@ -835,5 +873,45 @@ mod tests {
         // a stone neighbour never matters
         chunks.set_block_state(BlockPos::new(3, FLOOR + 1, 2), BlockState::from(BlockKind::Stone));
         assert_eq!(reactive_neighbour_in_zone(&chunks, pos, &zone), None);
+    }
+
+    fn swing_of(chunks: &ChunkStorage, r: &PlaceRequest) -> ClientSwing {
+        let v = predict_place(chunks, r);
+        client_swing(chunks, r, &v)
+    }
+
+    // Spec: specs/B6-placement-breaking.md §4.10 (patch 61: redstone wire swing)
+    #[test]
+    fn redstone_dust_swings_on_a_full_block_and_not_on_a_bottom_slab() {
+        let (chunks, _p) = world();
+        let (clicked, hit) = top_of_floor();
+        let r = req("minecraft:redstone", clicked, Direction::Up, hit, &[]);
+        assert_eq!(swing_of(&chunks, &r), ClientSwing::Yes, "stone below: canSurvive");
+        let mut slab: Box<dyn BlockTrait> = BlockKind::StoneSlab.into();
+        slab.set_property("type", "bottom").unwrap();
+        chunks.set_block_state(clicked, slab.as_block_state());
+        assert_eq!(swing_of(&chunks, &r), ClientSwing::No, "bottom slab below: FAIL");
+        slab.set_property("type", "top").unwrap();
+        chunks.set_block_state(clicked, slab.as_block_state());
+        assert_eq!(swing_of(&chunks, &r), ClientSwing::Yes, "top slab has a sturdy top");
+        let mut snow: Box<dyn BlockTrait> = BlockKind::Snow.into();
+        snow.set_property("layers", "8").unwrap();
+        chunks.set_block_state(clicked, snow.as_block_state());
+        assert_eq!(swing_of(&chunks, &r), ClientSwing::Unknown, "snow layer support is not modelled");
+    }
+
+    // Spec: specs/B6-placement-breaking.md §4.10 (patch 61: a facing mismatch does not change the result)
+    #[test]
+    fn a_facing_yaw_mismatch_still_gives_the_swing_result() {
+        let (chunks, _p) = world();
+        let (clicked, hit) = top_of_floor();
+        let mut r = req("minecraft:stonecutter", clicked, Direction::Up, hit, &[]);
+        r.yaw = 90.0;
+        assert_eq!(predict_place(&chunks, &r), Verdict::Unknown(UnknownWhy::FacingYaw));
+        assert_eq!(swing_of(&chunks, &r), ClientSwing::Yes);
+        // an entity that certainly blocks the cell: FAIL whatever the yaw
+        let blocker = [Obstacle { aabb: cell_box(BlockPos::new(2, FLOOR + 1, 2)), certain: true }];
+        let r2 = PlaceRequest { obstacles: &blocker, ..r };
+        assert_eq!(swing_of(&chunks, &r2), ClientSwing::No);
     }
 }
