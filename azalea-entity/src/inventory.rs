@@ -126,7 +126,7 @@ impl Inventory {
             }
             after_take(self, slot_index);
             let same = match (&dropped, self.menu().slot(slot_index)) {
-                (ItemStack::Present(d), Some(ItemStack::Present(now))) => d.is_same_item_and_components(now),
+                (ItemStack::Present(d), Some(ItemStack::Present(now))) => d.kind == now.kind,
                 _ => false,
             };
             if !all || !same {
@@ -905,6 +905,18 @@ mod tests {
         assert_eq!(inv.throw_drops(9, false, |i, _| refill(i, &mut left)), 1, "single throws once");
         assert_eq!(inv.inventory_menu.slot(9), Some(&ItemStack::new(ItemKind::Stone, 4)));
 
+        // a refill of the same item with other components keeps the loop going
+        // (`ItemStack#isSameItem` compares the kind only)
+        let mut inv = player(&[(9, ItemKind::Stone, 4)]);
+        let mut left = 1;
+        let n = inv.throw_drops(9, true, |i, _| {
+            if left > 0 {
+                left -= 1;
+                *i.inventory_menu.slot_mut(9).unwrap() =
+                    ItemStack::new(ItemKind::Stone, 4).with_component(azalea_inventory::components::MapId { id: 1 });
+            }
+        });
+        assert_eq!(n, 2, "same kind, different components: still the same item");
         // a refill with another item ends the loop
         let mut inv = player(&[(9, ItemKind::Stone, 4)]);
         let n = inv.throw_drops(9, true, |i, _| {
