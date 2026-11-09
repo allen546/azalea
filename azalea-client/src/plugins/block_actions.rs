@@ -939,6 +939,8 @@ pub fn handle_place_block_queued(
                             game_mode: cx.game_mode,
                             yaw: look.y_rot(),
                             sent_yaw: cx.sent_yaw,
+                            pitch: look.x_rot(),
+                            sent_pitch: cx.sent_pitch,
                             obstacles: &cx.obstacles,
                         };
                         let verdict = predict_place(&bot, &request);

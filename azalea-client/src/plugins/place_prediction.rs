@@ -121,6 +121,9 @@ pub struct PlaceRequest<'a> {
     /// The yaw now, and the yaw the server knows (the last one sent).
     pub yaw: f32,
     pub sent_yaw: f32,
+    /// The pitch now, and the pitch the server knows (the families that look up or down).
+    pub pitch: f32,
+    pub sent_pitch: f32,
     /// The placer's box, then every other entity box near the cell.
     pub obstacles: &'a [Obstacle],
 }
@@ -171,6 +174,56 @@ fn horizontal_direction(yaw: f32) -> Direction {
         2 => Direction::North,
         _ => Direction::East,
     }
+}
+
+fn clockwise(d: Direction) -> Direction {
+    match d {
+        Direction::North => Direction::East,
+        Direction::East => Direction::South,
+        Direction::South => Direction::West,
+        Direction::West => Direction::North,
+        other => other,
+    }
+}
+
+fn counter_clockwise(d: Direction) -> Direction {
+    clockwise(clockwise(clockwise(d)))
+}
+
+fn direction_from_name(name: &str) -> Option<Direction> {
+    Some(match name {
+        "down" => Direction::Down,
+        "up" => Direction::Up,
+        "north" => Direction::North,
+        "south" => Direction::South,
+        "west" => Direction::West,
+        "east" => Direction::East,
+        _ => return None,
+    })
+}
+
+/// Vanilla `Direction#orderedByNearest(player)[0]`: the axis the look vector is longest on, with
+/// the sign of that component. `None` when two compared lengths are within a hair of each other:
+/// vanilla reads its sine table there and the pick could differ from this exact maths.
+// Spec: specs/B6-placement-breaking.md §4.10 (families that look: patch 67)
+fn nearest_looking(yaw: f32, pitch: f32) -> Option<Direction> {
+    const TIE: f64 = 1e-3;
+    let (f, g) = ((pitch as f64).to_radians(), -(yaw as f64).to_radians());
+    let (h, i, j, k) = (f.sin(), f.cos(), g.sin(), g.cos());
+    let (l, m, n) = (j.abs(), h.abs(), k.abs());
+    let (o, p) = (l * i, n * i);
+    let x = if j > 0.0 { Direction::East } else { Direction::West };
+    let y = if h < 0.0 { Direction::Up } else { Direction::Down };
+    let z = if k > 0.0 { Direction::South } else { Direction::North };
+    let near = |a: f64, b: f64| (a - b).abs() < TIE;
+    // the pick when the x length wins, and when the z length wins
+    let pick_x = if near(m, o) { None } else { Some(if m > o { y } else { x }) };
+    let pick_z = if near(m, p) { None } else { Some(if m > p { y } else { z }) };
+    if near(l, n) {
+        // either branch may apply: only a shared answer (looking steeply up or down) is safe
+        return if pick_x == pick_z { pick_x } else { None };
+    }
+    if l > n { pick_x } else { pick_z }
 }
 
 fn axis_name(face: Direction) -> &'static str {
@@ -322,9 +375,103 @@ pub fn predict_place(chunks: &impl BlockView, req: &PlaceRequest) -> Verdict {
             let facing = if family == PlaceFamily::HorizontalFacing { now.opposite() } else { now };
             with_properties(kind, &[("facing", direction_name(facing))])
         }
+        // AnvilBlock: the horizontal direction turned a quarter clockwise.
+        PlaceFamily::FacingClockwise => {
+            let now = horizontal_direction(req.yaw);
+            if now != horizontal_direction(req.sent_yaw) {
+                return Verdict::Unknown(UnknownWhy::FacingYaw);
+            }
+            with_properties(kind, &[("facing", direction_name(clockwise(now)))])
+        }
+        // DispenserBlock, BarrelBlock, PistonBaseBlock (opposite) and ObserverBlock (same): the
+        // nearest looking direction, which the server reads from the look it was last sent.
+        PlaceFamily::LookingOpposite | PlaceFamily::LookingSame => {
+            let (Some(now), Some(sent)) =
+                (nearest_looking(req.yaw, req.pitch), nearest_looking(req.sent_yaw, req.sent_pitch))
+            else {
+                return Verdict::Unknown(UnknownWhy::FacingYaw);
+            };
+            if now != sent {
+                return Verdict::Unknown(UnknownWhy::FacingYaw);
+            }
+            let facing = if family == PlaceFamily::LookingOpposite { now.opposite() } else { now };
+            with_properties(kind, &[("facing", direction_name(facing))])
+        }
+        // ChainBlock: RotatedPillarBlock's axis plus the water of the cell.
+        PlaceFamily::AxisWaterlogged => with_properties(
+            kind,
+            &[("axis", axis_name(req.face)), ("waterlogged", if is_water_source(before) { "true" } else { "false" })],
+        ),
+        // LightningRodBlock: faces the clicked face.
+        PlaceFamily::ClickedFaceWaterlogged => with_properties(
+            kind,
+            &[("facing", direction_name(req.face)), ("waterlogged", if is_water_source(before) { "true" } else { "false" })],
+        ),
+        // VegetationBlock keeps the default state; its canSurvive is checked below.
+        PlaceFamily::Vegetation => Some(default),
+        // SnowyDirtBlock: snowy when the block above is in the snow tag.
+        PlaceFamily::SnowyTop => {
+            let Some(above) = chunks.get_block_state(target.up(1)) else {
+                return Verdict::Unknown(UnknownWhy::Unloaded);
+            };
+            let snowy = tags::blocks::SNOW.contains(&BlockKind::from(above));
+            with_properties(kind, &[("snowy", if snowy { "true" } else { "false" })])
+        }
+        // HugeMushroomBlock: a side shows unless the block beside it is the same block.
+        PlaceFamily::HugeMushroom => {
+            let mut props = Vec::with_capacity(6);
+            for (name, dir) in [
+                ("down", Direction::Down),
+                ("up", Direction::Up),
+                ("north", Direction::North),
+                ("east", Direction::East),
+                ("south", Direction::South),
+                ("west", Direction::West),
+            ] {
+                let Some(next) = chunks.get_block_state(target.offset_with_direction(dir)) else {
+                    return Verdict::Unknown(UnknownWhy::Unloaded);
+                };
+                props.push((name, if BlockKind::from(next) == kind { "false" } else { "true" }));
+            }
+            with_properties(kind, &props)
+        }
+        PlaceFamily::Stairs => {
+            let facing = horizontal_direction(req.yaw);
+            if facing != horizontal_direction(req.sent_yaw) {
+                return Verdict::Unknown(UnknownWhy::FacingYaw);
+            }
+            // StairBlock#getStateForPlacement: bottom unless the face is down or the click is in
+            // the upper half of a side face.
+            let bottom = req.face != Direction::Down
+                && (req.face == Direction::Up || req.hit.y - target.y as f64 <= 0.5);
+            let Some(shape) = stairs_shape(chunks, target, facing, bottom) else {
+                return Verdict::Unknown(UnknownWhy::Unloaded);
+            };
+            with_properties(
+                kind,
+                &[
+                    ("facing", direction_name(facing)),
+                    ("half", if bottom { "bottom" } else { "top" }),
+                    ("waterlogged", if is_water_source(before) { "true" } else { "false" }),
+                    ("shape", shape),
+                ],
+            )
+        }
         PlaceFamily::Unknown => None,
     };
     let Some(state) = state else { return Verdict::Unknown(UnknownWhy::Family) };
+
+    // VegetationBlock#canSurvive (BlockItem#canPlace): dirt tag or farmland below the cell. A
+    // failed check is a client FAIL: the packet goes out, nothing is predicted.
+    if family == PlaceFamily::Vegetation {
+        let Some(below) = chunks.get_block_state(target.down(1)) else {
+            return Verdict::Unknown(UnknownWhy::Unloaded);
+        };
+        let below = BlockKind::from(below);
+        if !(tags::blocks::DIRT.contains(&below) || below == BlockKind::Farmland) {
+            return Verdict::Nothing("the plant cannot survive on the block below (canSurvive)");
+        }
+    }
 
     // BlockItem#canPlace: canSurvive is true for every stage 1 family (the generator checks that
     // no class in the chain overrides it); then Level#isUnobstructed.
@@ -352,6 +499,41 @@ pub fn predict_place(chunks: &impl BlockView, req: &PlaceRequest) -> Verdict {
         return Verdict::Nothing("the cell already holds that state");
     }
     Verdict::Predict { pos: target, state }
+}
+
+/// `StairBlock#getStairsShape` for a stair about to stand in `pos`: outer corner from the stair in
+/// front, inner corner from the one behind, else straight. `None` when a neighbour is not loaded.
+// Spec: specs/B6-placement-breaking.md §4.10 (stairs: patch 71)
+fn stairs_shape(chunks: &impl BlockView, pos: BlockPos, facing: Direction, bottom: bool) -> Option<&'static str> {
+    let half = if bottom { "bottom" } else { "top" };
+    // (facing, half) of a stair in the cell, None for any other block
+    let stair_at = |cell: BlockPos| -> Option<Option<(Direction, bool)>> {
+        let st = chunks.get_block_state(cell)?;
+        if !BlockKind::from(st).to_str().ends_with("_stairs") {
+            return Some(None);
+        }
+        let f = direction_from_name(st.get_property("facing")?)?;
+        Some(Some((f, st.get_property("half")? == half)))
+    };
+    // canTakeShape: no stair of the same facing and half in the cell on the given side
+    let can_take = |dir: Direction| -> Option<bool> {
+        Some(match stair_at(pos.offset_with_direction(dir))? {
+            Some((f, same_half)) => !(same_half && f == facing),
+            None => true,
+        })
+    };
+    let axis_z = |d: Direction| matches!(d, Direction::North | Direction::South);
+    if let Some((f, true)) = stair_at(pos.offset_with_direction(facing))? {
+        if axis_z(f) != axis_z(facing) && can_take(f.opposite())? {
+            return Some(if f == counter_clockwise(facing) { "outer_left" } else { "outer_right" });
+        }
+    }
+    if let Some((f, true)) = stair_at(pos.offset_with_direction(facing.opposite()))? {
+        if axis_z(f) != axis_z(facing) && can_take(f)? {
+            return Some(if f == counter_clockwise(facing) { "inner_left" } else { "inner_right" });
+        }
+    }
+    Some("straight")
 }
 
 /// What `Minecraft#startUseItem` does with the swing after the client-side try of a place.
@@ -541,6 +723,7 @@ pub struct PlaceContext {
     pub zone: Aabb,
     pub game_mode: GameMode,
     pub sent_yaw: f32,
+    pub sent_pitch: f32,
     pub obstacles: Vec<Obstacle>,
 }
 
@@ -615,6 +798,7 @@ impl PlaceView<'_, '_> {
             zone: movement_zone(&bot_box, data.physics.velocity),
             game_mode: data.game_mode.current,
             sent_yaw: data.last_look.y_rot,
+            sent_pitch: data.last_look.x_rot,
             obstacles,
         })
     }
@@ -653,6 +837,8 @@ mod tests {
             game_mode: GameMode::Survival,
             yaw: 0.0,
             sent_yaw: 0.0,
+            pitch: 0.0,
+            sent_pitch: 0.0,
             obstacles,
         }
     }
@@ -828,7 +1014,7 @@ mod tests {
     fn what_stage_one_cannot_compute_is_unknown() {
         let (chunks, _keep) = world();
         let (clicked, hit) = top_of_floor();
-        for held in ["minecraft:oak_fence", "minecraft:oak_stairs", "minecraft:torch", "minecraft:diamond_sword", "minecraft:chest"] {
+        for held in ["minecraft:oak_fence", "minecraft:oak_door", "minecraft:torch", "minecraft:diamond_sword", "minecraft:chest", "minecraft:redstone_lamp", "minecraft:oak_leaves"] {
             assert_eq!(
                 predict_place(&chunks, &req(held, clicked, Direction::Up, hit, &[])),
                 Verdict::Unknown(UnknownWhy::Family),
@@ -913,5 +1099,173 @@ mod tests {
         let blocker = [Obstacle { aabb: cell_box(BlockPos::new(2, FLOOR + 1, 2)), certain: true }];
         let r2 = PlaceRequest { obstacles: &blocker, ..r };
         assert_eq!(swing_of(&chunks, &r2), ClientSwing::No);
+    }
+
+    // Expected states below come from reading the 1.21.11 sources named on each test (the
+    // `getStateForPlacement` of the class), not from this module.
+
+    fn place_at(chunks: &ChunkStorage, r: &PlaceRequest) -> BlockState {
+        predicted(predict_place(chunks, r)).1
+    }
+
+    /// A request that clicks the top of the floor block (2, FLOOR, 2), so the cell is (2, FLOOR+1, 2).
+    fn on_floor<'a>(held: &'a str, hit_y: f64) -> PlaceRequest<'a> {
+        req(held, BlockPos::new(2, FLOOR, 2), Direction::Up, Vec3::new(2.5, hit_y, 2.5), &[])
+    }
+
+    fn set(chunks: &ChunkStorage, x: i32, y: i32, z: i32, kind: BlockKind, props: &[(&str, &str)]) {
+        chunks.set_block_state(BlockPos::new(x, y, z), with_properties(kind, props).unwrap());
+    }
+
+    // StairBlock#getStateForPlacement, #getStairsShape
+    #[test]
+    fn stairs_face_the_player_and_take_half_and_water() {
+        let (chunks, _keep) = world();
+        let mut r = on_floor("minecraft:oak_stairs", FLOOR as f64 + 1.0);
+        r.yaw = 90.0;
+        r.sent_yaw = 90.0;
+        let s = place_at(&chunks, &r);
+        assert_eq!(
+            (s.get_property("facing"), s.get_property("half"), s.get_property("shape"), s.get_property("waterlogged")),
+            (Some("west"), Some("bottom"), Some("straight"), Some("false"))
+        );
+        // the side of a block, hit in the upper half: top
+        set(&chunks, 2, FLOOR + 1, 4, BlockKind::Stone, &[]);
+        let mut side = req(
+            "minecraft:oak_stairs",
+            BlockPos::new(2, FLOOR + 1, 4),
+            Direction::North,
+            Vec3::new(2.5, FLOOR as f64 + 1.75, 4.0),
+            &[],
+        );
+        assert_eq!(place_at(&chunks, &side).get_property("half"), Some("top"));
+        side.hit = Vec3::new(2.5, FLOOR as f64 + 1.25, 4.0);
+        assert_eq!(place_at(&chunks, &side).get_property("half"), Some("bottom"));
+        // the down face is always top
+        set(&chunks, 2, FLOOR + 6, 4, BlockKind::Stone, &[]);
+        let down = req("minecraft:oak_stairs", BlockPos::new(2, FLOOR + 6, 4), Direction::Down, Vec3::new(2.5, FLOOR as f64 + 6.0, 4.5), &[]);
+        assert_eq!(place_at(&chunks, &down).get_property("half"), Some("top"));
+        // a water source in the cell
+        set(&chunks, 2, FLOOR + 1, 2, BlockKind::Water, &[("level", "0")]);
+        assert_eq!(place_at(&chunks, &on_floor("minecraft:oak_stairs", FLOOR as f64 + 1.0)).get_property("waterlogged"), Some("true"));
+    }
+
+    #[test]
+    fn stairs_corner_shapes_follow_the_neighbours() {
+        let (chunks, _keep) = world();
+        let (y, st) = (FLOOR + 1, BlockKind::OakStairs);
+        // yaw 0 faces south. A stair in front (south) facing east is the counter-clockwise side: outer left
+        set(&chunks, 2, y, 3, st, &[("facing", "east"), ("half", "bottom")]);
+        let r = on_floor("minecraft:oak_stairs", FLOOR as f64 + 1.0);
+        assert_eq!(place_at(&chunks, &r).get_property("shape"), Some("outer_left"));
+        // facing west in front: outer right
+        set(&chunks, 2, y, 3, st, &[("facing", "west"), ("half", "bottom")]);
+        assert_eq!(place_at(&chunks, &r).get_property("shape"), Some("outer_right"));
+        // another half in front does not count
+        set(&chunks, 2, y, 3, st, &[("facing", "west"), ("half", "top")]);
+        assert_eq!(place_at(&chunks, &r).get_property("shape"), Some("straight"));
+        // behind (north) facing west: inner right; facing east: inner left
+        set(&chunks, 2, y, 3, BlockKind::Air, &[]);
+        set(&chunks, 2, y, 1, st, &[("facing", "west"), ("half", "bottom")]);
+        assert_eq!(place_at(&chunks, &r).get_property("shape"), Some("inner_right"));
+        set(&chunks, 2, y, 1, st, &[("facing", "east"), ("half", "bottom")]);
+        assert_eq!(place_at(&chunks, &r).get_property("shape"), Some("inner_left"));
+        // canTakeShape: a stair with our own facing and half on the far side blocks the corner
+        set(&chunks, 2, y, 1, BlockKind::Air, &[]);
+        set(&chunks, 2, y, 3, st, &[("facing", "east"), ("half", "bottom")]);
+        set(&chunks, 1, y, 2, st, &[("facing", "south"), ("half", "bottom")]);
+        assert_eq!(place_at(&chunks, &r).get_property("shape"), Some("straight"));
+    }
+
+    // AnvilBlock, DispenserBlock, BarrelBlock, PistonBaseBlock, ObserverBlock, AbstractFurnaceBlock
+    #[test]
+    fn looking_and_clockwise_families() {
+        let (chunks, _keep) = world();
+        let h = FLOOR as f64 + 1.0;
+        let mut r = on_floor("minecraft:anvil", h);
+        assert_eq!(place_at(&chunks, &r).get_property("facing"), Some("west")); // south, clockwise
+        r.held = "minecraft:furnace";
+        assert_eq!(place_at(&chunks, &r).get_property("facing"), Some("north")); // opposite of south
+        r.held = "minecraft:dispenser";
+        assert_eq!(place_at(&chunks, &r).get_property("facing"), Some("north"));
+        r.held = "minecraft:observer";
+        assert_eq!(place_at(&chunks, &r).get_property("facing"), Some("south"));
+        for (pitch, dispenser) in [(90.0, "up"), (-90.0, "down")] {
+            r.pitch = pitch;
+            r.sent_pitch = pitch;
+            r.held = "minecraft:barrel";
+            assert_eq!(place_at(&chunks, &r).get_property("facing"), Some(dispenser), "{pitch}");
+        }
+        r.pitch = 0.0;
+        r.sent_pitch = 0.0;
+        r.yaw = 90.0;
+        r.sent_yaw = 90.0;
+        r.held = "minecraft:piston";
+        assert_eq!(place_at(&chunks, &r).get_property("facing"), Some("east"));
+        // on a diagonal vanilla's sine table decides: not predicted
+        r.yaw = 45.0;
+        r.sent_yaw = 45.0;
+        assert_eq!(predict_place(&chunks, &r), Verdict::Unknown(UnknownWhy::FacingYaw));
+        // the server knows another pitch than the client shows
+        r.yaw = 0.0;
+        r.sent_yaw = 0.0;
+        r.pitch = 80.0;
+        assert_eq!(predict_place(&chunks, &r), Verdict::Unknown(UnknownWhy::FacingYaw));
+    }
+
+    // LightningRodBlock, ChainBlock
+    #[test]
+    fn clicked_face_and_axis_families_take_water() {
+        let (chunks, _keep) = world();
+        set(&chunks, 3, FLOOR + 1, 2, BlockKind::Stone, &[]);
+        let r = req("minecraft:lightning_rod", BlockPos::new(3, FLOOR + 1, 2), Direction::West, Vec3::new(3.0, FLOOR as f64 + 1.5, 2.5), &[]);
+        let s = place_at(&chunks, &r);
+        assert_eq!((s.get_property("facing"), s.get_property("waterlogged")), (Some("west"), Some("false")));
+        set(&chunks, 2, FLOOR + 1, 2, BlockKind::Water, &[("level", "0")]);
+        assert_eq!(place_at(&chunks, &r).get_property("waterlogged"), Some("true"));
+        let r = req("minecraft:iron_chain", BlockPos::new(3, FLOOR + 1, 2), Direction::West, Vec3::new(3.0, FLOOR as f64 + 1.5, 2.5), &[]);
+        let s = place_at(&chunks, &r);
+        assert_eq!((s.get_property("axis"), s.get_property("waterlogged")), (Some("x"), Some("true")));
+    }
+
+    // VegetationBlock#canSurvive (mayPlaceOn: dirt tag or farmland)
+    #[test]
+    fn plants_need_dirt_or_farmland_below() {
+        let (chunks, _keep) = world();
+        let h = FLOOR as f64 + 1.0;
+        // stone below: a client FAIL, nothing predicted
+        assert!(matches!(predict_place(&chunks, &on_floor("minecraft:dandelion", h)), Verdict::Nothing(_)));
+        set(&chunks, 2, FLOOR, 2, BlockKind::GrassBlock, &[]);
+        assert_eq!(BlockKind::from(place_at(&chunks, &on_floor("minecraft:dandelion", h))), BlockKind::Dandelion);
+        assert_eq!(place_at(&chunks, &on_floor("minecraft:oak_sapling", h)).get_property("stage"), Some("0"));
+        set(&chunks, 2, FLOOR, 2, BlockKind::Farmland, &[]);
+        assert_eq!(BlockKind::from(place_at(&chunks, &on_floor("minecraft:poppy", h))), BlockKind::Poppy);
+        // sand is not in the dirt tag
+        set(&chunks, 2, FLOOR, 2, BlockKind::Sand, &[]);
+        assert!(matches!(predict_place(&chunks, &on_floor("minecraft:fern", h)), Verdict::Nothing(_)));
+        // dead bush, wheat and mushrooms have their own mayPlaceOn: not predicted
+        for k in ["minecraft:dead_bush", "minecraft:wheat_seeds", "minecraft:brown_mushroom", "minecraft:nether_sprouts"] {
+            assert!(matches!(predict_place(&chunks, &on_floor(k, h)), Verdict::Unknown(_)), "{k}");
+        }
+    }
+
+    // SnowyDirtBlock, HugeMushroomBlock
+    #[test]
+    fn snowy_top_and_mushroom_sides() {
+        let (chunks, _keep) = world();
+        let h = FLOOR as f64 + 1.0;
+        assert_eq!(place_at(&chunks, &on_floor("minecraft:grass_block", h)).get_property("snowy"), Some("false"));
+        set(&chunks, 2, FLOOR + 2, 2, BlockKind::SnowBlock, &[]);
+        assert_eq!(place_at(&chunks, &on_floor("minecraft:grass_block", h)).get_property("snowy"), Some("true"));
+        set(&chunks, 2, FLOOR + 2, 2, BlockKind::Snow, &[("layers", "1")]);
+        assert_eq!(place_at(&chunks, &on_floor("minecraft:podzol", h)).get_property("snowy"), Some("true"));
+        set(&chunks, 2, FLOOR + 2, 2, BlockKind::Stone, &[]);
+        assert_eq!(place_at(&chunks, &on_floor("minecraft:mycelium", h)).get_property("snowy"), Some("false"));
+        // a red mushroom block to the east hides our east side only; the stem does not count
+        set(&chunks, 3, FLOOR + 1, 2, BlockKind::RedMushroomBlock, &[]);
+        set(&chunks, 1, FLOOR + 1, 2, BlockKind::MushroomStem, &[]);
+        let s = place_at(&chunks, &on_floor("minecraft:red_mushroom_block", h));
+        let sides: Vec<_> = ["down", "up", "north", "east", "south", "west"].iter().map(|n| s.get_property(n).unwrap()).collect();
+        assert_eq!(sides, ["true", "true", "true", "false", "true", "true"]);
     }
 }

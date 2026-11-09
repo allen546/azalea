@@ -243,9 +243,27 @@ mod place_families_tests {
                     assert_eq!(k, ["type", "waterlogged"], "{kind:?}");
                     seen[3] += 1;
                 }
-                PlaceFamily::HorizontalFacing | PlaceFamily::HorizontalFacingSame => {
+                PlaceFamily::HorizontalFacing
+                | PlaceFamily::HorizontalFacingSame
+                | PlaceFamily::FacingClockwise
+                | PlaceFamily::LookingOpposite
+                | PlaceFamily::LookingSame => {
                     assert!(k.contains(&"facing"), "{kind:?}");
                     seen[4] += 1;
+                }
+                PlaceFamily::AxisWaterlogged => {
+                    assert!(k.contains(&"axis") && k.contains(&"waterlogged"), "{kind:?}");
+                }
+                PlaceFamily::ClickedFaceWaterlogged => {
+                    assert!(k.contains(&"facing") && k.contains(&"waterlogged"), "{kind:?}");
+                }
+                PlaceFamily::Vegetation => assert!(k.is_empty() || k == ["stage"] , "{kind:?}"),
+                PlaceFamily::Stairs => {
+                    assert_eq!(k, ["facing", "half", "shape", "waterlogged"], "{kind:?}");
+                }
+                PlaceFamily::SnowyTop => assert_eq!(k, ["snowy"], "{kind:?}"),
+                PlaceFamily::HugeMushroom => {
+                    assert_eq!(k, ["down", "east", "north", "south", "up", "west"], "{kind:?}");
                 }
                 PlaceFamily::Unknown => seen[5] += 1,
             }
@@ -261,7 +279,7 @@ mod place_families_tests {
         assert_eq!(place_family(BlockKind::OakSlab), PlaceFamily::Slab);
         assert_eq!(place_family(BlockKind::Barrier), PlaceFamily::Waterloggable);
         // placement rules beyond stage 1
-        for k in [BlockKind::OakFence, BlockKind::OakStairs, BlockKind::Torch, BlockKind::Chest, BlockKind::GrassBlock, BlockKind::OakDoor, BlockKind::OakLeaves] {
+        for k in [BlockKind::OakFence, BlockKind::Torch, BlockKind::Chest, BlockKind::OakDoor, BlockKind::OakLeaves, BlockKind::Wheat, BlockKind::RedstoneLamp] {
             assert_eq!(place_family(k), PlaceFamily::Unknown, "{k:?}");
         }
         for k in [BlockKind::OakFence, BlockKind::OakStairs, BlockKind::RedstoneWire, BlockKind::OakLeaves, BlockKind::Vine, BlockKind::IronBars] {

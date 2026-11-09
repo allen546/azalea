@@ -58,6 +58,7 @@ for f in block_dir.rglob("*.java"):
         gsp=gsp,
         us=us,
         survive=bool(re.search(r"boolean canSurvive\(", text)),
+        mayplace=bool(re.search(r"boolean mayPlaceOn\(", text)),
         replace=bool(re.search(r"boolean canBeReplaced\(BlockState \w+, BlockPlaceContext", text))
         or "implements SegmentableBlock" in text
         or re.search(r"\bSegmentableBlock\b", text) is not None and name != "SegmentableBlock",
@@ -82,6 +83,22 @@ WATER_BODIES = {
 }
 
 
+FACING_CLOCKWISE = "return this.defaultBlockState().setValue(FACING, CTX.getHorizontalDirection().getClockWise());"
+END_PORTAL_FRAME = "return this.defaultBlockState().setValue(FACING, CTX.getHorizontalDirection().getOpposite()).setValue(HAS_EYE, false);"
+LOOK_OPPOSITE = "return this.defaultBlockState().setValue(FACING, CTX.getNearestLookingDirection().getOpposite());"
+LOOK_OPPOSITE_EXT = "return this.defaultBlockState().setValue(FACING, CTX.getNearestLookingDirection().getOpposite()).setValue(EXTENDED, false);"
+LOOK_SAME = "return this.defaultBlockState().setValue(FACING, CTX.getNearestLookingDirection().getOpposite().getOpposite());"
+CLICKED_FACE_WATER = "FluidState fluidState = CTX.getLevel().getFluidState(CTX.getClickedPos()); boolean bl = fluidState.getType() == Fluids.WATER; return this.defaultBlockState().setValue(FACING, CTX.getClickedFace()).setValue(WATERLOGGED, bl);"
+# `super.getStateForPlacement(CTX)` is the default state when the next class up has no override
+SUPER_WATER = re.compile(
+    r"FluidState (\w+) = CTX\.getLevel\(\)\.getFluidState\(CTX\.getClickedPos\(\)\); "
+    r"(?:boolean (\w+) = \1\.getType\(\) == Fluids\.WATER; )?"
+    r"return (this\.defaultBlockState\(\)|super\.getStateForPlacement\(CTX\))\.setValue\(WATERLOGGED, "
+    r"(?:\1\.getType\(\) == Fluids\.WATER|\1\.is\(Fluids\.WATER\)|\2)\);")
+# classes whose body was checked by hand against the vanilla source (see the patch ledger row)
+CLASS_FAMILY = {"StairBlock": "Stairs", "SnowyDirtBlock": "SnowyTop", "HugeMushroomBlock": "HugeMushroom"}
+
+
 def chain(cls):
     seen = []
     while cls in classes and cls not in seen and cls not in ("Block", "BlockBehaviour"):
@@ -92,9 +109,15 @@ def chain(cls):
 
 def family(cls):
     ch = chain(cls)
-    if any(classes[c]["survive"] for c in ch):
-        return "Unknown"
+    surv = [c for c in ch if classes[c]["survive"]]
     first = classes_first_gsp(ch)
+    # VegetationBlock#canSurvive with the base mayPlaceOn (dirt tag or farmland) and the default state
+    if surv == ["VegetationBlock"] and first is None and not any(classes[c]["mayplace"] for c in ch if c != "VegetationBlock"):
+        return "Vegetation"
+    if surv:
+        return "Unknown"
+    if first in CLASS_FAMILY:
+        return CLASS_FAMILY[first]
     if first == "SlabBlock":
         return "Slab"
     if first is None:
@@ -108,6 +131,25 @@ def family(cls):
         return "HorizontalFacing"
     if body == FACING_SAME:
         return "HorizontalFacingSame"
+    if body == END_PORTAL_FRAME:
+        return "HorizontalFacing"
+    if body == FACING_CLOCKWISE:
+        return "FacingClockwise"
+    if body in (LOOK_OPPOSITE, LOOK_OPPOSITE_EXT):
+        return "LookingOpposite"
+    if body == LOOK_SAME:
+        return "LookingSame"
+    if body == CLICKED_FACE_WATER:
+        return "ClickedFaceWaterlogged"
+    m = SUPER_WATER.fullmatch(body)
+    if m:
+        if m.group(3).startswith("this"):
+            return "Waterloggable"
+        nxt = classes_first_gsp(ch[ch.index(first) + 1:])
+        if nxt is None:
+            return "Waterloggable"
+        if classes[nxt]["gsp"] == AXIS:
+            return "AxisWaterlogged"
     return "Unknown"
 
 
@@ -155,10 +197,15 @@ for m in stmt.finditer(blocks_text):
 
 # Items that are a plain BlockItem named like the block.
 items_text = (item_dir / "Items.java").read_text()
-plain_items = set(
-    re.findall(r"= registerBlock\(Blocks\.(\w+)\);", items_text)
-    + re.findall(r"= registerBlock\(Blocks\.(\w+), new Item\.Properties\(\)[^;]*\);", items_text)
-)
+plain_items = set()
+for m in re.finditer(r"= registerBlock\((.*?)\);\n", items_text, re.S):
+    first = re.match(r"\s*Blocks\.(\w+)\s*(.*)\Z", m.group(1), re.S)
+    if not first:
+        continue
+    rest = first.group(2).strip()
+    # a BlockItem: no second argument, a properties argument, or a stack-component operator
+    if rest == "" or re.match(r",\s*(new Item\.Properties\(\)|\(UnaryOperator<Item\.Properties>\))", rest):
+        plain_items.add(first.group(1))
 plain_items = {i.lower() for i in plain_items}
 
 camel = lambda s: "".join(p.capitalize() for p in s.split("_"))
@@ -179,6 +226,11 @@ for bid, cls in registered:
         plain_replace.append(bid)
     if ch is not None and any(classes[c]["indirect"] for c in ch):
         indirect.append(bid)
+
+
+FAMILIES = ["Plain", "Axis", "Waterloggable", "Slab", "HorizontalFacing", "HorizontalFacingSame", "FacingClockwise",
+            "LookingOpposite", "LookingSame", "AxisWaterlogged", "ClickedFaceWaterlogged", "Vegetation", "Stairs",
+            "SnowyTop", "HugeMushroom"]
 
 
 def arms(ids):
@@ -212,6 +264,24 @@ out = [
     "    HorizontalFacing,",
     "    /// Facing the player's horizontal direction.",
     "    HorizontalFacingSame,",
+    "    /// Facing the horizontal direction turned a quarter clockwise (`AnvilBlock`).",
+    "    FacingClockwise,",
+    "    /// Facing opposite the nearest looking direction (`Direction#orderedByNearest`, first).",
+    "    LookingOpposite,",
+    "    /// Facing the nearest looking direction.",
+    "    LookingSame,",
+    "    /// `RotatedPillarBlock` axis plus waterlogged from the cell.",
+    "    AxisWaterlogged,",
+    "    /// Facing the clicked face, waterlogged from the cell (lightning rods).",
+    "    ClickedFaceWaterlogged,",
+    "    /// Default state; `VegetationBlock#canSurvive`: dirt tag or farmland below.",
+    "    Vegetation,",
+    "    /// `StairBlock`: facing, half, waterlogged and the shape from the neighbours.",
+    "    Stairs,",
+    "    /// `SnowyDirtBlock`: snowy when the block above is in the snow tag.",
+    "    SnowyTop,",
+    "    /// `HugeMushroomBlock`: a face is shown unless the neighbour is the same block.",
+    "    HugeMushroom,",
     "    Unknown,",
     "}",
     "",
@@ -219,7 +289,7 @@ out = [
 out.append("/// The family of this block's item when it is a plain `BlockItem` of the same name.")
 out.append("pub fn place_family(kind: BlockKind) -> PlaceFamily {")
 out.append("    match kind {")
-for fam in ["Plain", "Axis", "Waterloggable", "Slab", "HorizontalFacing", "HorizontalFacingSame"]:
+for fam in FAMILIES:
     ids = by_family.get(fam, [])
     if ids:
         out.append(f"        {arms(ids)} => PlaceFamily::{fam},")
