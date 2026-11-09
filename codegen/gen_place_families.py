@@ -63,6 +63,9 @@ for f in block_dir.rglob("*.java"):
         or "implements SegmentableBlock" in text
         or re.search(r"\bSegmentableBlock\b", text) is not None and name != "SegmentableBlock",
         indirect=bool(re.search(r"updateIndirectNeighbourShapes\(", text)),
+        # redstone output: a class that overrides `getSignal` or `isSignalSource` may power a neighbour
+        signal=bool(re.search(r"\bint getSignal\(|\bboolean isSignalSource\(", text)),
+        direct=bool(re.search(r"\bint getDirectSignal\(", text)),
     )
 
 
@@ -107,10 +110,29 @@ def chain(cls):
     return seen
 
 
+# Classes whose `getStateForPlacement` reads neighbours or looks (patch 71 and later), each with
+# the only classes of its chain allowed to override `canSurvive` (checked by the Rust rule).
+ATTACHED = {
+    "FenceBlock": ("Fence", []),
+    "IronBarsBlock": ("Pane", []),
+    "WallBlock": ("Wall", []),
+    "FenceGateBlock": ("FenceGate", []),
+    "TrapDoorBlock": ("Trapdoor", []),
+    "LeavesBlock": ("Leaves", []),
+    "LadderBlock": ("Ladder", ["LadderBlock"]),
+    "ChestBlock": ("Chest", []),
+}
+
+
 def family(cls):
     ch = chain(cls)
     surv = [c for c in ch if classes[c]["survive"]]
     first = classes_first_gsp(ch)
+    if first in ATTACHED and set(surv) <= set(ATTACHED[first][1]):
+        return ATTACHED[first][0]
+    # a plain rail (not powered, activator or detector: those run redstone code on the client)
+    if cls == "RailBlock" and first == "BaseRailBlock" and surv == ["BaseRailBlock"]:
+        return "Rail"
     # VegetationBlock#canSurvive with the base mayPlaceOn (dirt tag or farmland) and the default state
     if surv == ["VegetationBlock"] and first is None and not any(classes[c]["mayplace"] for c in ch if c != "VegetationBlock"):
         return "Vegetation"
@@ -206,14 +228,23 @@ for m in re.finditer(r"= registerBlock\((.*?)\);\n", items_text, re.S):
     # a BlockItem: no second argument, a properties argument, or a stack-component operator
     if rest == "" or re.match(r",\s*(new Item\.Properties\(\)|\(UnaryOperator<Item\.Properties>\))", rest):
         plain_items.add(first.group(1))
+# Torches: `StandingAndWallBlockItem(block, wall block, ...)`, the item of the standing block.
+torch_items = {}
+for m in re.finditer(r"registerBlock\(\s*Blocks\.(\w+)\s*,[^;]*?new StandingAndWallBlockItem\(block, Blocks\.(\w+),", items_text):
+    torch_items[m.group(1).lower()] = m.group(2).lower()
 plain_items = {i.lower() for i in plain_items}
+plain_items |= set(torch_items)
 
 camel = lambda s: "".join(p.capitalize() for p in s.split("_"))
 by_family = {}
 inert_ids, plain_replace, indirect = [], [], []
+no_signal, no_direct = [], []
 for bid, cls in registered:
     if cls not in classes and cls != "Block":
         fam = "Unknown"
+    elif bid in torch_items:
+        # BaseTorchBlock#canSurvive (centre support below) and the wall block's rules: Torch rule in Rust
+        fam = "Torch" if cls in ("TorchBlock", "RedstoneTorchBlock") else "Unknown"
     else:
         fam = family(cls) if cls != "Block" else "Plain"
     if bid not in plain_items:
@@ -226,11 +257,16 @@ for bid, cls in registered:
         plain_replace.append(bid)
     if ch is not None and any(classes[c]["indirect"] for c in ch):
         indirect.append(bid)
+    if cls == "Block" or (ch is not None and not any(classes[c]["signal"] for c in ch)):
+        no_signal.append(bid)
+    if cls == "Block" or (ch is not None and not any(classes[c]["direct"] for c in ch)):
+        no_direct.append(bid)
 
 
 FAMILIES = ["Plain", "Axis", "Waterloggable", "Slab", "HorizontalFacing", "HorizontalFacingSame", "FacingClockwise",
             "LookingOpposite", "LookingSame", "AxisWaterlogged", "ClickedFaceWaterlogged", "Vegetation", "Stairs",
-            "SnowyTop", "HugeMushroom"]
+            "SnowyTop", "HugeMushroom", "Torch", "Ladder", "Fence", "Pane", "Wall", "FenceGate", "Trapdoor", "Leaves",
+            "Chest", "Rail"]
 
 
 def arms(ids):
@@ -282,6 +318,26 @@ out = [
     "    SnowyTop,",
     "    /// `HugeMushroomBlock`: a face is shown unless the neighbour is the same block.",
     "    HugeMushroom,",
+    "    /// `StandingAndWallBlockItem`: a standing or wall torch (the wall block is [`torch_wall_block`]).",
+    "    Torch,",
+    "    /// `LadderBlock`: faces away from the nearest looking horizontal direction that has support.",
+    "    Ladder,",
+    "    /// `FenceBlock`: four sides from the neighbours, plus water.",
+    "    Fence,",
+    "    /// `IronBarsBlock` (glass panes, iron and copper bars): four sides from the neighbours, plus water.",
+    "    Pane,",
+    "    /// `WallBlock`: sides, post and heights from the neighbours and the block above, plus water.",
+    "    Wall,",
+    "    /// `FenceGateBlock`: facing, powered and open from the signal, in_wall from the walls beside.",
+    "    FenceGate,",
+    "    /// `TrapDoorBlock`: facing and half from the click, open and powered from the signal, plus water.",
+    "    Trapdoor,",
+    "    /// `LeavesBlock`: persistent, distance from the neighbours, plus water.",
+    "    Leaves,",
+    "    /// `ChestBlock`: facing, single or double from the neighbours and sneaking, plus water.",
+    "    Chest,",
+    "    /// `RailBlock` (the plain rail): straight along the look, plus water, needs a rigid support below.",
+    "    Rail,",
     "    Unknown,",
     "}",
     "",
@@ -307,6 +363,27 @@ out.append("/// The class chain does not override `canBeReplaced`, so a block of
 out.append("/// it is replaceable and the held item is another block.")
 out.append("pub fn plain_replace_rule(kind: BlockKind) -> bool {")
 out.append(f"    matches!(\n        kind,\n        {arms(plain_replace)}\n    )")
+out.append("}")
+out.append("")
+out.append("/// The wall block a torch item places on a side face (`StandingAndWallBlockItem`).")
+out.append("pub fn torch_wall_block(kind: BlockKind) -> Option<BlockKind> {")
+out.append("    match kind {")
+for a, b in sorted(torch_items.items()):
+    out.append(f"        BlockKind::{camel(a)} => Some(BlockKind::{camel(b)}),")
+out.append("        _ => None,")
+out.append("    }")
+out.append("}")
+out.append("")
+out.append("/// No class in the chain overrides `getSignal` or `isSignalSource`: the block never outputs")
+out.append("/// redstone power (`SignalGetter#getSignal`).")
+out.append("pub fn gives_no_signal(kind: BlockKind) -> bool {")
+out.append(f"    matches!(\n        kind,\n        {arms(no_signal)}\n    )")
+out.append("}")
+out.append("")
+out.append("/// No class in the chain overrides `getDirectSignal`: the block never powers a block it touches")
+out.append("/// directly (`SignalGetter#getDirectSignalTo`).")
+out.append("pub fn gives_no_direct_signal(kind: BlockKind) -> bool {")
+out.append(f"    matches!(\n        kind,\n        {arms(no_direct)}\n    )")
 out.append("}")
 out.append("")
 out.append("/// The class overrides `updateIndirectNeighbourShapes` (redstone wire), so a place changes")

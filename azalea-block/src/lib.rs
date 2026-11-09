@@ -15,7 +15,8 @@ use azalea_registry::builtin::BlockKind;
 pub use behavior::BlockBehavior;
 pub use click_use::block_uses_click;
 pub use place_families::{
-    PlaceFamily, indirect_shape_block, place_family, plain_replace_rule, shape_inert,
+    PlaceFamily, gives_no_direct_signal, gives_no_signal, indirect_shape_block, place_family,
+    plain_replace_rule, shape_inert, torch_wall_block,
 };
 // re-exported for convenience
 pub use block_state::BlockState;
@@ -265,6 +266,25 @@ mod place_families_tests {
                 PlaceFamily::HugeMushroom => {
                     assert_eq!(k, ["down", "east", "north", "south", "up", "west"], "{kind:?}");
                 }
+                PlaceFamily::Torch => assert!(k.is_empty() || k == ["lit"], "{kind:?}"),
+                PlaceFamily::Ladder => assert_eq!(k, ["facing", "waterlogged"], "{kind:?}"),
+                PlaceFamily::Fence | PlaceFamily::Pane => {
+                    assert_eq!(k, ["east", "north", "south", "waterlogged", "west"], "{kind:?}");
+                }
+                PlaceFamily::Wall => {
+                    assert_eq!(k, ["east", "north", "south", "up", "waterlogged", "west"], "{kind:?}");
+                }
+                PlaceFamily::FenceGate => {
+                    assert_eq!(k, ["facing", "in_wall", "open", "powered"], "{kind:?}");
+                }
+                PlaceFamily::Trapdoor => {
+                    assert_eq!(k, ["facing", "half", "open", "powered", "waterlogged"], "{kind:?}");
+                }
+                PlaceFamily::Leaves => {
+                    assert_eq!(k, ["distance", "persistent", "waterlogged"], "{kind:?}");
+                }
+                PlaceFamily::Chest => assert_eq!(k, ["facing", "type", "waterlogged"], "{kind:?}"),
+                PlaceFamily::Rail => assert_eq!(k, ["shape", "waterlogged"], "{kind:?}"),
                 PlaceFamily::Unknown => seen[5] += 1,
             }
         }
@@ -278,8 +298,8 @@ mod place_families_tests {
         assert_eq!(place_family(BlockKind::OakLog), PlaceFamily::Axis);
         assert_eq!(place_family(BlockKind::OakSlab), PlaceFamily::Slab);
         assert_eq!(place_family(BlockKind::Barrier), PlaceFamily::Waterloggable);
-        // placement rules beyond stage 1
-        for k in [BlockKind::OakFence, BlockKind::Torch, BlockKind::Chest, BlockKind::OakDoor, BlockKind::OakLeaves, BlockKind::Wheat, BlockKind::RedstoneLamp] {
+        // placement rules still not modelled (doors and beds place two blocks, crops need light)
+        for k in [BlockKind::OakDoor, BlockKind::Wheat, BlockKind::RedstoneLamp, BlockKind::PoweredRail, BlockKind::WhiteBed] {
             assert_eq!(place_family(k), PlaceFamily::Unknown, "{k:?}");
         }
         for k in [BlockKind::OakFence, BlockKind::OakStairs, BlockKind::RedstoneWire, BlockKind::OakLeaves, BlockKind::Vine, BlockKind::IronBars] {
@@ -288,6 +308,13 @@ mod place_families_tests {
         for k in [BlockKind::Stone, BlockKind::Dirt, BlockKind::Air, BlockKind::OakSlab] {
             assert!(shape_inert(k), "{k:?}");
         }
+        assert_eq!(place_family(BlockKind::OakFence), PlaceFamily::Fence);
+        assert_eq!(place_family(BlockKind::Torch), PlaceFamily::Torch);
+        assert_eq!(place_family(BlockKind::Chest), PlaceFamily::Chest);
+        assert_eq!(place_family(BlockKind::Rail), PlaceFamily::Rail);
+        assert_eq!(torch_wall_block(BlockKind::SoulTorch), Some(BlockKind::SoulWallTorch));
+        assert!(gives_no_signal(BlockKind::Stone) && !gives_no_signal(BlockKind::RedstoneBlock));
+        assert!(gives_no_direct_signal(BlockKind::Stone) && !gives_no_direct_signal(BlockKind::Lever));
         assert!(indirect_shape_block(BlockKind::RedstoneWire));
         assert!(!plain_replace_rule(BlockKind::Snow));
         assert!(!plain_replace_rule(BlockKind::OakSlab));

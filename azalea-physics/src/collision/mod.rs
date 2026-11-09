@@ -28,7 +28,7 @@ pub use offset::{BlockShapeAt, block_offset};
 pub use discrete_voxel_shape::*;
 use entity_collisions::{CollidableEntityQuery, get_entity_collisions};
 pub use shape::*;
-pub use sturdy::is_face_sturdy;
+pub use sturdy::{FaceRegion, SupportType, collision_face_covers, is_face_sturdy, is_face_supported};
 use tracing::warn;
 
 use self::world_collisions::get_block_collisions;

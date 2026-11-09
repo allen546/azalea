@@ -48,6 +48,7 @@ use azalea_registry::builtin::EntityKind;
 use azalea_world::BlockView;
 use bevy_ecs::{prelude::*, query::QueryData, system::SystemParam};
 
+use super::place_rules;
 use crate::{
     local_player::{LocalGameMode, TabList},
     movement::LastSentLookDirection,
@@ -70,6 +71,13 @@ pub enum UnknownWhy {
     EntityUnsure,
     /// The facing family: the yaw the server uses (the last one sent) differs from the current one.
     FacingYaw,
+    /// A support shape the fork does not model decides the state (snow layers, fence gates, shulker
+    /// boxes, chorus flowers, hanging signs, multiface blocks).
+    Support,
+    /// Redstone power at the cell cannot be shown to be absent from the blocks around it.
+    Signal,
+    /// Sneaking changed this tick, so the server's view of it is not the client's.
+    SecondaryUse,
 }
 
 impl UnknownWhy {
@@ -82,6 +90,9 @@ impl UnknownWhy {
             Self::ReplaceRule => "the target block has its own replace rule",
             Self::EntityUnsure => "an entity that may block building overlaps the cell",
             Self::FacingYaw => "the yaw the server knows differs from the current yaw",
+            Self::Support => "a neighbour's support shape is not modelled",
+            Self::Signal => "redstone power at the cell is not provably absent",
+            Self::SecondaryUse => "the sneak state is changing this tick",
         }
     }
 }
@@ -124,6 +135,8 @@ pub struct PlaceRequest<'a> {
     /// The pitch now, and the pitch the server knows (the families that look up or down).
     pub pitch: f32,
     pub sent_pitch: f32,
+    /// `Player#isSecondaryUseActive` as the server knows it; `None` while that is changing.
+    pub secondary_use: Option<bool>,
     /// The placer's box, then every other entity box near the cell.
     pub obstacles: &'a [Obstacle],
 }
@@ -167,7 +180,7 @@ pub fn cell_box(pos: BlockPos) -> Aabb {
 }
 
 /// Vanilla `Direction#fromYRot`: the horizontal direction a yaw faces.
-fn horizontal_direction(yaw: f32) -> Direction {
+pub(crate) fn horizontal_direction(yaw: f32) -> Direction {
     match ((yaw as f64 / 90.0 + 0.5).floor() as i32) & 3 {
         0 => Direction::South,
         1 => Direction::West,
@@ -176,7 +189,7 @@ fn horizontal_direction(yaw: f32) -> Direction {
     }
 }
 
-fn clockwise(d: Direction) -> Direction {
+pub(crate) fn clockwise(d: Direction) -> Direction {
     match d {
         Direction::North => Direction::East,
         Direction::East => Direction::South,
@@ -186,11 +199,11 @@ fn clockwise(d: Direction) -> Direction {
     }
 }
 
-fn counter_clockwise(d: Direction) -> Direction {
+pub(crate) fn counter_clockwise(d: Direction) -> Direction {
     clockwise(clockwise(clockwise(d)))
 }
 
-fn direction_from_name(name: &str) -> Option<Direction> {
+pub(crate) fn direction_from_name(name: &str) -> Option<Direction> {
     Some(match name {
         "down" => Direction::Down,
         "up" => Direction::Up,
@@ -226,7 +239,7 @@ fn nearest_looking(yaw: f32, pitch: f32) -> Option<Direction> {
     if l > n { pick_x } else { pick_z }
 }
 
-fn axis_name(face: Direction) -> &'static str {
+pub(crate) fn axis_name(face: Direction) -> &'static str {
     match face {
         Direction::Down | Direction::Up => "y",
         Direction::North | Direction::South => "z",
@@ -234,7 +247,7 @@ fn axis_name(face: Direction) -> &'static str {
     }
 }
 
-fn direction_name(d: Direction) -> &'static str {
+pub(crate) fn direction_name(d: Direction) -> &'static str {
     match d {
         Direction::Down => "down",
         Direction::Up => "up",
@@ -247,7 +260,7 @@ fn direction_name(d: Direction) -> &'static str {
 
 /// Whether the cell holds a water source (`FluidState#getType() == Fluids.WATER`, not flowing
 /// water): a waterlogged block, a water block at level 0, or a plant that holds source water.
-fn is_water_source(state: BlockState) -> bool {
+pub(crate) fn is_water_source(state: BlockState) -> bool {
     if state.get_property("waterlogged") == Some("true") {
         return true;
     }
@@ -260,7 +273,7 @@ fn is_water_source(state: BlockState) -> bool {
     }
 }
 
-fn with_properties(kind: BlockKind, props: &[(&str, &str)]) -> Option<BlockState> {
+pub(crate) fn with_properties(kind: BlockKind, props: &[(&str, &str)]) -> Option<BlockState> {
     let mut block: Box<dyn BlockTrait> = kind.into();
     for (name, value) in props {
         block.set_property(name, value).ok()?;
@@ -458,6 +471,15 @@ pub fn predict_place(chunks: &impl BlockView, req: &PlaceRequest) -> Verdict {
             )
         }
         PlaceFamily::Unknown => None,
+        // Families that read neighbours, the look or redstone: see place_rules.rs.
+        _ => {
+            let cx = place_rules::Cx { chunks, req, kind, target, before, replace_clicked };
+            match place_rules::state_for(&cx, family) {
+                place_rules::Rule::State(st) => Some(st),
+                place_rules::Rule::Fail(why) => return Verdict::Nothing(why),
+                place_rules::Rule::Unknown(why) => return Verdict::Unknown(why),
+            }
+        }
     };
     let Some(state) = state else { return Verdict::Unknown(UnknownWhy::Family) };
 
@@ -839,6 +861,7 @@ mod tests {
             sent_yaw: 0.0,
             pitch: 0.0,
             sent_pitch: 0.0,
+            secondary_use: Some(false),
             obstacles,
         }
     }
@@ -1014,7 +1037,7 @@ mod tests {
     fn what_stage_one_cannot_compute_is_unknown() {
         let (chunks, _keep) = world();
         let (clicked, hit) = top_of_floor();
-        for held in ["minecraft:oak_fence", "minecraft:oak_door", "minecraft:torch", "minecraft:diamond_sword", "minecraft:chest", "minecraft:redstone_lamp", "minecraft:oak_leaves"] {
+        for held in ["minecraft:oak_door", "minecraft:diamond_sword", "minecraft:redstone_lamp", "minecraft:powered_rail", "minecraft:white_bed"] {
             assert_eq!(
                 predict_place(&chunks, &req(held, clicked, Direction::Up, hit, &[])),
                 Verdict::Unknown(UnknownWhy::Family),
@@ -1267,5 +1290,218 @@ mod tests {
         let s = place_at(&chunks, &on_floor("minecraft:red_mushroom_block", h));
         let sides: Vec<_> = ["down", "up", "north", "east", "south", "west"].iter().map(|n| s.get_property(n).unwrap()).collect();
         assert_eq!(sides, ["true", "true", "true", "false", "true", "true"]);
+    }
+    // Group tests for patch 71. Expected states come from reading the 1.21.11 sources named
+    // on each test (the `getStateForPlacement` of the class), not from this module. The default
+    // look is yaw 0 (south), pitch 0: Direction#orderedByNearest gives south, down, west, north,
+    // up, east.
+
+    fn side_click<'a>(held: &'a str, wall: (i32, i32, i32), face: Direction, hit_y: f64) -> PlaceRequest<'a> {
+        req(held, BlockPos::new(wall.0, wall.1, wall.2), face, Vec3::new(2.5, hit_y, 2.5), &[])
+    }
+
+    fn props_of(s: BlockState, names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| s.get_property(n).unwrap_or("-").to_string()).collect()
+    }
+
+    // StandingAndWallBlockItem#getPlacementState, WallTorchBlock#getStateForPlacement, BaseTorchBlock#canSurvive
+    #[test]
+    fn torches_stand_on_a_centre_support_or_hang_on_a_sturdy_side() {
+        let (chunks, _keep) = world();
+        let f = FLOOR as f64;
+        // on the floor: the clicked face's opposite (down) comes first, a stone floor supports the centre
+        let s = place_at(&chunks, &on_floor("minecraft:torch", f + 1.0));
+        assert_eq!(BlockKind::from(s), BlockKind::Torch);
+        // on the south face of a stone block: the north look direction goes first, so the torch
+        // hangs on that block and faces south
+        set(&chunks, 2, FLOOR + 1, 1, BlockKind::Stone, &[]);
+        let r = side_click("minecraft:soul_torch", (2, FLOOR + 1, 1), Direction::South, f + 1.5);
+        let s = place_at(&chunks, &r);
+        assert_eq!((BlockKind::from(s), s.get_property("facing")), (BlockKind::SoulWallTorch, Some("south")));
+        let r = side_click("minecraft:redstone_torch", (2, FLOOR + 1, 1), Direction::South, f + 1.5);
+        assert_eq!(BlockKind::from(place_at(&chunks, &r)), BlockKind::RedstoneWallTorch);
+        // on top of a fence post: a post covers the centre square
+        set(&chunks, 6, FLOOR + 1, 6, BlockKind::OakFence, &[]);
+        let r = req("minecraft:torch", BlockPos::new(6, FLOOR + 1, 6), Direction::Up, Vec3::new(6.5, f + 2.5, 6.5), &[]);
+        assert_eq!(BlockKind::from(place_at(&chunks, &r)), BlockKind::Torch);
+        // on leaves with nothing beside: no support, the client's try fails
+        set(&chunks, 8, FLOOR + 1, 8, BlockKind::OakLeaves, &[("persistent", "true")]);
+        let r = req("minecraft:torch", BlockPos::new(8, FLOOR + 1, 8), Direction::Up, Vec3::new(8.5, f + 2.0, 8.5), &[]);
+        assert!(matches!(predict_place(&chunks, &r), Verdict::Nothing(_)));
+        // a look that is not settled (yaw sent differs across a direction) is not guessed
+        let mut r = on_floor("minecraft:torch", f + 1.0);
+        r.yaw = 100.0;
+        assert_eq!(predict_place(&chunks, &r), Verdict::Unknown(UnknownWhy::FacingYaw));
+    }
+
+    // LadderBlock#getStateForPlacement, #canSurvive
+    #[test]
+    fn ladders_face_away_from_the_first_sturdy_look_direction() {
+        let (chunks, _keep) = world();
+        let f = FLOOR as f64;
+        set(&chunks, 2, FLOOR + 1, 1, BlockKind::Stone, &[]);
+        let r = side_click("minecraft:ladder", (2, FLOOR + 1, 1), Direction::South, f + 1.5);
+        let s = place_at(&chunks, &r);
+        assert_eq!(props_of(s, &["facing", "waterlogged"]), ["south", "false"]);
+        // nothing to hang on beside a floor click far from that wall: fails on the client
+        let r = req("minecraft:ladder", BlockPos::new(9, FLOOR, 9), Direction::Up, Vec3::new(9.5, f + 1.0, 9.5), &[]);
+        assert!(matches!(predict_place(&chunks, &r), Verdict::Nothing(_)));
+        // a ladder on a ladder facing the clicked face: null
+        set(&chunks, 4, FLOOR + 1, 4, BlockKind::Ladder, &[("facing", "south")]);
+        let r = side_click("minecraft:ladder", (4, FLOOR + 1, 4), Direction::South, f + 1.5);
+        assert!(matches!(predict_place(&chunks, &r), Verdict::Nothing(_)));
+        // water in the cell
+        set(&chunks, 2, FLOOR + 1, 2, BlockKind::Water, &[("level", "0")]);
+        let r = side_click("minecraft:ladder", (2, FLOOR + 1, 1), Direction::South, f + 1.5);
+        assert_eq!(props_of(place_at(&chunks, &r), &["waterlogged"]), ["true"]);
+    }
+
+    // FenceBlock#getStateForPlacement, #connectsTo, FenceGateBlock.connectsToDirection
+    #[test]
+    fn fences_connect_to_sturdy_sides_same_fences_and_gates_across() {
+        let (chunks, _keep) = world();
+        let h = FLOOR as f64 + 1.0;
+        set(&chunks, 3, FLOOR + 1, 2, BlockKind::Stone, &[]);
+        set(&chunks, 1, FLOOR + 1, 2, BlockKind::OakFence, &[]);
+        set(&chunks, 2, FLOOR + 1, 3, BlockKind::NetherBrickFence, &[]);
+        set(&chunks, 2, FLOOR + 1, 1, BlockKind::OakFenceGate, &[("facing", "west")]);
+        let s = place_at(&chunks, &on_floor("minecraft:oak_fence", h));
+        // north (gate whose axis crosses), east (stone), south (a nether fence is not the same kind), west (oak fence)
+        assert_eq!(props_of(s, &["north", "east", "south", "west"]), ["true", "true", "false", "true"]);
+        // the gate facing north does not connect
+        set(&chunks, 2, FLOOR + 1, 1, BlockKind::OakFenceGate, &[("facing", "north")]);
+        let s = place_at(&chunks, &on_floor("minecraft:oak_fence", h));
+        // a gate across the line is not connected and a gate's support is a bar, never a full face
+        assert_eq!(s.get_property("north"), Some("false"));
+    }
+
+    // IronBarsBlock#getStateForPlacement, #attachsTo, Block#isExceptionForConnection
+    #[test]
+    fn panes_attach_to_bars_and_walls_but_not_to_exceptions() {
+        let (chunks, _keep) = world();
+        let h = FLOOR as f64 + 1.0;
+        set(&chunks, 3, FLOOR + 1, 2, BlockKind::Stone, &[]);
+        set(&chunks, 2, FLOOR + 1, 1, BlockKind::IronBars, &[]);
+        set(&chunks, 1, FLOOR + 1, 2, BlockKind::Pumpkin, &[]);
+        set(&chunks, 2, FLOOR + 1, 3, BlockKind::CobblestoneWall, &[]);
+        let s = place_at(&chunks, &on_floor("minecraft:glass_pane", h));
+        assert_eq!(props_of(s, &["north", "east", "south", "west"]), ["true", "true", "true", "false"]);
+    }
+
+    // WallBlock#getStateForPlacement, #updateShape, #shouldRaisePost, #makeWallState
+    #[test]
+    fn walls_set_arms_by_the_block_above_and_the_post_by_the_arms() {
+        let (chunks, _keep) = world();
+        let h = FLOOR as f64 + 1.0;
+        let names = ["up", "north", "east", "south", "west"];
+        let s = place_at(&chunks, &on_floor("minecraft:cobblestone_wall", h));
+        assert_eq!(props_of(s, &names), ["true", "none", "none", "none", "none"]);
+        set(&chunks, 3, FLOOR + 1, 2, BlockKind::Stone, &[]);
+        let s = place_at(&chunks, &on_floor("minecraft:cobblestone_wall", h));
+        assert_eq!(props_of(s, &names), ["true", "none", "low", "none", "none"]);
+        set(&chunks, 1, FLOOR + 1, 2, BlockKind::Stone, &[]);
+        let s = place_at(&chunks, &on_floor("minecraft:cobblestone_wall", h));
+        assert_eq!(props_of(s, &names), ["false", "none", "low", "none", "low"]);
+        // a full block above makes both arms tall; two tall opposite arms keep the post down
+        set(&chunks, 2, FLOOR + 2, 2, BlockKind::Stone, &[]);
+        let s = place_at(&chunks, &on_floor("minecraft:cobblestone_wall", h));
+        assert_eq!(props_of(s, &names), ["false", "none", "tall", "none", "tall"]);
+        // a top slab above does not reach the cell's bottom edge: low arms (a bottom slab would)
+        set(&chunks, 2, FLOOR + 2, 2, BlockKind::StoneSlab, &[("type", "top")]);
+        let s = place_at(&chunks, &on_floor("minecraft:cobblestone_wall", h));
+        assert_eq!(props_of(s, &names), ["false", "none", "low", "none", "low"]);
+    }
+
+    // FenceGateBlock#getStateForPlacement, SignalGetter#hasNeighborSignal
+    #[test]
+    fn fence_gates_face_the_player_and_see_walls_beside_and_unprovable_power_is_unknown() {
+        let (chunks, _keep) = world();
+        let h = FLOOR as f64 + 1.0;
+        let s = place_at(&chunks, &on_floor("minecraft:oak_fence_gate", h));
+        assert_eq!(props_of(s, &["facing", "open", "powered", "in_wall"]), ["south", "false", "false", "false"]);
+        set(&chunks, 3, FLOOR + 1, 2, BlockKind::CobblestoneWall, &[]);
+        let s = place_at(&chunks, &on_floor("minecraft:oak_fence_gate", h));
+        assert_eq!(s.get_property("in_wall"), Some("true"));
+        // a redstone block beside the cell: the power is not provably absent
+        set(&chunks, 2, FLOOR + 1, 1, BlockKind::RedstoneBlock, &[]);
+        assert_eq!(predict_place(&chunks, &on_floor("minecraft:oak_fence_gate", h)), Verdict::Unknown(UnknownWhy::Signal));
+    }
+
+    // TrapDoorBlock#getStateForPlacement
+    #[test]
+    fn trapdoors_take_face_half_and_water() {
+        let (chunks, _keep) = world();
+        let f = FLOOR as f64;
+        let names = ["facing", "half", "open", "powered", "waterlogged"];
+        let s = place_at(&chunks, &on_floor("minecraft:oak_trapdoor", f + 1.0));
+        assert_eq!(props_of(s, &names), ["north", "bottom", "false", "false", "false"]);
+        set(&chunks, 2, FLOOR + 1, 1, BlockKind::Stone, &[]);
+        let r = side_click("minecraft:iron_trapdoor", (2, FLOOR + 1, 1), Direction::South, f + 1.7);
+        assert_eq!(props_of(place_at(&chunks, &r), &names), ["south", "top", "false", "false", "false"]);
+        let r = side_click("minecraft:iron_trapdoor", (2, FLOOR + 1, 1), Direction::South, f + 1.3);
+        assert_eq!(props_of(place_at(&chunks, &r), &names), ["south", "bottom", "false", "false", "false"]);
+        // placed against the underside of a block: top half
+        set(&chunks, 6, FLOOR + 3, 6, BlockKind::Stone, &[]);
+        let r = req("minecraft:oak_trapdoor", BlockPos::new(6, FLOOR + 3, 6), Direction::Down, Vec3::new(6.5, f + 3.0, 6.5), &[]);
+        assert_eq!(props_of(place_at(&chunks, &r), &names), ["north", "top", "false", "false", "false"]);
+        // a lever next to the cell can power it
+        set(&chunks, 3, FLOOR + 1, 2, BlockKind::Lever, &[]);
+        assert_eq!(predict_place(&chunks, &on_floor("minecraft:oak_trapdoor", f + 1.0)), Verdict::Unknown(UnknownWhy::Signal));
+    }
+
+    // LeavesBlock#getStateForPlacement, #updateDistance
+    #[test]
+    fn leaves_take_the_distance_from_logs_and_leaves() {
+        let (chunks, _keep) = world();
+        let h = FLOOR as f64 + 1.0;
+        let names = ["distance", "persistent", "waterlogged"];
+        assert_eq!(props_of(place_at(&chunks, &on_floor("minecraft:oak_leaves", h)), &names), ["7", "true", "false"]);
+        set(&chunks, 3, FLOOR + 1, 2, BlockKind::OakLeaves, &[("distance", "3")]);
+        assert_eq!(props_of(place_at(&chunks, &on_floor("minecraft:oak_leaves", h)), &names), ["4", "true", "false"]);
+        set(&chunks, 2, FLOOR + 2, 2, BlockKind::OakLog, &[]);
+        assert_eq!(props_of(place_at(&chunks, &on_floor("minecraft:oak_leaves", h)), &names), ["1", "true", "false"]);
+    }
+
+    // ChestBlock#getStateForPlacement, #getChestType, #candidatePartnerFacing
+    #[test]
+    fn chests_join_a_single_chest_unless_sneaking_picks_the_clicked_side() {
+        let (chunks, _keep) = world();
+        let f = FLOOR as f64;
+        let names = ["facing", "type", "waterlogged"];
+        assert_eq!(props_of(place_at(&chunks, &on_floor("minecraft:chest", f + 1.0)), &names), ["north", "single", "false"]);
+        // a chest facing the same way to the east: this one is its LEFT half (clockwise of north is east)
+        set(&chunks, 3, FLOOR + 1, 2, BlockKind::Chest, &[("facing", "north"), ("type", "single")]);
+        assert_eq!(props_of(place_at(&chunks, &on_floor("minecraft:chest", f + 1.0)), &names), ["north", "left", "false"]);
+        // a trapped chest does not join a chest
+        assert_eq!(props_of(place_at(&chunks, &on_floor("minecraft:trapped_chest", f + 1.0)), &names), ["north", "single", "false"]);
+        // a chest to the west: RIGHT
+        set(&chunks, 3, FLOOR + 1, 2, BlockKind::Air, &[]);
+        set(&chunks, 1, FLOOR + 1, 2, BlockKind::Chest, &[("facing", "north"), ("type", "single")]);
+        assert_eq!(props_of(place_at(&chunks, &on_floor("minecraft:chest", f + 1.0)), &names), ["north", "right", "false"]);
+        // sneaking and clicking the east face of that west chest: the new chest copies its facing
+        let mut r = side_click("minecraft:chest", (1, FLOOR + 1, 2), Direction::East, f + 1.5);
+        r.secondary_use = Some(true);
+        assert_eq!(props_of(place_at(&chunks, &r), &names), ["north", "right", "false"]);
+        r.secondary_use = None;
+        assert_eq!(predict_place(&chunks, &r), Verdict::Unknown(UnknownWhy::SecondaryUse));
+    }
+
+    // BaseRailBlock#getStateForPlacement, #canSurvive (canSupportRigidBlock)
+    #[test]
+    fn plain_rails_run_along_the_look_and_need_a_rigid_support() {
+        let (chunks, _keep) = world();
+        let f = FLOOR as f64;
+        let names = ["shape", "waterlogged"];
+        assert_eq!(props_of(place_at(&chunks, &on_floor("minecraft:rail", f + 1.0)), &names), ["north_south", "false"]);
+        let mut r = on_floor("minecraft:rail", f + 1.0);
+        r.yaw = 90.0;
+        r.sent_yaw = 90.0;
+        assert_eq!(props_of(place_at(&chunks, &r), &names), ["east_west", "false"]);
+        // a fence post top is not a rigid support, a bottom slab neither
+        set(&chunks, 6, FLOOR + 1, 6, BlockKind::OakFence, &[]);
+        let r = req("minecraft:rail", BlockPos::new(6, FLOOR + 1, 6), Direction::Up, Vec3::new(6.5, f + 2.5, 6.5), &[]);
+        assert!(matches!(predict_place(&chunks, &r), Verdict::Nothing(_)));
+        // a powered rail runs redstone code on the client: not predicted
+        assert_eq!(predict_place(&chunks, &on_floor("minecraft:powered_rail", f + 1.0)), Verdict::Unknown(UnknownWhy::Family));
     }
 }

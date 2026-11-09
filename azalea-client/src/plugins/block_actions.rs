@@ -941,6 +941,9 @@ pub fn handle_place_block_queued(
                             sent_yaw: cx.sent_yaw,
                             pitch: look.x_rot(),
                             sent_pitch: cx.sent_pitch,
+                            // the server learns a sneak change with the input packet that follows this click
+                            secondary_use: (mv.trying_to_crouch == crouching.is_some_and(|c| **c))
+                                .then(|| is_crouching(&mv, crouching)),
                             obstacles: &cx.obstacles,
                         };
                         let verdict = predict_place(&bot, &request);

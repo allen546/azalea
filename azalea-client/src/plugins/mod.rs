@@ -26,6 +26,7 @@ pub mod mining;
 pub mod movement;
 pub mod packet;
 pub mod place_prediction;
+pub mod place_rules;
 pub mod pong;
 pub mod client_refusals;
 pub mod pushes;
