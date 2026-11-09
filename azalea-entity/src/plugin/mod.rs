@@ -138,12 +138,12 @@ pub fn update_fluid_on_eyes(
 }
 
 /// The fluid at the eyes, as `Entity#updateFluidOnEyes` decides it: take the block that holds
-/// the eye point (the eye height less 0.1111, as before patch 66), and report its fluid when that fluid's
+/// the eye point (the plain eye height, no offset), and report its fluid when that fluid's
 /// height (`FluidState#getHeight`, a full cell when the same fluid is above) reaches above the
 /// eye. Vehicles are not modelled.
-// Spec: specs/B1-movement.md §4.6 (patch 65: eyes-site helper)
+// Spec: specs/B1-movement.md §4.6 (patch 70: the eye point is the plain eye height)
 pub fn fluid_kind_on_eyes(world: &impl BlockView, position: Vec3, eye_height: f32) -> FluidKind {
-    let eye_y = position.y + (eye_height as f64) - 0.1111111119389534;
+    let eye_y = position.y + eye_height as f64;
     let eye_block_pos = BlockPos::from(position.with_y(eye_y));
     let fluid_at_eye = world.get_fluid_state(eye_block_pos).unwrap_or_default();
     let fluid_cutoff_y = (eye_block_pos.y as f32 + world.fluid_height_at(eye_block_pos, &fluid_at_eye)) as f64;
@@ -425,7 +425,7 @@ mod tests {
         assert!(trapdoor_matches_ladder);
     }
 
-    // Spec: specs/B1-movement.md §4.6 (patch 65)
+    // Spec: specs/B1-movement.md §4.6 (patch 70)
     // the partial world owns the chunk; the shared storage holds it weakly, so it is returned too
     fn water_world(cells: &[(i32, BlockState)]) -> (PartialWorld, World) {
         let mut chunks = ChunkStorage::default();
@@ -443,14 +443,24 @@ mod tests {
     }
 
     #[test]
+    fn eye_fluid_uses_the_plain_eye_height_with_no_offset() {
+        // a source cell is 8/9 high; the eye at 63.95 is above its surface (63.889), so the eye is
+        // dry. An 0.1111 offset samples 63.84, below the surface, and wrongly reports water.
+        let (_keep, world) = water_world(&[(63, water(0))]);
+        let at = |y: f64| fluid_kind_on_eyes(&azalea_world::BotWorld::truth(&world), Vec3::new(8.5, y, 8.5), 0.0);
+        assert_eq!(at(63.95), FluidKind::Empty);
+        assert_eq!(at(63.85), FluidKind::Water);
+    }
+
+    #[test]
     fn eye_fluid_counts_a_full_cell_when_the_same_fluid_is_above() {
         // flowing level 1 under another water cell reaches the top of its cell (patch 64), so an eye
         // at 64.95 is in water; the cell's own height (8/9) would leave it dry.
         let (_keep, world) = water_world(&[(64, water(1)), (65, water(1))]);
         let w = azalea_world::BotWorld::truth(&world);
-        assert_eq!(fluid_kind_on_eyes(&w, Vec3::new(8.5, 65.06, 8.5), 0.0), FluidKind::Water);
+        assert_eq!(fluid_kind_on_eyes(&w, Vec3::new(8.5, 64.95, 8.5), 0.0), FluidKind::Water);
         let (_keep2, alone) = water_world(&[(64, water(1))]);
         let w = azalea_world::BotWorld::truth(&alone);
-        assert_eq!(fluid_kind_on_eyes(&w, Vec3::new(8.5, 65.06, 8.5), 0.0), FluidKind::Empty);
+        assert_eq!(fluid_kind_on_eyes(&w, Vec3::new(8.5, 64.95, 8.5), 0.0), FluidKind::Empty);
     }
 }
