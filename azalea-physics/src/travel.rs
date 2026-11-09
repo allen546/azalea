@@ -1,10 +1,10 @@
 use azalea_block::{BlockState, fluid_state::FluidState};
 use azalea_core::{
     aabb::Aabb,
-    position::{BlockPos, ChunkPos, Vec3},
+    position::{BlockPos, Vec3},
 };
 use azalea_entity::{
-    ActiveEffects, Attributes, HasClientLoaded, Jumping, LocalEntity, LookDirection, OnClimbable, Physics,
+    ActiveEffects, Attributes, HasClientLoaded, InLoadedChunk, Jumping, LocalEntity, LookDirection, OnClimbable, Physics,
     PlayerAbilities, Pose, Position, inventory::Inventory, metadata::Sprinting, move_relative,
 };
 use azalea_inventory::components::EquipmentSlot;
@@ -43,7 +43,7 @@ pub fn travel(
             &mut Physics,
             &mut LookDirection,
             &mut Position,
-            Option<&BlockStatePredictionHandler>,
+            (Option<&BlockStatePredictionHandler>, Has<InLoadedChunk>),
         ),
         (With<LocalEntity>, With<HasClientLoaded>),
     >,
@@ -66,7 +66,7 @@ pub fn travel(
         mut physics,
         direction,
         position,
-        pending,
+        (pending, in_loaded_chunk),
     ) in &mut query
     {
         let Some(world_lock) = worlds.get(world_name) else {
@@ -98,6 +98,7 @@ pub fn travel(
             // Null fork (patch 30): the effects `travelInAir` and `getEffectiveGravity` read.
             levitation: active_effects.and_then(|e| e.get_level(MobEffect::Levitation)),
             slow_falling: active_effects.is_some_and(|e| e.get(MobEffect::SlowFalling).is_some()),
+            own_chunk_loaded: in_loaded_chunk,
             wears_leather_boots: inventory.is_some_and(|inv| {
                 inv.get_equipment(EquipmentSlot::Feet)
                     .is_some_and(|s| s.kind() == ItemKind::LeatherBoots)
@@ -142,8 +143,9 @@ fn travel_in_air(ctx: &mut MoveCtx) {
 
     if let Some(amplifier) = ctx.levitation {
         movement.y = levitation_vertical_speed(movement.y, amplifier);
-    } else if ctx.world.world.chunks.get(&ChunkPos::from(block_pos_below)).is_none() {
-        // patch 38: the chunk under the feet has not arrived, so there is no gravity
+    } else if !ctx.own_chunk_loaded {
+        // patch 38: the chunk under the feet has not arrived, so there is no gravity. Patch 65: the
+        // bot's own level decides (`Level#hasChunkAt`), not the shared one (a swarm mate may hold it).
         movement.y = unloaded_chunk_vertical_speed(ctx.position.y, ctx.world.world.chunks.min_y());
     } else {
         // `getEffectiveGravity` reads the speed at this point, after the move step.

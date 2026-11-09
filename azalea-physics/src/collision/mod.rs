@@ -170,6 +170,9 @@ pub struct MoveCtx<'world, 'state, 'a, 'b> {
     pub levitation: Option<i32>,
     /// Slow Falling is in force (`LivingEntity#getEffectiveGravity`).
     pub slow_falling: bool,
+    /// The chunk the bot stands in is in its own level (`InLoadedChunk`, patch 43). Always true
+    /// for a mover that is not a local bot.
+    pub own_chunk_loaded: bool,
 }
 
 /// Move an entity by a given delta, checking for collisions.

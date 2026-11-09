@@ -63,6 +63,7 @@ fn test_gravity() {
             MinecraftEntityId(0),
             LocalEntity,
             HasClientLoaded,
+            azalea_entity::InLoadedChunk,
         ))
         .id();
     {
@@ -121,6 +122,7 @@ fn test_collision() {
             MinecraftEntityId(0),
             LocalEntity,
             HasClientLoaded,
+            azalea_entity::InLoadedChunk,
         ))
         .id();
     let block_state = partial_world.chunks.set_block_state(
@@ -179,6 +181,7 @@ fn test_slab_collision() {
             MinecraftEntityId(0),
             LocalEntity,
             HasClientLoaded,
+            azalea_entity::InLoadedChunk,
         ))
         .id();
     let block_state = partial_world.chunks.set_block_state(
@@ -230,6 +233,7 @@ fn test_top_slab_collision() {
             MinecraftEntityId(0),
             LocalEntity,
             HasClientLoaded,
+            azalea_entity::InLoadedChunk,
         ))
         .id();
     let block_state = world_lock.write().chunks.set_block_state(
@@ -285,6 +289,7 @@ fn test_weird_wall_collision() {
             MinecraftEntityId(0),
             LocalEntity,
             HasClientLoaded,
+            azalea_entity::InLoadedChunk,
         ))
         .id();
     let block_state = world_lock.write().chunks.set_block_state(
@@ -345,6 +350,7 @@ fn test_negative_coordinates_weird_wall_collision() {
             MinecraftEntityId(0),
             LocalEntity,
             HasClientLoaded,
+            azalea_entity::InLoadedChunk,
         ))
         .id();
     let block_state = world_lock.write().chunks.set_block_state(
@@ -409,6 +415,7 @@ fn spawn_and_unload_world() {
             MinecraftEntityId(0),
             LocalEntity,
             HasClientLoaded,
+            azalea_entity::InLoadedChunk,
         ))
         .id();
 
@@ -470,6 +477,7 @@ fn test_falling_water_pushes_a_neighbour_away() {
             MinecraftEntityId(0),
             LocalEntity,
             HasClientLoaded,
+            azalea_entity::InLoadedChunk,
         ))
         .id();
     for _ in 0..3 {
@@ -516,6 +524,7 @@ fn test_fluid_height_counts_a_full_cell_when_the_same_fluid_is_above() {
             MinecraftEntityId(0),
             LocalEntity,
             HasClientLoaded,
+            azalea_entity::InLoadedChunk,
         ))
         .id();
     app.world_mut().run_schedule(GameTick);
@@ -659,6 +668,7 @@ fn test_afk_pool() {
             MinecraftEntityId(0),
             LocalEntity,
             HasClientLoaded,
+            azalea_entity::InLoadedChunk,
         ))
         .id();
 
@@ -756,6 +766,7 @@ mod block_effects {
             MinecraftEntityId(0),
             LocalEntity,
             HasClientLoaded,
+            azalea_entity::InLoadedChunk,
         ));
         e.insert((Jumping(jumping), azalea_physics::client_movement::ClientMovementState::default()));
         if boots {
@@ -1100,10 +1111,28 @@ mod unloaded_chunk {
             .collect()
     }
 
+    // Moves the bot; its own level has the chunk only when the world has it (the real loading
+    // system keeps `InLoadedChunk` in step, patch 43).
     fn move_to(app: &mut App, e: Entity, x: f64, y: f64) {
         let mut p = app.world_mut().get_mut::<Position>(e).unwrap();
         p.x = x;
         p.y = y;
+        if x > 500. {
+            app.world_mut().entity_mut(e).remove::<azalea_entity::InLoadedChunk>();
+        }
+    }
+
+    // Patch 65: the shared world holds the chunk (a swarm mate has it) but this bot's own level does
+    // not: there is no gravity (`Level#hasChunkAt` on the bot's own level).
+    // Spec: specs/B1-movement.md §4.2
+    #[test]
+    fn no_gravity_when_only_the_shared_world_has_the_chunk() {
+        let (mut app, e, _w) = setup(BlockKind::Air, BlockKind::Air, false, false);
+        move_to(&mut app, e, 0.5, 90.);
+        app.world_mut().entity_mut(e).remove::<azalea_entity::InLoadedChunk>();
+        tick(&mut app, e, 0.);
+        let v = app.world().get::<Physics>(e).unwrap().velocity.y;
+        assert!((v - -0.1 * DRAG).abs() < 1e-12, "{v}");
     }
 
     // No chunk (x = 1000 is chunk 62, never loaded): the fall is a steady -0.1 a tick, then drag.
