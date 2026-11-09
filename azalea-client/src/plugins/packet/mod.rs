@@ -78,11 +78,7 @@ pub fn death_event_on_0_health(
 
 impl Plugin for PacketPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            relative_updates::debug_detect_updates_received_on_local_entities,
-        )
-        .add_observer(game::handle_outgoing_packets_observer)
+        app.add_observer(game::handle_outgoing_packets_observer)
         .add_observer(config::handle_outgoing_packets_observer)
         .add_observer(login::handle_outgoing_packets_observer)
         .add_systems(

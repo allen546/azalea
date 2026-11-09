@@ -97,19 +97,9 @@ pub fn handle_receive_chunk_event(
         let mut world = local_player.shared.write();
         let mut partial_world = local_player.partial.write();
 
-        // OPTIMIZATION: if we already know about the chunk from the shared world (and
-        // not ourselves), then we don't need to parse it again. This is only used when
-        // we have a shared world, since we check that the chunk isn't currently owned
-        // by this client.
-        let shared_chunk = world.chunks.get(&pos);
-        let this_client_has_chunk = partial_world.chunks.limited_get(&pos).is_some();
-
-        if !this_client_has_chunk && let Some(shared_chunk) = shared_chunk {
-            trace!("Skipping parsing chunk {pos:?} because we already know about it");
-            partial_world.chunks.limited_set(&pos, Some(shared_chunk));
-            continue;
-        }
-
+        // Every bot parses its own packet: a bot links a section only when its own packet held
+        // the same content (section store), never because another bot had the chunk.
+        // Spec: specs/plans/LOAD_CONTRACT.md "Swarm world design" item 4
         let heightmaps = &event.packet.chunk_data.heightmaps;
 
         if let Err(e) = partial_world.chunks.replace_with_packet_data(

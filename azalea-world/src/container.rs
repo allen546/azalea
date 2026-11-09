@@ -95,13 +95,26 @@ impl Worlds {
 /// in the same world.
 #[derive(Clone, Component, Debug, Deref, DerefMut, Eq, Hash, PartialEq)]
 #[doc(alias("dimension"))]
-pub struct WorldName(pub Identifier);
+pub struct WorldName(#[deref] #[deref_mut] pub Identifier, Option<bevy_ecs::entity::Entity>);
 impl WorldName {
     /// Create a new `WorldName` with the given name.
     pub fn new(name: &str) -> Self {
-        Self(Identifier::new(name))
+        Self(Identifier::new(name), None)
     }
 }
+impl WorldName {
+    /// The name a bot gets for the dimension the server sent.
+    ///
+    /// The name also holds the bot's entity as a hidden key part, so `Worlds` keeps one `World` per
+    /// bot and dimension, as a vanilla client has one level per connection. Every lookup by
+    /// `WorldName` then finds the bot's own world.
+    // Spec: specs/plans/LOAD_CONTRACT.md "Swarm world design" item 1
+    pub fn for_bot(dimension: Identifier, bot: bevy_ecs::entity::Entity) -> Self {
+        // The name stays vanilla's (`Deref` gives the dimension identifier); only the key differs.
+        Self(dimension, Some(bot))
+    }
+}
+
 impl Display for WorldName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
@@ -109,6 +122,6 @@ impl Display for WorldName {
 }
 impl From<Identifier> for WorldName {
     fn from(ident: Identifier) -> Self {
-        Self(ident)
+        Self(ident, None)
     }
 }

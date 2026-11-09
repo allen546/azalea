@@ -45,6 +45,8 @@ fn setup() -> (Simulation, Entity) {
     login.player_id = MinecraftEntityId(77);
     s.receive_packet_for(b, login);
     s.receive_packet_for(b, make_basic_empty_chunk(ChunkPos::new(0, 0), (384 + 64) / 16));
+    // The server tells B too: with one World per bot, B reads only what B's own packets said.
+    s.receive_packet_for(b, ClientboundBlockUpdate { pos: CELL, block_state: BlockKind::Tnt.into() });
     s.receive_packet_for(
         b,
         ClientboundPlayerPosition {
@@ -195,6 +197,8 @@ fn test_a_server_update_for_a_pending_cell_writes_the_shared_world() {
     s.write_message(StartMiningBlockEvent { entity: a, position: CELL, force: true });
     s.tick();
     s.receive_packet(ClientboundBlockUpdate { pos: CELL, block_state: BlockState::AIR });
+    // The server tells B as well; with one World per bot B reads only its own packets.
+    s.receive_packet_for(b, ClientboundBlockUpdate { pos: CELL, block_state: BlockState::AIR });
     s.tick();
     assert_eq!(s.get_block_state(CELL), Some(BlockState::AIR), "the update wrote the shared world");
     s.receive_packet(ClientboundBlockChangedAck { seq: 1 });

@@ -28,7 +28,7 @@ use azalea_entity::{
     Position,
     dimensions::EntityDimensions,
     indexing::EntityIdIndex,
-    interpolation::{EntityInterpolation, PeerView},
+    interpolation::EntityInterpolation,
     metadata::{AbstractBoat, AbstractLiving, SleepingPos},
     push::{
         PushRecord, PusherClass, boat_height_rule, push_box, push_velocity, pusher_class,
@@ -81,7 +81,6 @@ impl Plugin for PushesPlugin {
                     .after(PhysicsSystems)
                     .after(crate::movement::send_position)
                     .after(update_last_bounding_box)
-                    .after(azalea_entity::interpolation::update_peer_views)
                     .in_set(PushSystems),
             ),
         );
@@ -103,7 +102,6 @@ struct BotData {
     sleeping: Option<&'static SleepingPos>,
     riding: Option<&'static RidingVehicle>,
     scoreboard: Option<&'static Scoreboard>,
-    peers: Option<&'static PeerView>,
     own_id: Option<&'static MinecraftEntityId>,
     tab_list: Option<&'static TabList>,
     profile: Option<&'static GameProfileComponent>,
@@ -120,7 +118,6 @@ struct PusherData {
     profile: Option<&'static GameProfileComponent>,
     living: Has<AbstractLiving>,
     boat: Has<AbstractBoat>,
-    local: Has<LocalEntity>,
     mcid: Option<&'static MinecraftEntityId>,
 }
 
@@ -211,17 +208,7 @@ fn push_pass<const AFTER: bool>(
             }
         };
 
-        // The other bots this bot sees (patch 31): their smoothed positions, not their own. Read first, so the
-        // view entry of a bot wins over any other entity with its id.
-        if let Some(view) = bot.peers {
-            for (peer, entry) in view.iter() {
-                let Ok(data) = pushers.get(peer) else { continue };
-                let pos = if AFTER { entry.position } else { entry.peek_position() };
-                consider(peer, pos, &data);
-            }
-        }
-
-        // Entities every bot shares (mobs, boats, remote players).
+        // The entities of this bot's own world (mobs, boats, other players).
         if let Some(world) = worlds.get(bot.world) {
             let world = world.read();
             let chunk = |v: f64| (v / 16.0).floor() as i32;
@@ -238,11 +225,6 @@ fn push_pass<const AFTER: bool>(
                         if !data.loaded_by.is_some_and(|l| l.contains(&bot.entity))
                             || !bot.ids.contains_ecs_entity(entity)
                         {
-                            continue;
-                        }
-                        // Another bot is read from this bot's own view below, never from its own
-                        // exact position.
-                        if data.local {
                             continue;
                         }
                         let pos: Vec3 = **data.position;

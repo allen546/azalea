@@ -5,7 +5,7 @@ use azalea_auth::game_profile::GameProfile;
 use azalea_chat::FormattedText;
 use azalea_client::{
     local_player::{LocalGameMode, TabList},
-    player::{GameProfileComponent, PlayerInfo},
+    player::PlayerInfo,
     test_utils::prelude::*,
 };
 use azalea_core::{
@@ -15,9 +15,8 @@ use azalea_core::{
     position::{BlockPos, ChunkPos, Vec3},
 };
 use azalea_entity::{
-    Dead, LocalEntity, LookDirection, Physics, Position,
+    Dead, LookDirection, Physics, Position,
     indexing::EntityIdIndex,
-    interpolation::PeerView,
     metadata::{Health, SleepingPos},
     push::PushRecord,
     teams::{CollisionRule, Scoreboard},
@@ -471,30 +470,6 @@ fn test_a_pusher_before_the_bot_is_taken_after_its_own_interpolation_step() {
     assert!(bot_pos(&simulation).x < x0 - 0.02, "moved {}", bot_pos(&simulation).x - x0);
 }
 
-// Spec: specs/B1-movement.md §4.2 (Pushes from entities: the bot-to-bot case)
-#[test]
-fn test_another_bot_pushes_from_this_bots_view_of_it() {
-    let _lock = init();
-    let mut simulation = setup();
-    let mut p = make_basic_add_entity(EntityKind::Player, 180, (BX + 0.3, 64., BZ));
-    p.uuid = Uuid::from_u128(20_180);
-    simulation.receive_packet(p);
-    simulation.update();
-    let peer = entity_of(&simulation, 180);
-    simulation.app.world_mut().entity_mut(peer).insert(LocalEntity);
-    simulation.tick();
-    let mut seen = Vec3::ZERO;
-    simulation.with_component::<PeerView>(|v| seen = v.get(peer).expect("in the view").position);
-    // The other bot's own position moves away; the push reads this bot's view of it.
-    simulation.app.world_mut().entity_mut(peer).insert(Position::new(Vec3::new(BX + 9., 64., BZ)));
-    let before = record(&simulation).total;
-    simulation.tick();
-    assert!(record(&simulation).total > before, "pushed by the view of the other bot");
-    let (want, _) = azalea_entity::push::push_velocity(seen.x - bot_pos(&simulation).x, seen.z - bot_pos(&simulation).z).unwrap();
-    assert!(want < -0.02);
-    assert!((record(&simulation).tick_delta.0 - want).abs() < 1e-12, "{} vs {want}", record(&simulation).tick_delta.0);
-}
-
 // Spec: specs/F5-version-layer.md §4.6 (What Null computes: one push per server id, never the own id)
 // A shared swarm `World` can hold a second entity that carries a server id (another bot's view of
 // it). Vanilla holds one entity per id and `LivingEntity#pushEntities` takes its candidates from
@@ -513,44 +488,4 @@ fn test_no_push_from_an_entity_with_the_bots_own_id() {
     let before = record(&simulation).total;
     simulation.tick();
     assert_eq!(record(&simulation).total, before, "the bot was pushed by an entity with its own id");
-}
-
-// Spec: specs/F5-version-layer.md §4.6 (What Null computes: one push per server id, never the own id)
-#[test]
-fn test_one_push_per_server_id_when_a_view_and_a_second_entity_share_it() {
-    let _lock = init();
-    let mut simulation = setup();
-    // Another bot (id 191): its local entity is read through this bot's view of it ...
-    let peer = add_at(&mut simulation, EntityKind::Player, 191, (BX + 0.3, 64., BZ));
-    simulation.app.world_mut().entity_mut(peer).insert(LocalEntity);
-    simulation.tick();
-    simulation.tick();
-    assert_eq!(record(&simulation).max_in_tick, 1, "control: one entity, one push");
-    // ... and a second, non-local entity carries the same id at the same place.
-    let twin = add_at(&mut simulation, EntityKind::Player, 192, (BX + 0.3, 64., BZ));
-    simulation.app.world_mut().entity_mut(twin).insert(MinecraftEntityId(191));
-    simulation.tick();
-    assert_eq!(record(&simulation).max_in_tick, 1, "the same id pushed twice in one tick");
-}
-
-// Spec: specs/F5-version-layer.md §4.6 (What Null computes: one push per server id, never the own id)
-// This bot's view of another bot is its client's only copy of that id (patch 31). A second entity with
-// the id is another bot's view, at a place this client never has, so it must not push even when the
-// view copy is out of reach.
-#[test]
-fn test_the_view_copy_decides_even_when_out_of_reach() {
-    let _lock = init();
-    let mut simulation = setup();
-    let peer = add_at(&mut simulation, EntityKind::Player, 191, (BX + 1.2, 64., BZ));
-    simulation.app.world_mut().entity_mut(peer).insert(LocalEntity);
-    simulation.tick();
-    simulation.tick();
-    let before = record(&simulation).total;
-    let twin = add_at(&mut simulation, EntityKind::Player, 192, (BX + 0.3, 64., BZ));
-    simulation.tick();
-    assert!(record(&simulation).total > before, "control: the twin pushes under its own id");
-    simulation.app.world_mut().entity_mut(twin).insert(MinecraftEntityId(191));
-    let before = record(&simulation).total;
-    simulation.tick();
-    assert_eq!(record(&simulation).total, before, "an entity sharing the view copy's id pushed");
 }

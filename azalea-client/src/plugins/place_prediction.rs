@@ -38,10 +38,9 @@ use azalea_core::{
 use azalea_physics::collision::BlockShapeAt;
 use azalea_registry::{builtin::BlockKind, tags};
 use azalea_entity::{
-    EntityKindComponent, EntityUuid, LocalEntity, Physics, Position,
+    EntityKindComponent, EntityUuid, Physics, Position,
     dimensions::EntityDimensions,
     indexing::EntityIdIndex,
-    interpolation::PeerView,
     metadata::{AbstractBoat, AbstractLiving, AbstractMinecart, ArmorStandMarker},
     LoadedBy,
 };
@@ -479,7 +478,6 @@ pub struct ObstacleData {
     living: Has<AbstractLiving>,
     boat: Has<AbstractBoat>,
     minecart: Has<AbstractMinecart>,
-    local: Has<LocalEntity>,
 }
 
 /// What the bot knows that a place reads besides its world.
@@ -489,7 +487,6 @@ pub struct PlaceBotData {
     last_look: &'static LastSentLookDirection,
     game_mode: &'static LocalGameMode,
     ids: &'static EntityIdIndex,
-    peers: Option<&'static PeerView>,
     tab_list: Option<&'static TabList>,
 }
 
@@ -565,11 +562,7 @@ impl PlaceView<'_, '_> {
                     continue;
                 }
                 let Ok(d) = self.entities.get(entity) else { continue };
-                // another bot is read from this bot's own view below, never from its exact position
-                if d.local
-                    || !d.loaded_by.is_some_and(|l| l.contains(&bot))
-                    || !data.ids.contains_ecs_entity(entity)
-                {
+                if !d.loaded_by.is_some_and(|l| l.contains(&bot)) || !data.ids.contains_ecs_entity(entity) {
                     continue;
                 }
                 let Some(certain) = blocks_building(&d) else { continue };
@@ -578,14 +571,6 @@ impl PlaceView<'_, '_> {
                 }
                 let aabb = d.dimensions.make_bounding_box(**d.position);
                 obstacles.push(Obstacle { aabb, certain });
-            }
-        }
-        // the other bots this bot sees (patch 31): their smoothed boxes
-        if let Some(view) = data.peers {
-            for (peer, entry) in view.iter() {
-                let Ok(d) = self.entities.get(peer) else { continue };
-                let Some(certain) = blocks_building(&d) else { continue };
-                obstacles.push(Obstacle { aabb: entry.bounding_box, certain });
             }
         }
         Some(PlaceContext {

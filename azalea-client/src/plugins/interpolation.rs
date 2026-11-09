@@ -1,4 +1,4 @@
-//! Interpolation of other entities and the bot-to-bot view (fork patch 31).
+//! Interpolation of other entities (fork patch 31).
 //!
 //! Vanilla 1.21.11: `Minecraft#tick` applies the tick's packets, casts the crosshair ray
 //! (`GameRenderer#pick`), handles the clicks (`handleKeybinds`), and only then ticks the entities
@@ -11,7 +11,7 @@
 //! Spec: specs/F5-version-layer.md §4.6 (What Null computes), specs/B1-movement.md §4.2
 
 use azalea_core::tick::GameTick;
-use azalea_entity::interpolation::{interpolate_entities, update_peer_views};
+use azalea_entity::interpolation::interpolate_entities;
 use azalea_physics::{PhysicsSystems, collision::entity_collisions::update_last_bounding_box};
 use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::*;
@@ -23,7 +23,6 @@ impl Plugin for InterpolationPlugin {
             GameTick,
             (
                 interpolate_entities,
-                update_peer_views,
                 // `LastBoundingBox` mirrors `Physics::bounding_box`; refresh it now, not in the
                 // next `Update`, so the box does not lag a tick behind the position.
                 update_last_bounding_box,

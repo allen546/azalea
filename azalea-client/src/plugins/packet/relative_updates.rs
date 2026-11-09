@@ -1,23 +1,16 @@
-// How entity updates are processed (to avoid issues with shared worlds)
-// - Null fork: one client at a time, recorded in `UpdatedBy`, applies relative
-//   updates for each non-local entity; packets for it from other clients are
-//   ignored.
-// - when the updater stops tracking the entity (it leaves the updater's
-//   `LoadedBy`), the next client that gets an update for it takes over.
-// - the old per-client counters were never synced when a client loaded an
-//   entity, so after the leading client died or moved away, no client could
-//   update the entity and it froze in place.
+// How entity updates are processed. Each bot has its own world and its own copy of every entity
+// (specs/plans/LOAD_CONTRACT.md "Swarm world design" item 1), so a bot applies the updates in
+// its own packets and no arbitration between clients is needed.
 
 use std::sync::Arc;
 
 use azalea_core::entity_id::MinecraftEntityId;
-use azalea_entity::LoadedBy;
 use azalea_entity::LocalEntity;
 use azalea_world::PartialWorld;
 use bevy_ecs::prelude::*;
 use derive_more::{Deref, DerefMut};
 use parking_lot::RwLock;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::packet::as_system;
 
@@ -59,32 +52,15 @@ impl RelativeEntityUpdate {
 #[derive(Component, Debug, Deref, DerefMut)]
 pub struct UpdatesReceived(u32);
 
-/// The client whose packets currently drive this entity's relative updates.
-///
-/// Null fork: replaces the per-client update counters, which froze an entity
-/// for every client once the client that was ahead stopped receiving updates
-/// for it (it died, respawned, disconnected or moved out of range). Another
-/// client takes over as soon as the updater no longer has it in `LoadedBy`.
-#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UpdatedBy(pub Entity);
-
-pub type EntityUpdateQuery<'world, 'state, 'a> = Query<
-    'world,
-    'state,
-    (
-        &'a MinecraftEntityId,
-        Option<&'a UpdatedBy>,
-        Option<&'a LoadedBy>,
-        Option<&'a LocalEntity>,
-    ),
->;
+pub type EntityUpdateQuery<'world, 'state, 'a> =
+    Query<'world, 'state, (&'a MinecraftEntityId, Option<&'a LocalEntity>)>;
 
 /// See [`RelativeEntityUpdate`] for details.
+// Spec: specs/plans/LOAD_CONTRACT.md "Swarm world design" item 1
 ///
 /// Calling this function will have the same effect as using the Command, but
 /// it's more performant than the Command.
 pub fn should_apply_entity_update(
-    commands: &mut Commands,
     partial_world: &mut PartialWorld,
     entity: Entity,
     entity_update_query: EntityUpdateQuery,
@@ -96,35 +72,16 @@ pub fn should_apply_entity_update(
         return true;
     };
 
-    let Ok((_minecraft_entity_id, updated_by, loaded_by, local_entity)) =
-        entity_update_query.get(entity)
-    else {
+    let Ok((_minecraft_entity_id, local_entity)) = entity_update_query.get(entity) else {
         // this can happen when the entity despawns in the same Update that we got a
         // relative update for it
         debug!("called should_apply_entity_update on an entity with missing components {entity:?}");
         return false;
     };
 
-    if local_entity.is_some() {
-        // a client tried to update another client, which isn't allowed
-        return false;
-    }
-
-    let Some(this_client) = partial_entity_infos.owner_entity else {
-        // a world with no owner (tests): there is only one source of updates
-        return true;
-    };
-
-    let can_update = match updated_by {
-        None => true,
-        Some(UpdatedBy(c)) if *c == this_client => true,
-        // the updater no longer tracks this entity, so its packets stopped
-        Some(UpdatedBy(c)) => !loaded_by.is_some_and(|l| l.contains(c)),
-    };
-    if can_update && updated_by != Some(&UpdatedBy(this_client)) {
-        commands.entity(entity).insert(UpdatedBy(this_client));
-    }
-    can_update
+    // A client never moves another client's entity. Every other entity is in this bot's own
+    // world, so this bot's packets are the only source of its updates.
+    local_entity.is_none()
 }
 
 impl EntityCommand for RelativeEntityUpdate {
@@ -134,9 +91,8 @@ impl EntityCommand for RelativeEntityUpdate {
         let entity = entity_mut.id();
 
         entity_mut.world_scope(|ecs| {
-            as_system::<(Commands, EntityUpdateQuery)>(ecs, |(mut commands, query)| {
+            as_system::<EntityUpdateQuery>(ecs, |query| {
                 should_update = should_apply_entity_update(
-                    &mut commands,
                     &mut partial_world.write(),
                     entity,
                     query,
@@ -147,15 +103,5 @@ impl EntityCommand for RelativeEntityUpdate {
         if should_update {
             (self.update)(&mut entity_mut);
         }
-    }
-}
-
-/// A system that logs a warning if an entity has both [`UpdatedBy`]
-/// and [`LocalEntity`].
-pub fn debug_detect_updates_received_on_local_entities(
-    query: Query<Entity, (With<LocalEntity>, With<UpdatedBy>)>,
-) {
-    for entity in &query {
-        warn!("Entity {entity:?} has both LocalEntity and UpdatedBy");
     }
 }

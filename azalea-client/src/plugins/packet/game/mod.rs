@@ -9,7 +9,7 @@ use azalea_core::{
     position::{ChunkPos, Vec3},
 };
 use azalea_entity::{
-    interpolation::{PeerEntry, PeerView, SNAP_DISTANCE_SQ, apply_server_pose},
+    interpolation::{SNAP_DISTANCE_SQ, apply_server_pose},
     unmodelled::{RidingVehicle, WorldBorderState},
     Attributes, Dead, EntityBundle, EntityKindComponent, HasClientLoaded, LoadedBy, LocalEntity, LookDirection,
     Physics, PlayerAbilities, Position,
@@ -47,7 +47,7 @@ use crate::{
     movement::{KnockbackData, KnockbackEvent},
     packet::{
         as_system, declare_packet_handlers,
-        relative_updates::{EntityUpdateQuery, RelativeEntityUpdate, UpdatedBy, should_apply_entity_update},
+        relative_updates::{EntityUpdateQuery, RelativeEntityUpdate, should_apply_entity_update},
     },
     player::{GameProfileComponent, PlayerInfo},
     tick_counter::TicksConnected,
@@ -210,29 +210,6 @@ pub struct GamePacketHandler<'a> {
     pub player: Entity,
 }
 impl GamePacketHandler<'_> {
-    /// Patch 31: a packet about another bot. The bot's own client owns its position, so the packet
-    /// feeds this bot's smoothed view of it instead (`PeerView`). Returns true when the target is
-    /// another bot (handled here, even if this bot keeps no view of it: it is out of the radius).
-    // Spec: specs/F5-version-layer.md §4.6 (What Null computes)
-    fn for_peer(&mut self, id: MinecraftEntityId, f: impl FnOnce(&mut PeerEntry)) -> bool {
-        let Some(target) = self
-            .ecs
-            .get::<EntityIdIndex>(self.player)
-            .and_then(|ids| ids.get_by_minecraft_entity(id))
-        else {
-            return false;
-        };
-        if target == self.player || self.ecs.get::<LocalEntity>(target).is_none() {
-            return false;
-        }
-        if let Some(mut view) = self.ecs.get_mut::<PeerView>(self.player)
-            && let Some(entry) = view.get_mut(target)
-        {
-            f(entry);
-        }
-        true
-    }
-
     // Spec: specs/F5-version-layer.md §4.6 (What Null computes)
     pub fn login(&mut self, p: &ClientboundLogin) {
         debug!("Got login packet");
@@ -273,7 +250,7 @@ impl GamePacketHandler<'_> {
                     mut world_holder,
                 ) = query.get_mut(self.player).unwrap();
 
-                let new_world_name = WorldName(p.common.dimension.clone());
+                let new_world_name = WorldName::for_bot(p.common.dimension.clone(), self.player);
 
                 if let Some(mut world_name) = world_name {
                     *world_name = new_world_name.clone();
@@ -347,21 +324,6 @@ impl GamePacketHandler<'_> {
                     azalea_entity::push::PushRecord::default(),
                 ));
 
-                // Patch 44: the server may have announced this bot to an earlier bot of the swarm
-                // before this Login. That bot then holds a plain player entity with this id (a
-                // twin). Vanilla has one entity per id, so this Login adopts the twin.
-                let shared = world_holder.shared.clone();
-                let twin = shared
-                    .read()
-                    .entity_by_id
-                    .get(&p.player_id)
-                    .copied()
-                    .filter(|&e| e != self.player && loaded_by_query.contains(e));
-                let adopted_by: HashSet<Entity> = twin
-                    .and_then(|t| loaded_by_query.get(t).ok())
-                    .map(|l| l.0.clone())
-                    .unwrap_or_default();
-
                 // Patch 32: a login starts the tick order again, with the player first
                 // (`handleLogin` adds the local player before any other entity).
                 entity_id_index.tick_order_mut().clear();
@@ -379,28 +341,13 @@ impl GamePacketHandler<'_> {
                     loaded_by.remove(&self.player);
                 }
 
-                // update or insert loaded_by (the clients that held the twin hold this bot now)
+                // update or insert loaded_by
                 if let Some(mut loaded_by) = loaded_by {
                     loaded_by.insert(self.player);
-                    loaded_by.extend(adopted_by.iter().copied());
                 } else {
-                    let mut holders = adopted_by.clone();
-                    holders.insert(self.player);
-                    commands.entity(self.player).insert(LoadedBy(holders));
-                }
-
-                if let Some(twin) = twin {
-                    // Every client that held the twin now holds this bot's own entity, in the
-                    // same tick-order place; the twin leaves the chunk index and the ECS.
-                    for &holder in &adopted_by {
-                        if let Ok((_, _, _, _, mut index, _)) = query.get_mut(holder) {
-                            index.replace_entity(entity_id, twin, self.player);
-                        }
-                    }
-                    for entities in shared.write().entities_by_chunk.values_mut() {
-                        entities.remove(&twin);
-                    }
-                    commands.entity(twin).despawn();
+                    commands
+                        .entity(self.player)
+                        .insert(LoadedBy(HashSet::from([self.player])));
                 }
             },
         );
@@ -658,8 +605,7 @@ impl GamePacketHandler<'_> {
             Query<Entity>,
             Res<Worlds>,
             ResMut<EntityUuidIndex>,
-            Query<(Option<&UpdatedBy>, Has<LocalEntity>)>,
-            Query<&mut PeerView>,
+            Query<Has<LocalEntity>>,
         )>(
             self.ecs,
             |(
@@ -669,8 +615,7 @@ impl GamePacketHandler<'_> {
                 entity_query,
                 worlds,
                 mut entity_uuid_index,
-                updated_by_query,
-                mut peer_views,
+                local_query,
             )| {
                 let (mut entity_id_index, world_name, tab_list) =
                     query.get_mut(self.player).unwrap();
@@ -703,28 +648,13 @@ impl GamePacketHandler<'_> {
                         }
                         return;
                     };
-                    // Null fork: if no client still tracking it drives its updates, the
-                    // stored position is stale (respawn, teleport, back in range); take
-                    // the absolute one from this packet.
-                    // Never for a local entity: another bot in our swarm owns its own position.
-                    let (updated_by, local) = updated_by_query.get(ecs_entity).unwrap_or((None, true));
-                    let driven = updated_by.is_some_and(|u| u.0 != self.player && loaded_by.contains(&u.0));
-                    if local && ecs_entity != self.player {
-                        // Patch 31: another bot. Its own client owns its position; this bot's
-                        // view of it takes the packet's (`recreateFromPacket`: set at once).
-                        let look: LookDirection =
-                            CompactLookDirection { y_rot: p.y_rot, x_rot: p.x_rot }.into();
-                        if let Ok(mut view) = peer_views.get_mut(self.player)
-                            && let Some(entry) = view.get_mut(ecs_entity)
-                        {
-                            entry.on_add(p.position, (look.y_rot(), look.x_rot()));
-                        }
-                    } else if !driven && !local {
+                    let local = local_query.get(ecs_entity).unwrap_or(true);
+                    // The entity is in this bot's own world, so only this bot's packets move it.
+                    // A packet that adds it again sets its position at once (`recreateFromPacket`)
+                    // and ends any interpolation run. Never for the bot's own entity.
+                    if !local {
                         let pos = p.position;
-                        commands.entity(ecs_entity).insert(UpdatedBy(self.player));
                         commands.entity(ecs_entity).queue(move |mut e: EntityWorldMut| {
-                            // Patch 31: `recreateFromPacket` sets the position at once and ends
-                            // any interpolation run.
                             apply_server_pose(&mut e, Some(pos), None, true);
                             if let Some(mut physics) = e.get_mut::<Physics>() {
                                 physics.vec_delta_codec.set_base(pos);
@@ -883,7 +813,6 @@ impl GamePacketHandler<'_> {
             // this is to make sure the same entity velocity update doesn't get sent
             // multiple times when in swarms
             if should_apply_entity_update(
-                &mut commands,
                 &mut world_holder.partial.write(),
                 entity,
                 entity_update_query,
@@ -976,25 +905,6 @@ impl GamePacketHandler<'_> {
     pub fn teleport_entity(&mut self, p: &ClientboundTeleportEntity) {
         debug!("Got teleport entity packet {p:?}");
 
-        let handled = self.for_peer(p.id, |entry| {
-            let r = &p.relative;
-            let rel = |base: f64, relative: bool, change: f64| if relative { base + change } else { change };
-            let pos = Vec3::new(
-                rel(entry.position.x, r.x, p.change.pos.x),
-                rel(entry.position.y, r.y, p.change.pos.y),
-                rel(entry.position.z, r.z, p.change.pos.z),
-            );
-            let (y_rot, x_rot) = entry.rot();
-            let look = LookDirection::new(
-                rel(y_rot as f64, r.y_rot, p.change.look_direction.y_rot() as f64) as f32,
-                rel(x_rot as f64, r.x_rot, p.change.look_direction.x_rot() as f64) as f32,
-            );
-            entry.on_teleport(pos, (look.y_rot(), look.x_rot()));
-        });
-        if handled {
-            return;
-        }
-
         as_system::<(Commands, Query<(&EntityIdIndex, &WorldHolder)>)>(
             self.ecs,
             |(mut commands, query)| {
@@ -1034,9 +944,6 @@ impl GamePacketHandler<'_> {
     pub fn rotate_head(&mut self, _p: &ClientboundRotateHead) {}
 
     pub fn move_entity_pos(&mut self, p: &ClientboundMoveEntityPos) {
-        if self.for_peer(p.entity_id, |e| e.on_move(Some(&p.delta), None)) {
-            return;
-        }
         as_system::<(
             Commands,
             Query<(&EntityIdIndex, &WorldHolder)>,
@@ -1062,9 +969,6 @@ impl GamePacketHandler<'_> {
         );
     }
     pub fn move_entity_pos_rot(&mut self, p: &ClientboundMoveEntityPosRot) {
-        if self.for_peer(p.entity_id, |e| e.on_move(Some(&p.delta), Some({ let l = LookDirection::from(p.look_direction); (l.y_rot(), l.x_rot()) }))) {
-            return;
-        }
         as_system::<(
             Commands,
             Query<(&EntityIdIndex, &WorldHolder)>,
@@ -1090,9 +994,6 @@ impl GamePacketHandler<'_> {
         );
     }
     pub fn move_entity_rot(&mut self, p: &ClientboundMoveEntityRot) {
-        if self.for_peer(p.entity_id, |e| e.on_move(None, Some({ let l = LookDirection::from(p.look_direction); (l.y_rot(), l.x_rot()) }))) {
-            return;
-        }
         as_system::<(
             Commands,
             Query<(&EntityIdIndex, &WorldHolder)>,
@@ -1292,7 +1193,6 @@ impl GamePacketHandler<'_> {
             };
 
             if !should_apply_entity_update(
-                &mut commands,
                 &mut world_holder.partial.write(),
                 entity,
                 entity_update_query,
@@ -1598,7 +1498,6 @@ impl GamePacketHandler<'_> {
             };
 
             if !should_apply_entity_update(
-                &mut commands,
                 &mut world_holder.partial.write(),
                 entity,
                 entity_update_query,
@@ -1706,7 +1605,7 @@ impl GamePacketHandler<'_> {
                 };
                 let old_attributes = old_attributes.cloned();
 
-                let new_world_name = WorldName(p.common.dimension.clone());
+                let new_world_name = WorldName::for_bot(p.common.dimension.clone(), self.player);
                 // Patch 32, `handleRespawn`: a respawn in the same dimension adds the new local
                 // player to the same level, so it moves to the end of the tick order; another
                 // dimension builds a new level with an empty list, so the player is first again.
@@ -1831,10 +1730,6 @@ impl GamePacketHandler<'_> {
     // entity as ticking, so the "not in the tick list: snap" case is not modelled.
     // Spec: specs/F5-version-layer.md §4.6 (What Null computes)
     pub fn entity_position_sync(&mut self, p: &ClientboundEntityPositionSync) {
-        let look = p.values.look_direction;
-        if self.for_peer(p.id, |e| e.on_position_sync(p.values.pos, (look.y_rot(), look.x_rot()))) {
-            return;
-        }
         as_system::<(
             Commands,
             Query<(&EntityIdIndex, &WorldHolder)>,
@@ -1859,7 +1754,6 @@ impl GamePacketHandler<'_> {
                 let new_look_direction = p.values.look_direction;
 
                 if !should_apply_entity_update(
-                    &mut commands,
                     &mut world_holder.partial.write(),
                     entity,
                     entity_update_query,
@@ -2121,7 +2015,6 @@ fn move_entity(
     };
 
     if !should_apply_entity_update(
-        &mut commands,
         &mut world_holder.partial.write(),
         entity,
         entity_update_query,

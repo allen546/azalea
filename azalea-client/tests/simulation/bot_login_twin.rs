@@ -1,18 +1,17 @@
 use azalea_client::test_utils::prelude::*;
 use azalea_core::{entity_id::MinecraftEntityId, position::ChunkPos};
-use azalea_entity::{LocalEntity, indexing::EntityIdIndex, interpolation::PeerView};
+use azalea_entity::{LocalEntity, indexing::EntityIdIndex};
 use azalea_protocol::packets::ConnectionProtocol;
 use azalea_registry::builtin::EntityKind;
-use bevy_ecs::prelude::*;
 use uuid::Uuid;
 
-// Spec: specs/F5-version-layer.md §4.6 (What Null computes: the bot-to-bot view)
+// Spec: specs/plans/LOAD_CONTRACT.md "Swarm world design" item 1
 // Two bots of one swarm log in close together. The server announces the joiner (id 77) to the
-// earlier bot before the joiner's own Login registers it, so the earlier bot spawns a plain
-// player entity with that id (a twin). The joiner's Login must adopt the twin: one entity for
-// the id, the earlier bot's index pointing at the joiner's local entity, and the view holding it.
+// earlier bot before the joiner's own Login. Each bot has its own world, as a vanilla client has
+// one level per connection: the earlier bot keeps its own plain player entity for id 77, the
+// joiner's Login does not touch it, and the joiner holds its own copy of the earlier bot.
 #[test]
-fn test_joiner_login_adopts_the_twin_another_bot_spawned_for_its_id() {
+fn test_joiner_login_leaves_the_copy_another_bot_spawned_for_its_id() {
     let _lock = init();
     let mut simulation = Simulation::new(ConnectionProtocol::Game);
     simulation.receive_packet(default_login_packet());
@@ -43,17 +42,14 @@ fn test_joiner_login_adopts_the_twin_another_bot_spawned_for_its_id() {
     }
 
     let world = simulation.app.world();
-    let a_index = world.get::<EntityIdIndex>(a).unwrap();
-    assert_eq!(a_index.get_by_minecraft_entity(MinecraftEntityId(77)), Some(b), "A's index holds the joiner's own entity");
-    let mut twins = 0;
-    let mut q = simulation.app.world_mut().query_filtered::<&MinecraftEntityId, Without<LocalEntity>>();
-    for id in q.iter(simulation.app.world()) {
-        if id.0 == 77 {
-            twins += 1;
-        }
-    }
-    assert_eq!(twins, 0, "a non-local entity still carries the joiner's id");
-    let world = simulation.app.world();
-    assert!(world.get::<PeerView>(a).unwrap().contains(b), "A's view holds B");
-    assert!(world.get::<PeerView>(b).unwrap().contains(a), "B's view holds A");
+    let a_copy = world
+        .get::<EntityIdIndex>(a)
+        .unwrap()
+        .get_by_minecraft_entity(MinecraftEntityId(77))
+        .expect("A holds an entity for id 77");
+    assert_ne!(a_copy, b, "A's entity for id 77 is its own copy, not B's local entity");
+    assert!(world.get::<LocalEntity>(a_copy).is_none(), "A's copy is a plain entity");
+    assert!(world.get::<LocalEntity>(b).is_some());
+    let b_copy = world.get::<EntityIdIndex>(b).unwrap().get_by_minecraft_entity(a_id);
+    assert!(b_copy.is_some_and(|e| e != a), "B holds its own copy of A");
 }

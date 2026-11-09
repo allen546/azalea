@@ -137,22 +137,6 @@ impl EntityIdIndex {
         trace!("Inserted {id} -> {entity:?} into a client's EntityIdIndex");
     }
 
-    /// Point `id` at `new` instead of `old`, keeping the tick-order number (patch 44). Returns
-    /// false when `id` did not map to `old`.
-    // Spec: specs/F5-version-layer.md §4.6 (What Null computes)
-    pub fn replace_entity(&mut self, id: MinecraftEntityId, old: Entity, new: Entity) -> bool {
-        if self.entity_by_id.get(&id) != Some(&old) {
-            return false;
-        }
-        self.entity_by_id.insert(id, new);
-        self.id_by_entity.remove(&old);
-        self.id_by_entity.insert(new, id);
-        if let Some(n) = self.tick_order.seq.remove(&old) {
-            self.tick_order.seq.insert(new, n);
-        }
-        true
-    }
-
     pub fn remove_by_minecraft_entity(&mut self, id: MinecraftEntityId) -> Option<Entity> {
         if let Some(entity) = self.entity_by_id.remove(&id) {
             trace!(
@@ -278,10 +262,9 @@ pub fn remove_despawned_entities_from_indexes(
         let Some(world_lock) = worlds.get(world_name) else {
             // the world isn't even loaded by us, so we can safely delete the entity
             debug!("Despawned entity {entity:?} because it's in a world that isn't loaded anymore");
-            if entity_uuid_index.entity_by_uuid.remove(uuid).is_none() {
-                warn!(
-                    "Tried to remove entity {entity:?} from the uuid index but it was not there."
-                );
+            // Each bot holds its own copy of an entity, so the index may point at another bot's copy.
+            if entity_uuid_index.get(uuid) == Some(entity) {
+                entity_uuid_index.remove(uuid);
             }
             // and now remove the entity from the ecs
             commands.entity(entity).despawn();
@@ -343,8 +326,8 @@ pub fn remove_despawned_entities_from_indexes(
             }
         }
         // remove it from the uuid index
-        if entity_uuid_index.entity_by_uuid.remove(uuid).is_none() {
-            warn!("Tried to remove entity {entity:?} from the uuid index but it was not there.");
+        if entity_uuid_index.get(uuid) == Some(entity) {
+            entity_uuid_index.remove(uuid);
         }
         if world.entity_by_id.remove(minecraft_id).is_none() {
             debug!(
@@ -379,6 +362,9 @@ pub fn add_entity_to_indexes(
 
     if let Some(uuid) = entity_uuid {
         // per-world uuid index
-        entity_uuid_index.insert(uuid, ecs_entity);
+        // Every bot holds a copy of one uuid; never overwrite an earlier entry.
+        if !entity_uuid_index.contains_key(&uuid) {
+            entity_uuid_index.insert(uuid, ecs_entity);
+        }
     }
 }

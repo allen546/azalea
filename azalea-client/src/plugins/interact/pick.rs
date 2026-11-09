@@ -8,7 +8,6 @@ use azalea_core::{
 use azalea_entity::{
     Attributes, Dead, LocalEntity, LookDirection, Physics, Position,
     dimensions::EntityDimensions,
-    interpolation::PeerView,
     metadata::{
         AbstractArrow, AbstractBoat, AbstractLiving, AbstractMinecart, ArmorStand,
         ArmorStandMarker, EndCrystal, FallingBlock, InGround, Interaction, ShulkerBullet, Tnt,
@@ -62,7 +61,6 @@ pub fn update_hit_result_component(
             &WorldName,
             &Physics,
             &Attributes,
-            Option<&PeerView>,
             &BlockStatePredictionHandler,
         ),
         With<LocalEntity>,
@@ -71,7 +69,7 @@ pub fn update_hit_result_component(
     aabb_query: AabbQuery,
     pickable_query: MaybePickableEntityQuery,
 ) {
-    for (entity, hit_result_ref, position, dimensions, look_direction, world_name, physics, attributes, peers, pending) in
+    for (entity, hit_result_ref, position, dimensions, look_direction, world_name, physics, attributes, pending) in
         &mut query
     {
         let Some(hit_result) = cast_hit_result(
@@ -82,7 +80,6 @@ pub fn update_hit_result_component(
             world_name,
             physics,
             attributes,
-            peers,
             pending,
             &worlds,
             &aabb_query,
@@ -133,7 +130,6 @@ pub fn insert_initial_hit_result_component(
             world_name,
             physics,
             attributes,
-            None,
             pending,
             &worlds,
             &aabb_query,
@@ -155,7 +151,6 @@ fn cast_hit_result(
     world_name: &WorldName,
     physics: &Physics,
     attributes: &Attributes,
-    peers: Option<&PeerView>,
     pending: &BlockStatePredictionHandler,
     worlds: &Worlds,
     aabb_query: &AabbQuery,
@@ -177,7 +172,6 @@ fn cast_hit_result(
         block_pick_range,
         aabb_query,
         pickable_query,
-        peers,
     }))
 }
 
@@ -218,9 +212,6 @@ pub struct PickOpts<'world, 'state, 'a, 'b, 'c> {
     pub block_pick_range: f64,
     pub aabb_query: &'a AabbQuery<'world, 'state, 'b>,
     pub pickable_query: &'a MaybePickableEntityQuery<'world, 'state, 'c>,
-    /// The picking bot's view of the other bots (patch 31): a bot in it is picked at the
-    /// smoothed box this bot sees, not at the other bot's own.
-    pub peers: Option<&'a PeerView>,
 }
 
 /// Get the block or entity that a player would be looking at if their eyes were
@@ -297,7 +288,6 @@ pub fn pick(opts: PickOpts<'_, '_, '_, '_, '_>) -> HitResult {
         predicate: &is_pickable,
         aabb: &pick_aabb,
         aabb_query: opts.aabb_query,
-        peers: opts.peers,
     });
 
     if let Some(entity_hit_result) = entity_hit_result
@@ -430,7 +420,6 @@ struct PickEntityOpts<'world, 'state, 'a, 'b> {
     predicate: &'a dyn Fn(Entity) -> bool,
     aabb: &'a Aabb,
     aabb_query: &'a AabbQuery<'world, 'state, 'b>,
-    peers: Option<&'a PeerView>,
 }
 
 // port of getEntityHitResult
@@ -438,27 +427,13 @@ fn pick_entity(opts: PickEntityOpts) -> Option<EntityHitResult> {
     let mut picked_distance_squared = opts.pick_range_squared;
     let mut result = None;
 
-    // Patch 31: a bot in the picking bot's view is a candidate at the box in that view; the world
-    // lookup skips it (it would give the other bot's own box).
-    let in_view = |e: Entity| opts.peers.is_some_and(|v| v.contains(e));
-    let world_predicate = |e: Entity| !in_view(e) && (opts.predicate)(e);
-    let mut candidates = get_entities(
+    let candidates = get_entities(
         opts.world,
         Some(opts.source_entity),
         opts.aabb,
-        &world_predicate,
+        opts.predicate,
         opts.aabb_query,
     );
-    if let Some(view) = opts.peers {
-        for (peer, entry) in view.iter() {
-            if peer != opts.source_entity
-                && (opts.predicate)(peer)
-                && opts.aabb.intersects_aabb(&entry.bounding_box)
-            {
-                candidates.push((peer, entry.bounding_box));
-            }
-        }
-    }
     for (candidate, candidate_aabb) in candidates {
         // TODO: if the entity is "REDIRECTABLE_PROJECTILE" then this should be 1.0.
         // azalea needs support for entity tags first for this to be possible. see
