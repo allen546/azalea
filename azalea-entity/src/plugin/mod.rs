@@ -104,6 +104,10 @@ pub fn add_dead(
     }
 }
 
+/// Update [`FluidOnEyes`] of the bots' own entities. Every reader (mining, auto tool) reads a
+/// bot's own entity, and no packet depends on a copy's value, so copies skip it (it was about 40%
+/// of the CPU that own worlds add).
+// Spec: specs/plans/LOAD_CONTRACT.md "Where the added CPU goes"
 pub fn update_fluid_on_eyes(
     mut query: Query<
         (
@@ -113,7 +117,7 @@ pub fn update_fluid_on_eyes(
             &WorldName,
             Option<&BlockStatePredictionHandler>,
         ),
-        With<metadata::AbstractLiving>,
+        (With<metadata::AbstractLiving>, With<LocalEntity>),
     >,
     worlds: Res<Worlds>,
 ) {
@@ -275,13 +279,22 @@ pub fn update_crouching(
 #[derive(Clone, Component, Copy, Debug)]
 pub struct InLoadedChunk;
 
-/// Update the [`InLoadedChunk`] component for all entities in the world that are not clients.
+/// Marks a non-client entity whose [`InLoadedChunk`] something reads. Nothing in the fork sets it:
+/// the readers all sit on a bot's own entity, so copies and mobs skip the chunk lookup.
+// Spec: specs/plans/LOAD_CONTRACT.md "Where the added CPU goes"
+#[derive(Clone, Component, Copy, Debug, Default)]
+pub struct ReadsInLoadedChunk;
+
+/// Update the [`InLoadedChunk`] component for the entities marked [`ReadsInLoadedChunk`] that are not clients.
 /// A client (`LocalEntity`) is loaded when its own client holds the chunk, not when another bot of
 /// the swarm does: `azalea_client::loading::update_in_loaded_chunk_of_clients` sets it (patch 43).
 // Spec: specs/F5-version-layer.md §4.6 (What Null computes)
 pub fn update_in_loaded_chunk(
     mut commands: bevy_ecs::system::Commands,
-    query: Query<(Entity, &WorldName, &Position, Option<&InLoadedChunk>), Without<LocalEntity>>,
+    query: Query<
+        (Entity, &WorldName, &Position, Option<&InLoadedChunk>),
+        (Without<LocalEntity>, With<ReadsInLoadedChunk>),
+    >,
     worlds: Res<Worlds>,
 ) {
     for (entity, world_name, position, last_in_loaded_chunk) in &query {
