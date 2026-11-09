@@ -2,6 +2,7 @@ mod blocks;
 mod discrete_voxel_shape;
 pub mod entity_collisions;
 mod mergers;
+pub mod offset;
 mod shape;
 pub mod world_collisions;
 
@@ -22,6 +23,7 @@ use azalea_registry::builtin::BlockKind;
 use azalea_world::{BlockView, BotWorld};
 use bevy_ecs::{entity::Entity, world::Mut};
 pub use blocks::BlockWithShape;
+pub use offset::{BlockShapeAt, block_offset};
 pub use discrete_voxel_shape::*;
 use entity_collisions::{CollidableEntityQuery, get_entity_collisions};
 pub use shape::*;

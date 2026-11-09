@@ -29,7 +29,7 @@ use azalea_entity::{
     Attributes, Crouching, EntityKindComponent, LookDirection, Position, dimensions::EntityDimensions,
     inventory::Inventory, unmodelled::WorldBorderState,
 };
-use azalea_physics::{PhysicsSystems, collision::{BlockWithShape, VoxelShape}};
+use azalea_physics::{PhysicsSystems, collision::{BlockShapeAt, VoxelShape}};
 use azalea_protocol::packets::game::{
     ServerboundPlayerAction,
     s_interact::InteractionHand,
@@ -634,7 +634,7 @@ pub fn aim_at_block(
     face: Option<Direction>,
 ) -> Option<LookDirection> {
     let state = chunks.get_block_state(pos)?;
-    let boxes = state.outline_shape().to_aabbs();
+    let boxes = state.outline_shape_at(pos).to_aabbs();
     let faces = face.map_or(
         vec![
             Direction::Up,
@@ -872,7 +872,7 @@ pub fn handle_place_block_queued(
             range,
             queued.position,
             Some(queued.direction),
-            clicked.outline_shape(),
+            &clicked.outline_shape_at(queued.position),
             &hit_result,
         )
         .and_then(|r| {
@@ -1083,7 +1083,7 @@ pub fn handle_use_block_queued(
             Err(BlockActionRefusal::CrouchingWithItem)
         } else {
             // the same `useItemOn` border check as a place (patch 51)
-            check_click(eye, range, queued.position, queued.direction, state.outline_shape(), &hit_result).and_then(|r| {
+            check_click(eye, range, queued.position, queued.direction, &state.outline_shape_at(queued.position), &hit_result).and_then(|r| {
                 if block_in_world_border(borders.get(entity).ok(), connected.0, queued.position) {
                     Ok(r)
                 } else {
@@ -1203,7 +1203,7 @@ pub fn begin_break_result(
         let refusal = if check_is_interaction_restricted(&BotWorld::new(&world, &prediction), queued.position, &mode.current, inv) {
             Some(BlockActionRefusal::NotAllowed)
         } else if let Some(why) = checked
-            .then(|| check_click(eye, range, queued.position, None, state.outline_shape(), &hit_result).err())
+            .then(|| check_click(eye, range, queued.position, None, &state.outline_shape_at(queued.position), &hit_result).err())
             .flatten()
         {
             Some(why)

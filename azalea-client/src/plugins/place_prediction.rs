@@ -35,7 +35,7 @@ use azalea_core::{
     game_type::GameMode,
     position::{BlockPos, ChunkPos, Vec3},
 };
-use azalea_physics::collision::BlockWithShape;
+use azalea_physics::collision::BlockShapeAt;
 use azalea_registry::{builtin::BlockKind, tags};
 use azalea_entity::{
     EntityKindComponent, EntityUuid, LocalEntity, Physics, Position,
@@ -328,7 +328,7 @@ pub fn predict_place(chunks: &impl BlockView, req: &PlaceRequest) -> Verdict {
 
     // BlockItem#canPlace: canSurvive is true for every stage 1 family (the generator checks that
     // no class in the chain overrides it); then Level#isUnobstructed.
-    let shape = state.collision_shape();
+    let shape = state.collision_shape_at(target);
     if !shape.is_empty() {
         let cell = Vec3::new(target.x as f64, target.y as f64, target.z as f64);
         let mut unsure = false;

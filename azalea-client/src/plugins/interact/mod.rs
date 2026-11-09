@@ -21,7 +21,7 @@ use azalea_entity::{
 use azalea_inventory::{ItemStack, ItemStackData, components};
 use azalea_physics::{
     PhysicsSystems, client_movement::ClientMovementState,
-    collision::{BlockWithShape, entity_collisions::update_last_bounding_box},
+    collision::{BlockShapeAt, entity_collisions::update_last_bounding_box},
 };
 use azalea_protocol::packets::game::{
     ServerboundInteract, ServerboundUseItem,
@@ -109,7 +109,7 @@ pub fn end_prediction_up_to(
         if let Some(player_box) = player_box {
             let cell = Vec3::new(pos.x as f64, pos.y as f64, pos.z as f64);
             let colliding = server_block_state
-                .collision_shape()
+                .collision_shape_at(pos)
                 .to_aabbs()
                 .iter()
                 .any(|b| b.move_relative(cell).intersects_aabb(player_box));

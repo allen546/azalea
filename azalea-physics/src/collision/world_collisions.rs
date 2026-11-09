@@ -134,7 +134,12 @@ impl<'a> BlockCollisionsState<'a> {
 
         let block_shape = self.get_block_shape(block_state);
 
-        let block_shape = block_shape.move_relative(pos.to_vec3_floored());
+        // A block with an offset type (bamboo, pointed dripstone) sits where its position puts
+        // it, not where the table shape says (`BlockStateBase#getCollisionShape`).
+        let block_shape = match crate::collision::offset::BlockShapeAt::collision_shape_at(&block_state, pos) {
+            std::borrow::Cow::Owned(moved) => moved.move_relative(pos.to_vec3_floored()),
+            std::borrow::Cow::Borrowed(_) => block_shape.move_relative(pos.to_vec3_floored()),
+        };
         // if the entity shape and block shape don't collide, continue
         if !Shapes::matches_anywhere(&block_shape, &self.entity_shape, |a, b| a && b) {
             return;
