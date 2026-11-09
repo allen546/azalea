@@ -7,7 +7,7 @@ use azalea_client::{
     mining::MineBundle,
 };
 use azalea_core::{
-    entity_id::MinecraftEntityId, game_type::GameMode, position::Vec3, tick::GameTick,
+    entity_id::MinecraftEntityId, game_type::GameMode, position::{ChunkPos, Vec3}, tick::GameTick,
 };
 use azalea_entity::{
     Attributes, LookDirection, Physics, Position, dimensions::EntityDimensions,
@@ -94,6 +94,17 @@ fn create_simulation_player_complete_bundle(
 ) -> impl Bundle {
     let world_name = simulation_world_name();
 
+    // Patch 43: a client is in a loaded chunk only if its own `PartialWorld` holds the chunk,
+    // and physics waits for that. Hand the simulated player every chunk of the shared world.
+    let mut partial = PartialWorld::default();
+    partial.chunks.update_view_center(ChunkPos::from(*player.position));
+    {
+        let shared = world.read();
+        for pos in shared.chunks.chunks().iter() {
+            partial.chunks.limited_set(pos, shared.chunks.get(pos));
+        }
+    }
+
     (
         MinecraftEntityId(0),
         azalea_entity::LocalEntity,
@@ -105,8 +116,7 @@ fn create_simulation_player_complete_bundle(
             world_name,
         ),
         azalea_client::local_player::WorldHolder {
-            // the partial world is never actually used by the pathfinder, so we can leave it empty
-            partial: Arc::new(RwLock::new(PartialWorld::default())),
+            partial: Arc::new(RwLock::new(partial)),
             shared: world.clone(),
         },
         Inventory::default(),
