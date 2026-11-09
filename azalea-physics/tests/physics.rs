@@ -568,6 +568,50 @@ fn test_falling_water_beside_a_wall_flows_down() {
     assert!(walled.y < -0.95 && walled.x > -0.25, "wall: mostly down, got {walled:?}");
 }
 
+// Patch 66: the wall's face decides (`isFaceSturdy`), not whether the block is a full cube. The
+// flow tested is at the falling water's east side, where `isSolidFace` reads the east face.
+// A stair that ascends east has a full east face; one that ascends west has a stepped face; leaves are a
+// full cube with an empty support shape. Spec: specs/B1-movement.md §4.6
+#[test]
+fn test_falling_water_wall_face_decides_not_the_full_cube() {
+    let mut app = make_test_app();
+    let world_lock = insert_overworld(&mut app);
+    let mut partial_world = PartialWorld::default();
+    partial_world.chunks.set(
+        &ChunkPos { x: 0, z: 0 },
+        Some(Chunk::default()),
+        &mut world_lock.write().chunks,
+    );
+    let setblock = |x: i32, y: i32, z: i32, b: BlockState| {
+        world_lock.write().chunks.set_block_state(BlockPos { x, y, z }, b);
+    };
+    let water_level = |level: BlockStateIntegerRepr| {
+        BlockState::from(azalea_block::blocks::Water { level: WaterLevel::from(level) })
+    };
+    let pos = BlockPos::new(8, 64, 8);
+    setblock(8, 64, 8, water_level(8));
+    setblock(7, 64, 8, water_level(1));
+    let flow_at = || {
+        let world = world_lock.read();
+        let fluid = world.get_fluid_state(pos).unwrap();
+        azalea_physics::fluids::get_fluid_flow(&fluid, &azalea_world::BotWorld::truth(&world), pos)
+    };
+    let stairs = |facing: &str| {
+        let mut b: Box<dyn azalea_block::BlockTrait> = azalea_registry::builtin::BlockKind::StoneStairs.into();
+        b.set_property("facing", facing).unwrap();
+        b.as_block_state()
+    };
+    setblock(9, 64, 8, stairs("east"));
+    let back = flow_at();
+    assert!(back.y < -0.95, "stair back to the east is a full face: flows down, got {back:?}");
+    setblock(9, 64, 8, stairs("west"));
+    let step = flow_at();
+    assert!(step.y == 0., "stepped east face is not sturdy: no downward flow, got {step:?}");
+    setblock(9, 64, 8, azalea_block::blocks::OakLeaves::default().into());
+    let leaves = flow_at();
+    assert!(leaves.y == 0., "leaves have no support face: no downward flow, got {leaves:?}");
+}
+
 #[test]
 fn test_afk_pool() {
     let mut app = make_test_app();

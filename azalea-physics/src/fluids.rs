@@ -269,14 +269,17 @@ fn is_solid_face(
     is_face_sturdy(block_state, world, adjacent_pos, direction)
 }
 
-// `BlockBehaviour#isFaceSturdy`, for blocks whose collision shape is the full cube. A partial
-// shape (stairs, slabs, fences) counts as not sturdy here, where vanilla checks the face.
+// `BlockBehaviour#isFaceSturdy` (FULL support type), patch 66: the face of the block's support
+// shape covers the whole square (`collision::is_face_sturdy`), so a stair's back or a mud block
+// counts and leaves do not. A block whose support shape the fork does not model keeps the old
+// full-cube answer.
 // Spec: specs/B1-movement.md §4.6 (Falls, swimming, climbing)
 fn is_face_sturdy(
     block_state: BlockState,
     _world: &BotWorld,
     _pos: BlockPos,
-    _direction: Direction,
+    direction: Direction,
 ) -> bool {
-    block_state.is_collision_shape_full()
+    crate::collision::is_face_sturdy(block_state, direction)
+        .unwrap_or_else(|| block_state.is_collision_shape_full())
 }
