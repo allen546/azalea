@@ -36,11 +36,8 @@ impl Client {
     }
 
     pub async fn mine_with_auto_tool(&self, block_pos: BlockPos) -> AzaleaResult<()> {
-        let block_state = self
-            .world()?
-            .read()
-            .get_block_state(block_pos)
-            .unwrap_or_default();
+        // the bot's own view: a block it just broke or placed reads as it predicted
+        let block_state = self.own_block_state(block_pos)?.unwrap_or_default();
         let best_tool_result = self.best_tool_in_hotbar_for_block(block_state)?;
         self.set_selected_hotbar_slot(best_tool_result.index as u8);
         self.mine(block_pos).await;

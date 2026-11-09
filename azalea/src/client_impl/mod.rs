@@ -350,6 +350,18 @@ impl Client {
         Ok(world_holder.shared.clone())
     }
 
+    /// The block at `pos` as this bot sees it: the shared world with this bot's own pending
+    /// predictions on top (`BotWorld`). Use this, not `world().read().get_block_state`, when the
+    /// bot decides something from a block it may just have placed or broken. `None` when the
+    /// chunk is not loaded.
+    // Spec: specs/F5-version-layer.md §4.6 (each bot reads its own view, not shared truth)
+    pub fn own_block_state(&self, pos: azalea_core::position::BlockPos) -> AzaleaResult<Option<azalea_block::BlockState>> {
+        let world = self.world()?;
+        let world = world.read();
+        let pending = self.component::<azalea_world::BlockStatePredictionHandler>().ok();
+        Ok(azalea_world::BotWorld::of(&world, pending.as_deref()).get_block_state(pos))
+    }
+
     /// Get an `RwLock` with a reference to the world that this client has
     /// loaded.
     ///
@@ -569,5 +581,40 @@ impl Client {
     /// This is a shortcut for getting the [`TicksConnected`] component.
     pub fn ticks_connected(&self) -> u64 {
         self.component::<TicksConnected>().map(|c| c.0).unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod own_view_tests {
+    use azalea_block::BlockState;
+    use azalea_core::position::{BlockPos, ChunkPos};
+    use azalea_registry::builtin::BlockKind;
+    use azalea_world::{BlockStatePredictionHandler, Chunk};
+
+    use super::*;
+
+    // Spec: specs/F5-version-layer.md §4.6 (each bot reads its own view, not shared truth)
+    #[test]
+    fn own_block_state_shows_the_bots_prediction_and_the_world_does_not() {
+        let mut ecs = bevy_ecs::world::World::new();
+        let shared = Arc::new(RwLock::new(World::default()));
+        let partial = Arc::new(RwLock::new(PartialWorld::default()));
+        let pos = BlockPos::new(1, 64, 1);
+        {
+            let mut w = shared.write();
+            let mut p = partial.write();
+            p.chunks.set(&ChunkPos::new(0, 0), Some(Chunk::default()), &mut w.chunks);
+            w.chunks.set_block_state(pos, BlockState::from(BlockKind::Stone));
+        }
+        let mut handler = BlockStatePredictionHandler::default();
+        handler.start_predicting();
+        handler.retain_known_server_state(pos, BlockState::from(BlockKind::Stone), azalea_core::position::Vec3::ZERO);
+        handler.set_predicted(pos, BlockState::AIR);
+        let entity = ecs
+            .spawn((azalea_client::local_player::WorldHolder { partial, shared: shared.clone() }, handler))
+            .id();
+        let client = Client::new(entity, Arc::new(RwLock::new(ecs)));
+        assert_eq!(client.own_block_state(pos).unwrap(), Some(BlockState::AIR), "own prediction");
+        assert_eq!(shared.read().get_block_state(pos), Some(BlockState::from(BlockKind::Stone)), "shared truth");
     }
 }

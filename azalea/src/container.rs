@@ -74,11 +74,8 @@ impl Client {
         let mut ticks = self.get_tick_broadcaster();
         // wait until it's not air (up to 10 ticks)
         for _ in 0..10 {
-            let block = self
-                .world()?
-                .read()
-                .get_block_state(pos)
-                .unwrap_or_default();
+            // the bot's own view, not shared truth (patch 62)
+            let block = self.own_block_state(pos)?.unwrap_or_default();
             if !block.is_collision_shape_empty() {
                 break;
             }
