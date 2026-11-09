@@ -633,13 +633,17 @@ impl GamePacketHandler<'_> {
         // debug!("Got light update packet {p:?}");
     }
 
+    // Spec: specs/F5-version-layer.md §4.6 (What Null computes)
     pub fn level_chunk_with_light(&mut self, p: &ClientboundLevelChunkWithLight) {
         debug!("Got chunk with light packet {} {}", p.x, p.z);
 
-        as_system::<MessageWriter<_>>(self.ecs, |mut events| {
+        as_system::<(MessageWriter<_>, Query<&WorldHolder>)>(self.ecs, |(mut events, holders)| {
+            // No world yet (before the login packet): nothing to decode into, as in vanilla.
+            let Ok(holder) = holders.get(self.player) else { return };
             events.write(chunks::ReceiveChunkEvent {
                 entity: self.player,
                 packet: p.clone(),
+                world: Arc::downgrade(&holder.shared),
             });
         });
     }

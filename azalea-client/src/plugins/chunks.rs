@@ -47,6 +47,12 @@ impl Plugin for ChunksPlugin {
 pub struct ReceiveChunkEvent {
     pub entity: Entity,
     pub packet: ClientboundLevelChunkWithLight,
+    /// The world the bot held when the packet arrived. A respawn into another dimension swaps
+    /// it, and a chunk of the old level must not be decoded into the new one.
+    ///
+    /// Weak, so a queued event does not keep a dropped level alive (that would make a later
+    /// respawn into a same-named dimension find the old level).
+    pub world: std::sync::Weak<parking_lot::RwLock<azalea_world::World>>,
 }
 
 #[derive(Clone, Component, Debug)]
@@ -75,6 +81,14 @@ pub fn handle_receive_chunk_event(
         let pos = ChunkPos::new(event.packet.x, event.packet.z);
 
         let (local_player, mut prediction) = query.get_mut(event.entity).unwrap();
+        // `ClientPacketListener` handles a chunk packet in packet order, against the level of
+        // that moment; a later respawn builds a new level. A chunk of a level the bot has left
+        // is dropped, as vanilla's write into the old level is lost with it.
+        // Spec: specs/F5-version-layer.md §4.6 (What Null computes)
+        if !std::sync::Weak::ptr_eq(&event.world, &std::sync::Arc::downgrade(&local_player.shared)) {
+            trace!("Dropping chunk {pos:?} of a level the bot has left");
+            continue;
+        }
         // `ClientPacketListener#updateLevelChunk`: the packet's blocks win over a pending
         // prediction; the retained state stays for the ack.
         // Spec: specs/B6-placement-breaking.md §4.10

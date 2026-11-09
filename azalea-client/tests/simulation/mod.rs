@@ -4,6 +4,7 @@ mod attack_cooldown_like_vanilla;
 mod attackers_from_damage_event;
 mod bot_login_twin;
 mod change_dimension_to_nether_and_back;
+mod chunks_in_packet_order_at_dimension_change;
 mod client_disconnect;
 mod client_refusals;
 mod close_open_container;
