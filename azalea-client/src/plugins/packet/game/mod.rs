@@ -1367,15 +1367,15 @@ impl GamePacketHandler<'_> {
     pub fn forget_level_chunk(&mut self, p: &ClientboundForgetLevelChunk) {
         debug!("Got forget level chunk packet {p:?}");
 
-        as_system::<Query<(&WorldHolder, &mut BlockStatePredictionHandler)>>(self.ecs, |mut query| {
-            let (local_player, mut prediction) = query.get_mut(self.player).unwrap();
+        // The handler does not change: a pending cell in the chunk stays, and the ack settles it
+        // against the missing chunk (`ClientLevel#syncBlockState`; patch 76).
+        // Spec: specs/B6-placement-breaking.md §4.10
+        as_system::<Query<&WorldHolder>>(self.ecs, |query| {
+            let local_player = query.get(self.player).unwrap();
 
             let mut partial_world = local_player.partial.write();
 
             partial_world.chunks.limited_set(&p.pos, None);
-            // a forgotten chunk must not show this bot's pending cells again
-            // Spec: specs/B6-placement-breaking.md §4.10
-            prediction.clear_predictions_in_chunk(p.pos);
         });
     }
 

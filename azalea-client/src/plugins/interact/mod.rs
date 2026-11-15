@@ -105,7 +105,7 @@ pub fn end_prediction_up_to(
     player_box: Option<&Aabb>,
 ) -> Option<Vec3> {
     let mut snap = None;
-    for (pos, server_block_state, player_pos) in handler.settle_up_to(seq, world) {
+    for (pos, server_block_state, player_pos) in handler.end_predictions_up_to(seq, world) {
         if let Some(player_box) = player_box {
             let cell = Vec3::new(pos.x as f64, pos.y as f64, pos.z as f64);
             let colliding = server_block_state
@@ -414,7 +414,7 @@ pub fn handle_entity_interact(
 /// The world, block position, and inventory are used for the adventure mode
 /// check.
 pub fn check_is_interaction_restricted(
-    world: &azalea_world::BotWorld,
+    world: &World,
     block_pos: BlockPos,
     game_mode: &GameMode,
     inventory: &Inventory,
@@ -525,7 +525,7 @@ fn update_attributes_for_gamemode(
 mod prediction_tests {
     use azalea_core::position::ChunkPos;
     use azalea_registry::builtin::BlockKind;
-    use azalea_world::{BotWorld, Chunk, PartialChunkStorage};
+    use azalea_world::{Chunk, PartialChunkStorage};
 
     use super::*;
 
@@ -547,29 +547,28 @@ mod prediction_tests {
     fn far_box() -> Aabb {
         Aabb { min: Vec3::new(10.0, 64.0, 10.0), max: Vec3::new(10.6, 65.8, 10.6) }
     }
-    /// Predict `state` at `POS` the way the action systems do: retain what the bot shows, then
-    /// show the prediction to this bot only.
+    /// Predict `state` at `POS` the way the action systems do: a write into the bot's own world
+    /// inside a prediction scope.
     fn predict(h: &mut BlockStatePredictionHandler, world: &World, state: BlockState, at: Vec3) {
-        let old = BotWorld::new(world, h).get_block_state(POS).unwrap_or_default();
-        h.retain_known_server_state(POS, old, at);
-        h.set_predicted(POS, state);
+        h.predict_block(world, POS, state, at);
     }
-    fn shown(h: &BlockStatePredictionHandler, world: &World) -> Option<BlockState> {
-        BotWorld::new(world, h).get_block_state(POS)
+    fn shown(world: &World) -> Option<BlockState> {
+        world.get_block_state(POS)
     }
 
     // Spec: specs/B6-placement-breaking.md §4.10 (write and roll back)
     #[test]
-    fn a_prediction_is_shown_to_this_bot_only() {
+    fn a_prediction_is_in_this_bots_own_world_only() {
         let (world, _keep) = world();
+        let (other_world, _keep_b) = self::world();
         let mut h = BlockStatePredictionHandler::default();
-        let other = BlockStatePredictionHandler::default();
         h.start_predicting();
         predict(&mut h, &world, stone(), Vec3::ZERO);
-        assert_eq!(shown(&h, &world), Some(stone()));
-        // the shared world and another bot's view still show the server's block
-        assert_eq!(world.get_block_state(POS), Some(BlockState::AIR));
-        assert_eq!(shown(&other, &world), Some(BlockState::AIR));
+        assert_eq!(shown(&world), Some(stone()));
+        // the other bot's world still shows the server's block
+        assert_eq!(shown(&other_world), Some(BlockState::AIR));
+        // the entry keeps the server's block
+        assert_eq!(h.server_block_state(&world, POS), Some(BlockState::AIR));
     }
 
     #[test]
@@ -578,14 +577,13 @@ mod prediction_tests {
         let mut h = BlockStatePredictionHandler::default();
         let seq = h.start_predicting();
         predict(&mut h, &world, stone(), Vec3::ZERO);
-        // the server's update arrives while the cell is retained: it writes the shared world and
-        // the retained state
-        world.set_block_state(POS, stone());
-        assert!(h.update_known_server_state(POS, stone()));
+        // the server's update arrives while the cell is pending: it changes the entry only
+        h.set_server_verified(&world, &[(POS, stone())]);
+        assert_eq!(h.server_block_state(&world, POS), Some(stone()));
         assert_eq!(end_prediction_up_to(&mut h, seq, &world, Some(&far_box())), None);
-        assert_eq!(shown(&h, &world), Some(stone()));
+        assert_eq!(shown(&world), Some(stone()));
         assert_eq!(h.acked_seq(), seq);
-        // settled: the cell is not retained any more
+        // settled: the cell is not pending any more
         assert!(!h.update_known_server_state(POS, dirt()));
     }
 
@@ -595,16 +593,16 @@ mod prediction_tests {
         let mut h = BlockStatePredictionHandler::default();
         let seq = h.start_predicting();
         predict(&mut h, &world, stone(), Vec3::ZERO);
-        // no update came: the server refused, so the ack drops the prediction
+        // no update came: the server refused, so the ack writes the kept state back
         assert_eq!(end_prediction_up_to(&mut h, seq, &world, Some(&far_box())), None);
-        assert_eq!(shown(&h, &world), Some(BlockState::AIR));
+        assert_eq!(shown(&world), Some(BlockState::AIR));
         // the server put something else there before the ack
         let seq = h.start_predicting();
         predict(&mut h, &world, stone(), Vec3::ZERO);
-        world.set_block_state(POS, dirt());
-        h.update_known_server_state(POS, dirt());
+        h.set_server_verified(&world, &[(POS, dirt())]);
+        assert_eq!(shown(&world), Some(stone()), "an update for a pending cell does not write the level");
         end_prediction_up_to(&mut h, seq, &world, Some(&far_box()));
-        assert_eq!(shown(&h, &world), Some(dirt()));
+        assert_eq!(shown(&world), Some(dirt()));
     }
 
     #[test]
@@ -615,11 +613,34 @@ mod prediction_tests {
         predict(&mut h, &world, stone(), Vec3::ZERO);
         let s2 = h.start_predicting();
         predict(&mut h, &world, dirt(), Vec3::new(9.0, 9.0, 9.0));
-        // an ack for the first sequence leaves the cell retained (its sequence was refreshed)
+        // an ack for the first sequence leaves the cell pending (its sequence was refreshed)
         end_prediction_up_to(&mut h, s1, &world, None);
-        assert_eq!(shown(&h, &world), Some(dirt()));
+        assert_eq!(shown(&world), Some(dirt()));
         end_prediction_up_to(&mut h, s2, &world, None);
-        assert_eq!(shown(&h, &world), Some(BlockState::AIR));
+        assert_eq!(shown(&world), Some(BlockState::AIR));
+    }
+
+    // Same cell twice: the first ack leaves the cell pending, the second settles it against the
+    // first old state, and the player position kept is the first one.
+    #[test]
+    fn the_same_cell_twice_settles_at_the_second_ack_against_the_first_old_state() {
+        let (world, _keep) = world();
+        let mut h = BlockStatePredictionHandler::default();
+        let first_pos = Vec3::new(2.5, 66.0, 2.5);
+        world.set_block_state(POS, stone());
+        let s1 = h.start_predicting();
+        predict(&mut h, &world, BlockState::AIR, first_pos);
+        let s2 = h.start_predicting();
+        predict(&mut h, &world, dirt(), Vec3::new(9.0, 9.0, 9.0));
+        assert_eq!(end_prediction_up_to(&mut h, s1, &world, Some(&far_box())), None);
+        assert!(h.is_pending(POS), "the first ack does not settle the cell");
+        assert_eq!(h.server_block_state(&world, POS), Some(stone()), "the first old state");
+        // the second ack: the cell shows dirt, the kept state is stone; a player standing in the
+        // kept state's shape is moved to where he stood at the first write
+        let inside_stone = Aabb { min: Vec3::new(2.2, 64.2, 2.2), max: Vec3::new(2.8, 66.0, 2.8) };
+        assert_eq!(end_prediction_up_to(&mut h, s2, &world, Some(&inside_stone)), Some(first_pos));
+        assert!(!h.is_pending(POS));
+        assert_eq!(shown(&world), Some(stone()));
     }
 
     #[test]
@@ -633,42 +654,78 @@ mod prediction_tests {
         predict(&mut h, &world, BlockState::AIR, before);
         let inside = Aabb { min: Vec3::new(2.2, 64.2, 2.2), max: Vec3::new(2.8, 66.0, 2.8) };
         assert_eq!(end_prediction_up_to(&mut h, seq, &world, Some(&inside)), Some(before));
-        assert_eq!(shown(&h, &world), Some(stone()));
+        assert_eq!(shown(&world), Some(stone()));
         // standing beside it: no snap
         let seq = h.start_predicting();
         predict(&mut h, &world, BlockState::AIR, before);
         assert_eq!(end_prediction_up_to(&mut h, seq, &world, Some(&far_box())), None);
-        assert_eq!(shown(&h, &world), Some(stone()));
+        assert_eq!(shown(&world), Some(stone()));
     }
 
-    // Edge case a: this bot's chunk packet re-sent while a cell is pending (vanilla
-    // `ClientPacketListener#updateLevelChunk` replaces the chunk, so the packet's block wins).
+    // Edge case a (vanilla result): this bot's chunk packet re-sent while a cell is pending.
+    // `ClientPacketListener#updateLevelChunk` replaces the chunk, so the packet's block shows until
+    // the ack; the ack then writes the kept state over it (`ClientLevel#syncBlockState`).
     #[test]
-    fn a_resent_chunk_turns_the_override_off_and_keeps_the_retained_state() {
-        let (world, _keep) = world();
+    fn a_resent_chunk_shows_until_the_ack_which_writes_the_kept_state() {
+        let (mut world, mut partial) = world();
+        world.set_block_state(POS, dirt());
         let mut h = BlockStatePredictionHandler::default();
         let seq = h.start_predicting();
         predict(&mut h, &world, stone(), Vec3::ZERO);
-        h.clear_predictions_in_chunk(ChunkPos::new(0, 0));
-        assert_eq!(shown(&h, &world), Some(BlockState::AIR), "the packet's block wins");
-        // the retained state is still there for the ack
-        assert!(h.update_known_server_state(POS, BlockState::AIR));
+        // the chunk packet: the chunk is replaced by one with air at POS
+        partial.set(&ChunkPos::new(0, 0), None, &mut world.chunks);
+        partial.set(&ChunkPos::new(0, 0), Some(Chunk::default()), &mut world.chunks);
+        assert_eq!(shown(&world), Some(BlockState::AIR), "the packet's block shows");
+        assert!(h.is_pending(POS), "the entry stays");
         end_prediction_up_to(&mut h, seq, &world, None);
-        assert!(!h.update_known_server_state(POS, BlockState::AIR));
+        assert_eq!(shown(&world), Some(dirt()), "the ack writes the kept state over the packet's block");
     }
 
-    // Edge case b: a cell in another chunk is not touched, and a forgotten chunk's cell is not
-    // shown again.
+    // Forgotten chunk: the level reads nothing for the cell, so the ack finds it different, the
+    // write does nothing, and the snap test still runs.
     #[test]
-    fn clearing_one_chunk_leaves_other_chunks_alone() {
+    fn a_forgotten_chunk_at_the_ack_writes_nothing_and_the_snap_still_runs() {
+        let (mut world, mut partial) = world();
+        world.set_block_state(POS, stone());
+        let mut h = BlockStatePredictionHandler::default();
+        let seq = h.start_predicting();
+        let before = Vec3::new(2.5, 66.0, 2.5);
+        predict(&mut h, &world, BlockState::AIR, before);
+        partial.set(&ChunkPos::new(0, 0), None, &mut world.chunks);
+        assert_eq!(shown(&world), None);
+        let inside = Aabb { min: Vec3::new(2.2, 64.2, 2.2), max: Vec3::new(2.8, 66.0, 2.8) };
+        assert_eq!(end_prediction_up_to(&mut h, seq, &world, Some(&inside)), Some(before), "the snap runs");
+        assert_eq!(shown(&world), None, "the write did nothing: there is no chunk");
+        assert!(!h.is_pending(POS));
+        // the chunk comes back later with air: the settled cell is not written again
+        partial.set(&ChunkPos::new(0, 0), Some(Chunk::default()), &mut world.chunks);
+        assert_eq!(shown(&world), Some(BlockState::AIR));
+    }
+
+    // Judgement: with a later prediction in the cell, the server's state is the entry's, not the
+    // level's.
+    #[test]
+    fn server_block_state_reads_the_entry_when_a_later_prediction_is_in_the_cell() {
         let (world, _keep) = world();
         let mut h = BlockStatePredictionHandler::default();
         h.start_predicting();
         predict(&mut h, &world, stone(), Vec3::ZERO);
-        h.clear_predictions_in_chunk(ChunkPos::new(5, 5));
-        assert_eq!(shown(&h, &world), Some(stone()));
-        h.clear_predictions_in_chunk(ChunkPos::new(0, 0));
-        assert_eq!(shown(&h, &world), Some(BlockState::AIR));
+        h.start_predicting();
+        predict(&mut h, &world, dirt(), Vec3::ZERO);
+        assert_eq!(shown(&world), Some(dirt()));
+        assert_eq!(h.server_block_state(&world, POS), Some(BlockState::AIR));
+        // a cell that is not pending reads the level
+        assert_eq!(h.server_block_state(&world, POS.up(1)), Some(BlockState::AIR));
+    }
+
+    // Rule 1: a write that changes nothing keeps nothing (`ClientLevel#setBlock` returns false).
+    #[test]
+    fn a_write_that_changes_nothing_is_not_kept() {
+        let (world, _keep) = world();
+        let mut h = BlockStatePredictionHandler::default();
+        h.start_predicting();
+        assert!(!h.predict_block(&world, POS, BlockState::AIR, Vec3::ZERO));
+        assert!(!h.is_pending(POS));
     }
 
     // Edge case d (unit part): a new level starts with a new handler.
@@ -679,7 +736,7 @@ mod prediction_tests {
         h.start_predicting();
         predict(&mut h, &world, stone(), Vec3::ZERO);
         h.reset();
-        assert_eq!(shown(&h, &world), Some(BlockState::AIR));
+        assert!(!h.is_pending(POS));
         assert_eq!(h.seq(), 0);
     }
 }

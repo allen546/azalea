@@ -9,7 +9,7 @@ use azalea_entity::{
 };
 use azalea_inventory::components::EquipmentSlot;
 use azalea_registry::builtin::{ItemKind, MobEffect};
-use azalea_world::{BlockStatePredictionHandler, BotWorld, WorldName, Worlds};
+use azalea_world::{World, WorldName, Worlds};
 use bevy_ecs::prelude::*;
 
 use crate::{
@@ -43,7 +43,7 @@ pub fn travel(
             &mut Physics,
             &mut LookDirection,
             &mut Position,
-            (Option<&BlockStatePredictionHandler>, Has<InLoadedChunk>),
+            Has<InLoadedChunk>,
         ),
         (With<LocalEntity>, With<HasClientLoaded>),
     >,
@@ -66,14 +66,13 @@ pub fn travel(
         mut physics,
         direction,
         position,
-        (pending, in_loaded_chunk),
+        in_loaded_chunk,
     ) in &mut query
     {
         let Some(world_lock) = worlds.get(world_name) else {
             continue;
         };
         let world = world_lock.read();
-        let world = BotWorld::of(&world, pending);
 
         let sprinting = *sprinting.unwrap_or(&Sprinting(false));
 
@@ -146,7 +145,7 @@ fn travel_in_air(ctx: &mut MoveCtx) {
     } else if !ctx.own_chunk_loaded {
         // patch 38: the chunk under the feet has not arrived, so there is no gravity. Patch 65: the
         // bot's own level decides (`Level#hasChunkAt`), not the shared one (a swarm mate may hold it).
-        movement.y = unloaded_chunk_vertical_speed(ctx.position.y, ctx.world.world.chunks.min_y());
+        movement.y = unloaded_chunk_vertical_speed(ctx.position.y, ctx.world.chunks.min_y());
     } else {
         // `getEffectiveGravity` reads the speed at this point, after the move step.
         movement.y -= effective_gravity(
@@ -289,7 +288,7 @@ fn get_fluid_falling_adjusted_movement(
 }
 
 fn is_free(
-    world: &BotWorld,
+    world: &World,
     source_entity: Entity,
     aabb_query: &AabbQuery,
     collidable_entity_query: &CollidableEntityQuery,
@@ -311,7 +310,7 @@ fn is_free(
 }
 
 pub fn no_collision(
-    world: &BotWorld,
+    world: &World,
     source_entity: Option<Entity>,
     aabb_query: &AabbQuery,
     collidable_entity_query: &CollidableEntityQuery,
@@ -332,7 +331,7 @@ pub fn no_collision(
     }
 
     if !get_entity_collisions(
-        world.world,
+        world,
         aabb,
         source_entity,
         aabb_query,
@@ -361,7 +360,7 @@ fn border_collision(_entity_physics: &Physics, _aabb: &Aabb) -> Option<Aabb> {
     None
 }
 
-fn contains_any_liquid(world: &BotWorld, bounding_box: Aabb) -> bool {
+fn contains_any_liquid(world: &World, bounding_box: Aabb) -> bool {
     let min = bounding_box.min.to_block_pos_floor();
     let max = bounding_box.max.to_block_pos_ceil();
 

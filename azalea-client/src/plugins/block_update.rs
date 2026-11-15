@@ -17,7 +17,7 @@ impl Plugin for BlockUpdatePlugin {
             // Update then the block update actually gets applied
             handle_block_update_event
                 .after(handle_receive_chunk_event)
-                // patch 53: readers of the bot's pending cells run after the writers
+                // readers of a bot's block state run after the writers
                 .before(azalea_entity::update_on_climbable)
                 .before(crate::interact::pick::insert_initial_hit_result_component),
         );
@@ -36,9 +36,10 @@ pub struct QueuedServerBlockUpdates {
 }
 
 impl QueuedServerBlockUpdates {
-    /// Apply the queued updates whose chunk is loaded, in order: into the known server state of a
-    /// retained cell (`ClientLevel#setServerVerifiedBlockState`), else into the world. An update
-    /// for a chunk that is not loaded yet stays queued.
+    /// Apply the queued updates in order: a pending cell takes the update as the server's last
+    /// word (`ClientLevel#setServerVerifiedBlockState`, which does not write the world), any
+    /// other cell whose chunk is loaded is written. An update for a chunk that is not loaded yet
+    /// stays queued.
     ///
     /// The ack handler runs this first: vanilla applies a block update the moment its packet
     /// arrives, so an update that came before the ack is already in the known state when the ack
@@ -52,16 +53,14 @@ impl QueuedServerBlockUpdates {
         let mut kept = Vec::new();
         let mut edits = Vec::new();
         for (pos, block_state) in self.list.drain(..) {
-            if world.get_block_state(pos).is_none() {
-                kept.push((pos, block_state));
-            } else {
-                // the world holds server data only; a pending cell also keeps it for the ack
+            if prediction.is_pending(pos) || world.get_block_state(pos).is_some() {
                 edits.push((pos, block_state));
-                prediction.update_known_server_state(pos, block_state);
+            } else {
+                kept.push((pos, block_state));
             }
         }
         // One frame's edits go in together: one section copy per section (design item 5).
-        world.chunks.set_block_states(&edits);
+        prediction.set_server_verified(world, &edits);
         self.list = kept;
     }
 }
@@ -77,9 +76,6 @@ pub fn handle_block_update_event(
         let world = world_holder.shared.read();
         // Spec: specs/plans/LOAD_CONTRACT.md "Swarm world design" item 5
         let edits: Vec<_> = queued.list.drain(..).collect();
-        world.chunks.set_block_states(&edits);
-        for (pos, block_state) in edits {
-            prediction_handler.update_known_server_state(pos, block_state);
-        }
+        prediction_handler.set_server_verified(&world, &edits);
     }
 }

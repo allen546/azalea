@@ -1,4 +1,4 @@
-//! Collision queries with and without pending cells (Null fork patch 53).
+//! Collision queries with and without pending cells (Null fork patches 53 and 76).
 // Spec: specs/B6-placement-breaking.md §4.10
 //
 // "nothing_pending" is the case every physics tick pays for. "pending_elsewhere" and
@@ -7,14 +7,13 @@
 
 use std::hint::black_box;
 
-use azalea_block::BlockState;
 use azalea_core::{
     aabb::Aabb,
     position::{BlockPos, ChunkBlockPos, ChunkPos, Vec3},
 };
 use azalea_physics::collision::world_collisions::get_block_collisions;
 use azalea_registry::builtin::BlockKind;
-use azalea_world::{BlockStatePredictionHandler, BotWorld, Chunk, PartialChunkStorage, World};
+use azalea_world::{BlockStatePredictionHandler, Chunk, PartialChunkStorage, World};
 use criterion::{Criterion, criterion_group, criterion_main};
 
 fn make_world() -> (World, PartialChunkStorage) {
@@ -46,8 +45,8 @@ fn make_world() -> (World, PartialChunkStorage) {
 }
 
 #[inline(never)]
-fn query(world: &World, pending: &BlockStatePredictionHandler, aabb: &Aabb) -> usize {
-    get_block_collisions(&BotWorld::new(world, pending), aabb).len()
+fn query(world: &World, aabb: &Aabb) -> usize {
+    get_block_collisions(world, aabb).len()
 }
 
 fn boxes() -> Vec<Aabb> {
@@ -63,47 +62,30 @@ fn boxes() -> Vec<Aabb> {
 fn bench(c: &mut Criterion) {
     let (world, _keep) = make_world();
     let boxes = boxes();
-    let nothing = BlockStatePredictionHandler::default();
 
     c.bench_function("collision_queries/nothing_pending", |b| {
         b.iter(|| {
             let mut n = 0;
             for aabb in &boxes {
-                n += query(black_box(&world), black_box(&nothing), aabb);
+                n += query(black_box(&world), aabb);
             }
             black_box(n)
         })
     });
 
-    // one pending cell far from every box
-    let mut elsewhere = BlockStatePredictionHandler::default();
-    let far = BlockPos::new(30, 2, 30);
-    elsewhere.start_predicting();
-    elsewhere.retain_known_server_state(far, BlockState::AIR, Vec3::ZERO);
-    elsewhere.set_predicted(far, BlockKind::Stone.into());
-    c.bench_function("collision_queries/pending_elsewhere", |b| {
-        b.iter(|| {
-            let mut n = 0;
-            for aabb in &boxes {
-                n += query(black_box(&world), black_box(&elsewhere), aabb);
-            }
-            black_box(n)
-        })
-    });
-
-    // a pending cell in the middle of the walk, so some boxes take the slow path
+    // eight predicted cells in the middle of the walk: they are in the world, so the query
+    // reads them as it reads any block
     let mut inside = BlockStatePredictionHandler::default();
     inside.start_predicting();
     for i in 0..8 {
         let p = BlockPos::new(-10 + i, 2, -10 + i);
-        inside.retain_known_server_state(p, BlockState::AIR, Vec3::ZERO);
-        inside.set_predicted(p, BlockKind::Stone.into());
+        inside.predict_block(&world, p, BlockKind::Stone.into(), Vec3::ZERO);
     }
     c.bench_function("collision_queries/pending_in_box", |b| {
         b.iter(|| {
             let mut n = 0;
             for aabb in &boxes {
-                n += query(black_box(&world), black_box(&inside), aabb);
+                n += query(black_box(&world), aabb);
             }
             black_box(n)
         })

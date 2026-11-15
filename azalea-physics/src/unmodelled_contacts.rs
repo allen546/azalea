@@ -6,7 +6,7 @@ use azalea_entity::unmodelled::{
     UnmodelledInput, honey_touches_side, is_unmodelled_block,
 };
 use azalea_registry::builtin::BlockKind;
-use azalea_world::BotWorld;
+use azalea_world::World;
 
 /// How far past the box a block still counts as touched. A bot that stands on a slime block or
 /// a bed has its feet exactly on the top face, and one that walks along a honey block has its
@@ -20,7 +20,7 @@ const TOUCH_MARGIN: f64 = 1e-3;
 /// (`PistonMovingBlockEntity#moveCollidedEntities`) and honey touched from the side
 /// (`HoneyBlock#entityInside`). Unloaded chunks add nothing.
 // Spec: specs/B1-movement.md §4.3
-pub fn unmodelled_block_contacts(world: &BotWorld, bb: &Aabb) -> Vec<UnmodelledInput> {
+pub fn unmodelled_block_contacts(world: &World, bb: &Aabb) -> Vec<UnmodelledInput> {
     let probe = bb.inflate_all(TOUCH_MARGIN);
     let min = probe.min.to_block_pos_floor();
     let max = probe.max.to_block_pos_floor();

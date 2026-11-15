@@ -23,7 +23,7 @@ use azalea_entity::{
     metadata::Sprinting,
 };
 use azalea_registry::builtin::BlockKind;
-use azalea_world::{BlockView, BotWorld};
+use azalea_world::{BlockView, World};
 use bevy_ecs::{entity::Entity, world::Mut};
 pub use blocks::BlockWithShape;
 pub use offset::{BlockShapeAt, block_offset};
@@ -53,7 +53,7 @@ pub enum MoverType {
 fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
     let entity_bounding_box = ctx.physics.bounding_box;
     let entity_collisions = get_entity_collisions(
-        ctx.world.world,
+        ctx.world,
         &entity_bounding_box.expand_towards(movement),
         Some(ctx.source_entity),
         ctx.aabb_query,
@@ -175,7 +175,7 @@ fn candidate_step_up_heights(
 /// override: no factor while flying).
 // Spec: specs/B1-movement.md §4.2
 pub fn block_speed_factor(
-    world: &BotWorld,
+    world: &World,
     position: Vec3,
     abilities: Option<&PlayerAbilities>,
 ) -> f32 {
@@ -203,7 +203,7 @@ pub fn block_speed_factor(
 
 pub struct MoveCtx<'world, 'state, 'a, 'b> {
     pub mover_type: MoverType,
-    pub world: &'a BotWorld<'a>,
+    pub world: &'a World,
     pub position: Mut<'a, Position>,
     pub physics: &'a mut Physics,
     pub source_entity: Entity,
@@ -455,7 +455,7 @@ fn is_above_ground(ctx: &CanFallAtLeastCtx, max_up_step: f32) -> bool {
 
 pub struct CanFallAtLeastCtx<'world, 'state, 'a, 'b> {
     physics: &'a Physics,
-    world: &'a BotWorld<'a>,
+    world: &'a World,
     source_entity: Entity,
     aabb_query: &'a AabbQuery<'world, 'state, 'b>,
     collidable_entity_query: &'a CollidableEntityQuery<'world, 'state>,

@@ -86,10 +86,10 @@ fn a_placed_block_is_written_at_once_and_follows_the_server_after_the_ack() {
     insert(&mut s, PlaceBlockQueued { position: floor, direction: Direction::Up, auto_crouch: false });
     s.tick();
     assert_eq!(used_item_on(&sent), 1);
-    assert_eq!(s.bot_block_state(target), Some(BlockKind::Dirt.into()), "written in the tick of the click");
+    assert_eq!(s.get_block_state(target), Some(BlockKind::Dirt.into()), "written in the tick of the click");
     s.receive_packet(ClientboundBlockChangedAck { seq: 1 });
     s.tick();
-    assert_eq!(s.bot_block_state(target), Some(BlockState::AIR), "rolled back to the server's state");
+    assert_eq!(s.get_block_state(target), Some(BlockState::AIR), "rolled back to the server's state");
     let r = s.component::<BlockActionResults>().last_place.unwrap();
     assert_eq!(r.outcome, BlockActionOutcome::Refused);
     assert_eq!(r.refusal, None);
@@ -98,11 +98,11 @@ fn a_placed_block_is_written_at_once_and_follows_the_server_after_the_ack() {
     look_at(&mut s, floor, Direction::Up);
     insert(&mut s, PlaceBlockQueued { position: floor, direction: Direction::Up, auto_crouch: false });
     s.tick();
-    assert_eq!(s.bot_block_state(target), Some(BlockKind::Dirt.into()));
+    assert_eq!(s.get_block_state(target), Some(BlockKind::Dirt.into()));
     s.receive_packet(ClientboundBlockUpdate { pos: target, block_state: BlockKind::Dirt.into() });
     s.receive_packet(ClientboundBlockChangedAck { seq: 2 });
     s.tick();
-    assert_eq!(s.bot_block_state(target), Some(BlockKind::Dirt.into()));
+    assert_eq!(s.get_block_state(target), Some(BlockKind::Dirt.into()));
     assert_eq!(s.component::<BlockActionResults>().last_place.unwrap().outcome, BlockActionOutcome::Accepted);
 }
 
@@ -124,7 +124,7 @@ fn inside_the_movement_zone_a_place_that_cannot_be_predicted_is_refused_and_noth
     insert(&mut s, PlaceBlockQueued { position: floor, direction: Direction::Up, auto_crouch: false });
     s.tick();
     assert_eq!(used_item_on(&sent), 0);
-    assert_eq!(s.bot_block_state(floor.up(1)), Some(BlockState::AIR));
+    assert_eq!(s.get_block_state(floor.up(1)), Some(BlockState::AIR));
     let r = s.component::<BlockActionResults>().last_place.unwrap();
     assert_eq!((r.outcome, r.refusal), (BlockActionOutcome::Refused, Some(BlockActionRefusal::PlaceNotPredicted)));
     assert!(r.evidence.is_some(), "a refusal carries its evidence (patch 28)");
@@ -160,7 +160,7 @@ fn a_sneaking_bot_walks_onto_the_block_it_just_placed() {
     s.tick();
     let r = s.component::<BlockActionResults>().last_place.unwrap();
     assert_eq!((r.outcome, r.refusal), (BlockActionOutcome::Pending, None), "{r:?}");
-    assert_eq!(s.bot_block_state(support.north(1)), Some(BlockKind::Dirt.into()));
+    assert_eq!(s.get_block_state(support.north(1)), Some(BlockKind::Dirt.into()));
     // no server update yet: the bot still walks on, onto the block it wrote
     s.with_component_mut::<ClientMovementState>(|m| m.move_direction = WalkDirection::Backward);
     for _ in 0..40 {
@@ -356,7 +356,7 @@ fn break_tnt(s: &mut Simulation, cell: BlockPos) {
     insert(s, BreakBlockQueued { position: cell });
     s.tick();
     s.tick();
-    assert_eq!(s.bot_block_state(cell), Some(BlockState::AIR), "the bot's own prediction");
+    assert_eq!(s.get_block_state(cell), Some(BlockState::AIR), "the bot's own prediction");
     assert!(s.component::<BlockActionResults>().last_break.unwrap().seq.is_some(), "the break was sent");
 }
 
@@ -386,8 +386,39 @@ fn a_break_with_no_ack_is_refused_while_the_view_shows_the_prediction() {
     for _ in 0..=ACK_TIMEOUT_TICKS {
         s.tick();
     }
-    assert_eq!(s.bot_block_state(floor), Some(BlockState::AIR), "the prediction still shows");
+    assert_eq!(s.get_block_state(floor), Some(BlockState::AIR), "the prediction still shows");
     let r = s.component::<BlockActionResults>().last_break.unwrap();
     assert_eq!(r.outcome, BlockActionOutcome::Refused);
     assert_eq!(r.refusal, Some(BlockActionRefusal::NoAck));
+}
+
+// Spec: specs/B6-placement-breaking.md §4.6 (the judgement reads `server_block_state`, patch 76)
+// A break is sent (seq 1). The server answers with air. Before its ack arrives, a later write of
+// the same bot lands in the same cell (seq 2). The ack of seq 1 does not settle the cell. EXPECTED:
+// the break is judged on the server's state (air), not on the level's later prediction.
+#[test]
+fn a_break_is_judged_on_the_servers_state_when_a_later_prediction_is_in_the_cell() {
+    use azalea_client::interact::BlockStatePredictionHandler;
+    let _lock = init();
+    let floor = BlockPos::new(1, FLOOR_Y, 0);
+    let (mut s, _sent) = setup(&[BlockPos::new(0, FLOOR_Y, 0), floor], Vec3::new(0.5, 120., 0.5));
+    break_tnt(&mut s, floor);
+    let seq = s.component::<BlockActionResults>().last_break.unwrap().seq.unwrap();
+    s.receive_packet(ClientboundBlockUpdate { pos: floor, block_state: BlockState::AIR });
+    s.tick();
+    // a later prediction of this bot in the same cell
+    {
+        let shared = s.component::<azalea_client::local_player::WorldHolder>().shared.clone();
+        let e = s.entity;
+        let mut h = s.app.world_mut().entity_mut(e);
+        let mut h = h.get_mut::<BlockStatePredictionHandler>().unwrap();
+        h.start_predicting();
+        assert!(h.predict_block(&shared.read(), floor, BlockKind::Dirt.into(), Vec3::ZERO));
+    }
+    s.receive_packet(ClientboundBlockChangedAck { seq });
+    s.tick();
+    assert_eq!(s.get_block_state(floor), Some(BlockKind::Dirt.into()), "the level shows the later prediction");
+    assert_eq!(s.server_block_state(floor), Some(BlockState::AIR), "the server's state is air");
+    let r = s.component::<BlockActionResults>().last_break.unwrap();
+    assert_eq!(r.outcome, BlockActionOutcome::Accepted, "judged on air, not on the prediction");
 }

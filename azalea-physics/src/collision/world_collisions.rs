@@ -7,34 +7,28 @@ use azalea_core::{
     position::{BlockPos, ChunkBlockPos, ChunkPos, ChunkSectionBlockPos, ChunkSectionPos, Vec3},
 };
 use azalea_inventory::ItemStack;
-use azalea_world::{BotWorld, Chunk, World};
+use azalea_world::{Chunk, World};
 use bevy_ecs::entity::Entity;
 use parking_lot::RwLock;
 
 use super::{BLOCK_SHAPE, Shapes};
 use crate::collision::{Aabb, BlockWithShape, VoxelShape};
 
-pub fn get_block_collisions(world: &BotWorld, aabb: &Aabb) -> Vec<VoxelShape> {
+pub fn get_block_collisions(world: &World, aabb: &Aabb) -> Vec<VoxelShape> {
     collisions(world, aabb, EntityCollisionContext::of(None))
 }
 
-pub fn get_block_and_liquid_collisions(world: &BotWorld, aabb: &Aabb) -> Vec<VoxelShape> {
+pub fn get_block_and_liquid_collisions(world: &World, aabb: &Aabb) -> Vec<VoxelShape> {
     collisions(world, aabb, EntityCollisionContext::of(None).with_include_liquids(true))
 }
 
 // Spec: specs/B6-placement-breaking.md §4.10
-fn collisions(world: &BotWorld, aabb: &Aabb, context: EntityCollisionContext) -> Vec<VoxelShape> {
-    let mut state = BlockCollisionsState::new(world.world, aabb, context);
+fn collisions(world: &World, aabb: &Aabb, context: EntityCollisionContext) -> Vec<VoxelShape> {
+    let mut state = BlockCollisionsState::new(world, aabb, context);
     let mut block_collisions = Vec::new();
 
-    // A per-query test, not a per-cell one: a bot with no pending cell in the box takes the
-    // unchanged path below, with its section cache.
-    if world.has_override_in(state.origin, state.end) {
-        return collisions_with_overrides(world, state);
-    }
-
     let initial_chunk_pos = ChunkPos::from(state.cursor.origin());
-    let initial_chunk = world.world.chunks.get(&initial_chunk_pos);
+    let initial_chunk = world.chunks.get(&initial_chunk_pos);
     let initial_chunk = initial_chunk.as_deref().map(RwLock::read);
 
     while let Some(item) = state.cursor.next() {
@@ -46,22 +40,6 @@ fn collisions(world: &BotWorld, aabb: &Aabb, context: EntityCollisionContext) ->
         );
     }
 
-    block_collisions
-}
-
-/// The slow path: reads every cell through the bot's overlay. Kept out of line so the
-/// nothing-pending path compiles as it did before patch 53.
-#[cold]
-#[inline(never)]
-fn collisions_with_overrides(world: &BotWorld, mut state: BlockCollisionsState) -> Vec<VoxelShape> {
-    let mut block_collisions = Vec::new();
-    while let Some(item) = state.cursor.next() {
-        if item.iteration_type == CursorIterationType::Corner {
-            continue;
-        }
-        let block_state = world.get_block_state(item.pos).unwrap_or(BlockState::AIR);
-        state.collide_block(item.pos, block_state, &mut block_collisions);
-    }
     block_collisions
 }
 

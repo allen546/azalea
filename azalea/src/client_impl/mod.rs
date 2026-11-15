@@ -350,16 +350,23 @@ impl Client {
         Ok(world_holder.shared.clone())
     }
 
-    /// The block at `pos` as this bot sees it: the shared world with this bot's own pending
-    /// predictions on top (`BotWorld`). Use this, not `world().read().get_block_state`, when the
-    /// bot decides something from a block it may just have placed or broken. `None` when the
-    /// chunk is not loaded.
+    /// The block at `pos` as this bot sees it: its own level, which holds its pending
+    /// predictions (as vanilla's `ClientLevel` does). `None` when the chunk is not loaded.
     // Spec: specs/F5-version-layer.md §4.6 (each bot reads its own view, not shared truth)
     pub fn own_block_state(&self, pos: azalea_core::position::BlockPos) -> AzaleaResult<Option<azalea_block::BlockState>> {
         let world = self.world()?;
         let world = world.read();
-        let pending = self.component::<azalea_world::BlockStatePredictionHandler>().ok();
-        Ok(azalea_world::BotWorld::of(&world, pending.as_deref()).get_block_state(pos))
+        Ok(world.get_block_state(pos))
+    }
+
+    /// The block at `pos` as the server has it: the kept state of a pending cell, else the
+    /// level's. For judging what a sent place or break left (B6 §4.6); vanilla has no such read.
+    // Spec: specs/B6-placement-breaking.md §4.6 (settle from the ack and the block left behind)
+    pub fn server_block_state(&self, pos: azalea_core::position::BlockPos) -> AzaleaResult<Option<azalea_block::BlockState>> {
+        let world = self.world()?;
+        let world = world.read();
+        let pending = self.component::<azalea_world::BlockStatePredictionHandler>()?;
+        Ok(pending.server_block_state(&world, pos))
     }
 
     /// Get an `RwLock` with a reference to the world that this client has
@@ -596,7 +603,7 @@ mod own_view_tests {
 
     // Spec: specs/F5-version-layer.md §4.6 (each bot reads its own view, not shared truth)
     #[test]
-    fn own_block_state_shows_the_bots_prediction_and_the_world_does_not() {
+    fn own_block_state_shows_the_bots_prediction_and_server_block_state_does_not() {
         let mut ecs = bevy_ecs::world::World::new();
         let shared = Arc::new(RwLock::new(World::default()));
         let partial = Arc::new(RwLock::new(PartialWorld::default()));
@@ -609,13 +616,12 @@ mod own_view_tests {
         }
         let mut handler = BlockStatePredictionHandler::default();
         handler.start_predicting();
-        handler.retain_known_server_state(pos, BlockState::from(BlockKind::Stone), azalea_core::position::Vec3::ZERO);
-        handler.set_predicted(pos, BlockState::AIR);
+        handler.predict_block(&shared.read(), pos, BlockState::AIR, azalea_core::position::Vec3::ZERO);
         let entity = ecs
             .spawn((azalea_client::local_player::WorldHolder { partial, shared: shared.clone() }, handler))
             .id();
         let client = Client::new(entity, Arc::new(RwLock::new(ecs)));
         assert_eq!(client.own_block_state(pos).unwrap(), Some(BlockState::AIR), "own prediction");
-        assert_eq!(shared.read().get_block_state(pos), Some(BlockState::from(BlockKind::Stone)), "shared truth");
+        assert_eq!(client.server_block_state(pos).unwrap(), Some(BlockState::from(BlockKind::Stone)), "the server's state");
     }
 }

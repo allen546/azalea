@@ -1,19 +1,20 @@
-//! Per-bot block prediction (Null fork patch 53).
+//! Block prediction as vanilla's `ClientLevel` does it (Null fork patch 76).
 //!
-//! The shared [`World`] holds server data only. Each bot keeps its own predicted blocks in its
-//! [`BlockStatePredictionHandler`] and reads them first through a [`BotWorld`].
+//! A prediction is a write into the bot's own [`World`]. The [`BlockStatePredictionHandler`]
+//! keeps, per pending cell, the state the server last told the bot about, so the ack can settle
+//! the cell. Design: specs/proposals/CLIENT_LEVEL_MODEL.md.
 // Spec: specs/B6-placement-breaking.md §4.10
 
 use std::collections::HashMap;
 
 use azalea_block::{BlockState, fluid_state::FluidState};
-use azalea_core::position::{BlockPos, ChunkPos, Vec3};
+use azalea_core::position::{BlockPos, Vec3};
 use bevy_ecs::component::Component;
 
 use crate::{ChunkStorage, World};
 
-/// A read-only source of block states: shared truth (`ChunkStorage`) or one bot's view of it
-/// (`BotWorld`). Read paths that must see a bot's own predictions are handed a `BotWorld`.
+/// A read-only source of block states: a bot's `World`, or its chunk storage. The bot's own
+/// predictions are in the `World`, so every reader sees them, as vanilla's readers do.
 pub trait BlockView {
     fn get_block_state(&self, pos: BlockPos) -> Option<BlockState>;
 
@@ -46,10 +47,11 @@ impl BlockView for World {
     }
 }
 
-/// A component that contains information about our local block state predictions.
+/// A component that contains information about our local block state predictions
+/// (vanilla `BlockStatePredictionHandler`, one per `ClientLevel`).
 ///
-/// Vanilla keeps this per `ClientLevel` (`BlockStatePredictionHandler`); Null keeps it per bot,
-/// and it also holds the predicted block itself, because the shared world must not.
+/// The predicted block itself is in the bot's own [`World`]; the handler keeps what the server
+/// last said about each pending cell.
 #[derive(Clone, Component, Debug, Default)]
 pub struct BlockStatePredictionHandler {
     /// The total number of changes that this client has made to blocks.
@@ -63,14 +65,12 @@ pub struct BlockStatePredictionHandler {
 #[derive(Clone, Debug)]
 struct ServerVerifiedState {
     seq: u32,
-    /// The last block the server told us about (the state the ack settles against).
+    /// The last block the server told us about (the state the ack writes back when the cell
+    /// shows something else).
     block_state: BlockState,
     /// Used for teleporting the player back if we're colliding with the block
     /// that got placed back.
     player_pos: Vec3,
-    /// The block this bot shows itself. `None`: the override is off (the cell's chunk was
-    /// re-sent or forgotten) but the retained state stays for the ack.
-    predicted: Option<BlockState>,
 }
 
 impl BlockStatePredictionHandler {
@@ -91,43 +91,48 @@ impl BlockStatePredictionHandler {
         self.seq
     }
 
-    /// Should be called right before the client updates a block with its prediction
-    /// (`ClientLevel#setBlock` while predicting). `old_state` is what the bot sees now.
-    ///
-    /// The retained state lets the ack settle the cell when the server sends no update.
-    pub fn retain_known_server_state(
+    /// A block write inside a prediction scope (`ClientLevel#setBlock` while predicting): write
+    /// the bot's world, and when the write changed the cell, keep the old state for the ack
+    /// (`BlockStatePredictionHandler#retainKnownServerState`). A cell that is already pending
+    /// keeps its first old state and takes the current sequence. Returns whether the cell changed.
+    // Spec: specs/B6-placement-breaking.md §4.10 (write and roll back)
+    pub fn predict_block(
         &mut self,
+        world: &World,
         pos: BlockPos,
-        old_state: BlockState,
+        state: BlockState,
         player_pos: Vec3,
-    ) {
+    ) -> bool {
+        let Some(old_state) = world.set_block_state(pos, state) else {
+            return false;
+        };
+        if old_state == state {
+            return false;
+        }
         self.server_state
             .entry(pos)
             .and_modify(|s| s.seq = self.seq)
-            .or_insert(ServerVerifiedState {
-                seq: self.seq,
-                block_state: old_state,
-                player_pos,
-                predicted: None,
-            });
+            .or_insert(ServerVerifiedState { seq: self.seq, block_state: old_state, player_pos });
+        true
     }
 
-    /// Show `state` at `pos` to this bot only. The cell must be retained first.
-    pub fn set_predicted(&mut self, pos: BlockPos, state: BlockState) {
-        if let Some(s) = self.server_state.get_mut(&pos) {
-            s.predicted = Some(state);
+    /// Server block updates (`ClientLevel#setServerVerifiedBlockState`): a pending cell takes the
+    /// state as the server's last word and the world is not written; any other cell is written.
+    /// The edits go in together, one section copy per section.
+    // Spec: specs/B6-placement-breaking.md §4.10 (write and roll back)
+    pub fn set_server_verified(&mut self, world: &World, edits: &[(BlockPos, BlockState)]) {
+        let mut to_write = Vec::with_capacity(edits.len());
+        for &(pos, state) in edits {
+            if !self.update_known_server_state(pos, state) {
+                to_write.push((pos, state));
+            }
         }
+        world.chunks.set_block_states(&to_write);
     }
 
-    /// The block this bot predicted at `pos`, if its override is on.
-    pub fn predicted(&self, pos: BlockPos) -> Option<BlockState> {
-        self.server_state.get(&pos).and_then(|s| s.predicted)
-    }
-
-    /// Save this update as the correct server state so when the server sends a
-    /// `ClientboundBlockChangedAck` we don't roll back this new update
-    /// (`ClientLevel#setServerVerifiedBlockState`). Returns whether the cell is retained.
-    /// The caller still writes the update to the shared world.
+    /// Save this update as the server's last word on a pending cell
+    /// (`BlockStatePredictionHandler#updateKnownServerState`). Returns whether the cell is
+    /// pending. The caller writes the world when it is not.
     pub fn update_known_server_state(&mut self, pos: BlockPos, state: BlockState) -> bool {
         if let Some(s) = self.server_state.get_mut(&pos) {
             s.block_state = state;
@@ -137,14 +142,19 @@ impl BlockStatePredictionHandler {
         }
     }
 
-    /// Turn the overrides in a chunk off, keeping the retained states for the ack. Used when
-    /// this bot's chunk packet arrives (vanilla `ClientPacketListener#updateLevelChunk` replaces
-    /// the chunk, so the packet's blocks win) and when it forgets the chunk.
-    pub fn clear_predictions_in_chunk(&mut self, chunk: ChunkPos) {
-        for (pos, s) in self.server_state.iter_mut() {
-            if ChunkPos::from(*pos) == chunk {
-                s.predicted = None;
-            }
+    /// Whether a cell is pending (predicted, not yet acked).
+    pub fn is_pending(&self, pos: BlockPos) -> bool {
+        self.server_state.contains_key(&pos)
+    }
+
+    /// The state of a cell as the server has it: the kept state if the cell is pending, else the
+    /// world's. The world shows this bot's own prediction while the cell is pending, so Null's
+    /// judgement of a sent place or break reads here (B6 §4.6). Vanilla has no such reader.
+    // Spec: specs/B6-placement-breaking.md §4.6 (settle from the ack and the block left behind)
+    pub fn server_block_state(&self, world: &World, pos: BlockPos) -> Option<BlockState> {
+        match self.server_state.get(&pos) {
+            Some(s) => Some(s.block_state),
+            None => world.get_block_state(pos),
         }
     }
 
@@ -153,26 +163,14 @@ impl BlockStatePredictionHandler {
         *self = Self::default();
     }
 
-    /// Whether an override lies inside the block range `min..=max` (both corners included).
-    /// This is one `is_empty` check when nothing is pending.
-    pub fn has_override_in(&self, min: BlockPos, max: BlockPos) -> bool {
-        !self.server_state.is_empty()
-            && self.server_state.iter().any(|(p, s)| {
-                s.predicted.is_some()
-                    && (min.x..=max.x).contains(&p.x)
-                    && (min.y..=max.y).contains(&p.y)
-                    && (min.z..=max.z).contains(&p.z)
-            })
-    }
-
-    /// Settle every retained cell up to `seq` (vanilla `BlockStatePredictionHandler#endPredictionsUpTo`
-    /// then the compare in `ClientLevel#syncBlockState`) and return the cells whose shown state
-    /// differs from the retained one, oldest first, as `(cell, retained state, player position
-    /// when first retained)`. The bot's shown state is its prediction, else the shared block.
-    /// Nothing is written: the shared world already holds the server's block, so dropping the
-    /// prediction is the rollback. The caller does the player snap-back.
+    /// `BlockStatePredictionHandler#endPredictionsUpTo`: remove every pending cell up to `seq`;
+    /// where the world shows something else than the kept state, write the kept state
+    /// (`ClientLevel#syncBlockState`). Returns the cells that differed, oldest first, as
+    /// `(cell, kept state, player position when first kept)`: the caller does the player snap-back
+    /// test. A cell in a chunk the bot has forgotten reads as missing, so it differs, and the write
+    /// does nothing.
     // Spec: specs/B6-placement-breaking.md §4.10 (write and roll back)
-    pub fn settle_up_to(&mut self, seq: u32, world: &World) -> Vec<(BlockPos, BlockState, Vec3)> {
+    pub fn end_predictions_up_to(&mut self, seq: u32, world: &World) -> Vec<(BlockPos, BlockState, Vec3)> {
         self.acked_seq = self.acked_seq.max(seq);
         // oldest first, so the newest prediction decides the snap when several cells collide
         let mut settled: Vec<(BlockPos, ServerVerifiedState)> = self
@@ -185,74 +183,11 @@ impl BlockStatePredictionHandler {
         let mut changed = Vec::new();
         for (pos, state) in settled {
             self.server_state.remove(&pos);
-            let client_block_state = state
-                .predicted
-                .unwrap_or_else(|| world.get_block_state(pos).unwrap_or_default());
-            if client_block_state != state.block_state {
+            if world.get_block_state(pos) != Some(state.block_state) {
+                world.set_block_state(pos, state.block_state);
                 changed.push((pos, state.block_state, state.player_pos));
             }
         }
         changed
-    }
-}
-
-/// The world as one bot sees it: shared server data plus this bot's pending cells.
-#[derive(Clone, Copy)]
-pub struct BotWorld<'a> {
-    /// Shared server truth. Use it for chunk presence, height, entities and registries, never
-    /// to read a block that the bot's own predictions must show.
-    pub world: &'a World,
-    pending: &'a BlockStatePredictionHandler,
-}
-
-impl<'a> BotWorld<'a> {
-    pub fn new(world: &'a World, pending: &'a BlockStatePredictionHandler) -> Self {
-        Self { world, pending }
-    }
-
-    /// Whether any of this bot's overrides lies in the block range (`min` and `max` included).
-    pub fn has_override_in(&self, min: BlockPos, max: BlockPos) -> bool {
-        self.pending.has_override_in(min, max)
-    }
-}
-
-impl BlockView for BotWorld<'_> {
-    fn get_block_state(&self, pos: BlockPos) -> Option<BlockState> {
-        // `server_state` empty is the common case: one check, then the shared read
-        if let Some(predicted) = self.pending.predicted(pos) {
-            return Some(predicted);
-        }
-        self.world.chunks.get_block_state(pos)
-    }
-}
-
-impl BotWorld<'_> {
-    pub fn get_block_state(&self, pos: BlockPos) -> Option<BlockState> {
-        BlockView::get_block_state(self, pos)
-    }
-
-    pub fn get_fluid_state(&self, pos: BlockPos) -> Option<FluidState> {
-        BlockView::get_fluid_state(self, pos)
-    }
-}
-
-static NOTHING_PENDING: std::sync::LazyLock<BlockStatePredictionHandler> =
-    std::sync::LazyLock::new(BlockStatePredictionHandler::default);
-
-impl<'a> BotWorld<'a> {
-    /// A view with no pending cells: shared truth. For entities that are not a bot of ours and
-    /// for readers (pathfinder, block search) that keep to shared truth.
-    pub fn truth(world: &'a World) -> Self {
-        Self { world, pending: &NOTHING_PENDING }
-    }
-}
-
-impl<'a> BotWorld<'a> {
-    /// The view for an entity that may have no handler (a physics-only entity): shared truth then.
-    pub fn of(world: &'a World, pending: Option<&'a BlockStatePredictionHandler>) -> Self {
-        match pending {
-            Some(pending) => Self::new(world, pending),
-            None => Self::truth(world),
-        }
     }
 }

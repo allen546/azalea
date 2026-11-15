@@ -11,7 +11,7 @@ use azalea_core::{
     tick::GameTick,
 };
 use azalea_registry::{builtin::BlockKind, tags};
-use azalea_world::{BlockStatePredictionHandler, BlockView, BotWorld, WorldName, Worlds};
+use azalea_world::{BlockView, World, WorldName, Worlds};
 use bevy_app::{App, Plugin, PostUpdate, Update};
 use bevy_ecs::prelude::*;
 pub use components::*;
@@ -115,7 +115,6 @@ pub fn update_fluid_on_eyes(
             &Position,
             &EntityDimensions,
             &WorldName,
-            Option<&BlockStatePredictionHandler>,
         ),
         (With<metadata::AbstractLiving>, With<LocalEntity>),
     >,
@@ -123,17 +122,13 @@ pub fn update_fluid_on_eyes(
 ) {
     query
         .par_iter_mut()
-        .for_each(|(mut fluid_on_eyes, position, dimensions, world_name, pending)| {
+        .for_each(|(mut fluid_on_eyes, position, dimensions, world_name)| {
             let Some(world) = worlds.get(world_name) else {
                 return;
             };
 
             let world = world.read();
-            let world = match pending {
-                Some(pending) => BotWorld::new(&world, pending),
-                None => BotWorld::truth(&world),
-            };
-            **fluid_on_eyes = fluid_kind_on_eyes(&world, **position, dimensions.eye_height);
+            **fluid_on_eyes = fluid_kind_on_eyes(&*world, **position, dimensions.eye_height);
         });
 }
 
@@ -152,12 +147,12 @@ pub fn fluid_kind_on_eyes(world: &impl BlockView, position: Vec3, eye_height: f3
 
 pub fn update_on_climbable(
     mut query: Query<
-        (&mut OnClimbable, &Position, &WorldName, Option<&BlockStatePredictionHandler>),
+        (&mut OnClimbable, &Position, &WorldName),
         With<LocalEntity>,
     >,
     worlds: Res<Worlds>,
 ) {
-    for (mut on_climbable, position, world_name, pending) in query.iter_mut() {
+    for (mut on_climbable, position, world_name) in query.iter_mut() {
         // TODO: there's currently no gamemode component that can be accessed from here,
         // maybe LocalGameMode should be replaced with two components, maybe called
         // EntityGameMode and PreviousGameMode?
@@ -171,7 +166,6 @@ pub fn update_on_climbable(
         };
 
         let world = world.read();
-        let world = BotWorld::of(&world, pending);
 
         let block_pos = BlockPos::from(position);
         let block_at_feet = world.get_block_state(block_pos).unwrap_or_default();
@@ -187,7 +181,7 @@ pub fn update_on_climbable(
 fn is_trapdoor_usable_as_ladder(
     block_state: BlockState,
     block_pos: BlockPos,
-    world: &BotWorld,
+    world: &World,
 ) -> bool {
     // trapdoor must be open
     if !block_state
@@ -419,7 +413,7 @@ mod tests {
                 .get_block_state(BlockPos::new(0, 1, 0))
                 .unwrap_or_default(),
             BlockPos::new(0, 1, 0),
-            &azalea_world::BotWorld::truth(&world),
+            &world,
         );
 
         assert!(trapdoor_matches_ladder);
@@ -447,7 +441,7 @@ mod tests {
         // a source cell is 8/9 high; the eye at 63.95 is above its surface (63.889), so the eye is
         // dry. An 0.1111 offset samples 63.84, below the surface, and wrongly reports water.
         let (_keep, world) = water_world(&[(63, water(0))]);
-        let at = |y: f64| fluid_kind_on_eyes(&azalea_world::BotWorld::truth(&world), Vec3::new(8.5, y, 8.5), 0.0);
+        let at = |y: f64| fluid_kind_on_eyes(&world, Vec3::new(8.5, y, 8.5), 0.0);
         assert_eq!(at(63.95), FluidKind::Empty);
         assert_eq!(at(63.85), FluidKind::Water);
     }
@@ -457,10 +451,10 @@ mod tests {
         // flowing level 1 under another water cell reaches the top of its cell (patch 64), so an eye
         // at 64.95 is in water; the cell's own height (8/9) would leave it dry.
         let (_keep, world) = water_world(&[(64, water(1)), (65, water(1))]);
-        let w = azalea_world::BotWorld::truth(&world);
-        assert_eq!(fluid_kind_on_eyes(&w, Vec3::new(8.5, 64.95, 8.5), 0.0), FluidKind::Water);
+        let w = &world;
+        assert_eq!(fluid_kind_on_eyes(w, Vec3::new(8.5, 64.95, 8.5), 0.0), FluidKind::Water);
         let (_keep2, alone) = water_world(&[(64, water(1))]);
-        let w = azalea_world::BotWorld::truth(&alone);
-        assert_eq!(fluid_kind_on_eyes(&w, Vec3::new(8.5, 64.95, 8.5), 0.0), FluidKind::Empty);
+        let w = &alone;
+        assert_eq!(fluid_kind_on_eyes(w, Vec3::new(8.5, 64.95, 8.5), 0.0), FluidKind::Empty);
     }
 }

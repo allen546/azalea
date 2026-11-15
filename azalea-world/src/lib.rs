@@ -13,7 +13,7 @@ mod world;
 pub use bit_storage::BitStorage;
 pub use chunk::{Chunk, Section, partial::PartialChunkStorage, storage::ChunkStorage};
 pub use container::{WorldName, Worlds};
-pub use prediction::{BlockStatePredictionHandler, BlockView, BotWorld};
+pub use prediction::{BlockStatePredictionHandler, BlockView};
 pub use world::*;
 
 #[deprecated = "renamed to `WorldName`."]

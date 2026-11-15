@@ -34,7 +34,7 @@ impl Plugin for ChunksPlugin {
                 .chain()
                 .before(InventorySystems)
                 .before(perform_respawn)
-                // patch 53: the chunk packet turns this bot's overrides off before they are read
+                // the chunk packet is applied before the readers of block state run
                 .before(azalea_entity::update_on_climbable),
         )
         .add_message::<ReceiveChunkEvent>()
@@ -74,13 +74,13 @@ pub struct ChunkBatchFinishedEvent {
 
 pub fn handle_receive_chunk_event(
     mut events: MessageReader<ReceiveChunkEvent>,
-    mut query: Query<(&WorldHolder, &mut crate::interact::BlockStatePredictionHandler)>,
+    query: Query<&WorldHolder>,
 ) {
     let _bt = crate::bench_metrics::Timer::new(crate::bench_metrics::Kind::ChunkEvent);
     for event in events.read() {
         let pos = ChunkPos::new(event.packet.x, event.packet.z);
 
-        let (local_player, mut prediction) = query.get_mut(event.entity).unwrap();
+        let local_player = query.get(event.entity).unwrap();
         // `ClientPacketListener` handles a chunk packet in packet order, against the level of
         // that moment; a later respawn builds a new level. A chunk of a level the bot has left
         // is dropped, as vanilla's write into the old level is lost with it.
@@ -89,10 +89,10 @@ pub fn handle_receive_chunk_event(
             trace!("Dropping chunk {pos:?} of a level the bot has left");
             continue;
         }
-        // `ClientPacketListener#updateLevelChunk`: the packet's blocks win over a pending
-        // prediction; the retained state stays for the ack.
+        // `ClientPacketListener#updateLevelChunk` replaces the chunk, so the packet's blocks win
+        // over a pending prediction; the handler keeps its entry, and the ack writes the kept
+        // state over the packet's block (the vanilla result; patch 76).
         // Spec: specs/B6-placement-breaking.md §4.10
-        prediction.clear_predictions_in_chunk(pos);
 
         let mut world = local_player.shared.write();
         let mut partial_world = local_player.partial.write();

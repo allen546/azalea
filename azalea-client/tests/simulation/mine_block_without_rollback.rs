@@ -24,7 +24,7 @@ fn test_mine_block_without_rollback() {
         block_state: BlockKind::Tnt.into(),
     });
     simulation.tick();
-    assert_eq!(simulation.bot_block_state(pos), Some(BlockKind::Tnt.into()));
+    assert_eq!(simulation.get_block_state(pos), Some(BlockKind::Tnt.into()));
 
     simulation.write_message(StartMiningBlockEvent {
         entity: simulation.entity,
@@ -32,7 +32,7 @@ fn test_mine_block_without_rollback() {
         force: true,
     });
     simulation.tick();
-    assert_eq!(simulation.bot_block_state(pos), Some(BlockKind::Air.into()));
+    assert_eq!(simulation.get_block_state(pos), Some(BlockKind::Air.into()));
 
     // server acknowledged our change by sending a BlockUpdate + BlockChangedAck, so
     // no rollback
@@ -42,5 +42,5 @@ fn test_mine_block_without_rollback() {
     });
     simulation.receive_packet(ClientboundBlockChangedAck { seq: 1 });
     simulation.tick();
-    assert_eq!(simulation.bot_block_state(pos), Some(BlockKind::Air.into()));
+    assert_eq!(simulation.get_block_state(pos), Some(BlockKind::Air.into()));
 }
