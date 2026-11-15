@@ -258,7 +258,7 @@ fn test_a_resent_chunk_beats_the_pending_prediction() {
 // Edge case b: a chunk this bot forgets. EXPECTED: its pending cell is not read again, even if
 // the chunk comes back (the level holds no block for a chunk the bot lost).
 #[test]
-fn test_a_forgotten_chunk_does_not_come_back_through_the_overlay() {
+fn test_a_forgotten_chunk_does_not_come_back_through_the_prediction() {
     let _lock = init();
     let mut s = single_bot_over_air();
     let a = s.entity;
@@ -293,13 +293,36 @@ fn test_a_dimension_change_clears_the_pending_cells_and_a_same_dimension_respawn
     s.receive_packet(make_basic_respawn_packet(DimensionKind::new_raw(0), Identifier::new("minecraft:overworld")));
     s.tick();
     assert_eq!(s.component::<BlockStatePredictionHandler>().seq(), 1, "same dimension: the level and its handler stay");
-    // the cell stays pending. (The respawn handler still drops the bot's chunks in the same
-    // dimension, so the level no longer shows the prediction: OPEN §4 parity gaps.)
+    // the cell stays pending and the level, with its chunk, still shows the prediction
     assert!(s.component::<BlockStatePredictionHandler>().is_pending(floor));
-    let _ = a;
+    assert_eq!(view(&s, a, floor), Some(BlockKind::Stone.into()), "same dimension: the level keeps the predicted block");
     s.receive_packet(make_basic_respawn_packet(DimensionKind::new_raw(0), Identifier::new("azalea:other")));
     s.tick();
     let h = s.component::<BlockStatePredictionHandler>();
     assert_eq!(h.seq(), 0, "another dimension: a new handler, the sequence restarts");
     assert!(!h.is_pending(floor), "the pending cells are gone");
+}
+
+// `ClientPacketListener#handleRespawn`: the same dimension keeps the level and its chunks; another
+// dimension builds a new level with no chunks (the server sends them again).
+// Spec: specs/B6-placement-breaking.md §4.10
+#[test]
+fn test_chunks_stay_after_a_same_dimension_respawn_and_are_replaced_after_a_dimension_change() {
+    let _lock = init();
+    let mut s = single_bot_over_air();
+    let a = s.entity;
+    for _ in 0..3 {
+        s.tick();
+    }
+    let floor = BlockPos::new(3, 63, 3);
+    assert_eq!(view(&s, a, floor), Some(BlockState::AIR), "the chunk is loaded");
+    s.receive_packet(make_basic_respawn_packet(DimensionKind::new_raw(0), Identifier::new("minecraft:overworld")));
+    s.tick();
+    assert_eq!(view(&s, a, floor), Some(BlockState::AIR), "same dimension: the chunk stays loaded");
+    s.receive_packet(make_basic_respawn_packet(DimensionKind::new_raw(0), Identifier::new("azalea:other")));
+    s.tick();
+    assert_eq!(view(&s, a, floor), None, "another dimension: a new level with no chunk");
+    s.receive_packet(make_basic_empty_chunk(ChunkPos::new(0, 0), (384 + 64) / 16));
+    s.tick();
+    assert_eq!(view(&s, a, floor), Some(BlockState::AIR), "the new level takes the resent chunk");
 }

@@ -6,9 +6,10 @@ use azalea_registry::{DataRegistry, data::DimensionKind, identifier::Identifier}
 
 // Spec: specs/F5-version-layer.md §4.6 (What Null computes). `LevelLoadStatusManager#tick`: a client
 // is loaded when the chunk it stands in is in its own level. After a respawn the bot's own chunks are
-// empty; a chunk another bot of the swarm still holds (the shared `World` keeps it) must not count.
+// empty (another dimension builds a new level; the same dimension keeps its chunks, patch 77); a chunk
+// another bot of the swarm still holds in the old level must not count.
 #[test]
-fn a_respawned_bot_waits_for_its_own_chunk_even_if_another_bot_holds_it() {
+fn a_bot_respawned_into_another_dimension_waits_for_its_own_chunk_even_if_another_bot_holds_it() {
     let _lock = init();
     let mut simulation = Simulation::new(ConnectionProtocol::Game);
     simulation.receive_packet(default_login_packet());
@@ -24,12 +25,12 @@ fn a_respawned_bot_waits_for_its_own_chunk_even_if_another_bot_holds_it() {
 
     simulation.receive_packet(make_basic_respawn_packet(
         DimensionKind::new_raw(0),
-        Identifier::new("minecraft:overworld"),
+        Identifier::new("azalea:other"),
     ));
     for _ in 0..5 {
         simulation.tick();
     }
-    assert!(simulation.chunk(ChunkPos::new(0, 0)).is_some(), "the shared storage still has the chunk");
+    assert!(simulation.chunk(ChunkPos::new(0, 0)).is_none(), "the new level has no chunk yet");
     assert!(
         !simulation.has_component::<HasClientLoaded>(),
         "the bot's own chunks are empty after the respawn, so it is not loaded yet"

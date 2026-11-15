@@ -1600,10 +1600,11 @@ impl GamePacketHandler<'_> {
                 let old_attributes = old_attributes.cloned();
 
                 let new_world_name = WorldName::for_bot(p.common.dimension.clone(), self.player);
+                let same_dimension = world_name.as_deref() == Some(&new_world_name);
                 // Patch 32, `handleRespawn`: a respawn in the same dimension adds the new local
                 // player to the same level, so it moves to the end of the tick order; another
                 // dimension builds a new level with an empty list, so the player is first again.
-                if world_name.as_deref() == Some(&new_world_name) {
+                if same_dimension {
                     entity_id_index.tick_order_mut().assign(self.player);
                 } else {
                     entity_id_index.tick_order_mut().clear();
@@ -1639,21 +1640,25 @@ impl GamePacketHandler<'_> {
                     });
                 }
 
-                // set the partial world to an empty world (when we add chunks or entities,
-                // those will be in the `worlds`)
-
-                *world_holder.partial.write() = PartialWorld::new(
-                    azalea_world::chunk::calculate_chunk_storage_range(
-                        client_information.view_distance.into(),
-                    ),
-                    Some(self.player),
-                );
-                world_holder.shared = weak_world;
-
-                // every entity is now unloaded by this player
-                for mut loaded_by in &mut loaded_by_query.iter_mut() {
-                    loaded_by.remove(&self.player);
+                // `handleRespawn` builds a new `ClientLevel` only when the dimension changes. The
+                // same dimension keeps the level, its chunks and its entities, so the bot keeps
+                // its partial world (the only strong chunk references) and its loaded entities.
+                // Another dimension starts empty (when we add chunks or entities, those will be
+                // in the `worlds`).
+                // Spec: specs/B6-placement-breaking.md §4.10
+                if !same_dimension {
+                    *world_holder.partial.write() = PartialWorld::new(
+                        azalea_world::chunk::calculate_chunk_storage_range(
+                            client_information.view_distance.into(),
+                        ),
+                        Some(self.player),
+                    );
+                    // every entity is now unloaded by this player
+                    for mut loaded_by in &mut loaded_by_query.iter_mut() {
+                        loaded_by.remove(&self.player);
+                    }
                 }
+                world_holder.shared = weak_world;
 
                 // this resets a bunch of our components like physics and stuff
                 #[allow(unused_mut)]
