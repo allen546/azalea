@@ -7,7 +7,7 @@ mod shape;
 mod sturdy;
 pub mod world_collisions;
 
-use std::{ops::Add, sync::LazyLock};
+use std::sync::LazyLock;
 
 use azalea_block::{BlockState, fluid_state::FluidState};
 use azalea_core::{
@@ -47,6 +47,7 @@ pub enum MoverType {
 }
 
 // Entity.collide
+// Spec: specs/B1-movement.md §4.2
 fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
     let entity_bounding_box = ctx.physics.bounding_box;
     let entity_collisions = get_entity_collisions(
@@ -56,61 +57,114 @@ fn collide(ctx: &MoveCtx, movement: Vec3) -> Vec3 {
         ctx.aabb_query,
         ctx.collidable_entity_query,
     );
-    let world = ctx.world;
+    collide_with(
+        &entity_bounding_box,
+        ctx.physics.on_ground(),
+        get_max_up_step(ctx.attributes),
+        movement,
+        &entity_collisions,
+        &|aabb| get_block_collisions(ctx.world, aabb),
+    )
+}
+
+/// The body of `Entity#collide`, with the block colliders of a box passed in so a test can
+/// supply its own.
+// Spec: specs/B1-movement.md §4.2
+fn collide_with(
+    entity_bounding_box: &Aabb,
+    on_ground: bool,
+    max_up_step: f32,
+    movement: Vec3,
+    entity_collisions: &[VoxelShape],
+    block_collisions: &dyn Fn(&Aabb) -> Vec<VoxelShape>,
+) -> Vec3 {
+    let entity_bounding_box = *entity_bounding_box;
     let collided_delta = if movement.length_squared() == 0.0 {
         movement
     } else {
-        collide_bounding_box(movement, &entity_bounding_box, world, &entity_collisions)
+        let mut shapes = entity_collisions.to_vec();
+        shapes.extend(block_collisions(&entity_bounding_box.expand_towards(movement)));
+        collide_with_shapes(movement, entity_bounding_box, &shapes)
     };
 
     let x_collision = movement.x != collided_delta.x;
     let y_collision = movement.y != collided_delta.y;
     let z_collision = movement.z != collided_delta.z;
+    let pushed_down_onto_ground = y_collision && movement.y < 0.;
 
-    let on_ground = ctx.physics.on_ground() || y_collision && movement.y < 0.;
-
-    let max_up_step = get_max_up_step(ctx.attributes) as f64;
-    if max_up_step > 0. && on_ground && (x_collision || z_collision) {
-        let mut step_to_delta = collide_bounding_box(
-            movement.with_y(max_up_step),
-            &entity_bounding_box,
-            world,
-            &entity_collisions,
-        );
-        let directly_up_delta = collide_bounding_box(
-            Vec3::ZERO.with_y(max_up_step),
-            &entity_bounding_box.expand_towards(Vec3::new(movement.x, 0., movement.z)),
-            world,
-            &entity_collisions,
-        );
-        if directly_up_delta.y < max_up_step {
-            let target_movement = collide_bounding_box(
-                movement.with_y(0.),
-                &entity_bounding_box.move_relative(directly_up_delta),
-                world,
-                &entity_collisions,
-            )
-            .add(directly_up_delta);
-            if target_movement.horizontal_distance_squared()
-                > step_to_delta.horizontal_distance_squared()
-            {
-                step_to_delta = target_movement;
-            }
+    if max_up_step > 0.
+        && (pushed_down_onto_ground || on_ground)
+        && (x_collision || z_collision)
+    {
+        // Vanilla steps from the box after the downward part of the move when the entity
+        // was pushed down onto ground, and from the start box otherwise. The step is capped
+        // at `max_up_step` above that box.
+        let step_box = if pushed_down_onto_ground {
+            entity_bounding_box.move_relative(Vec3::new(0., collided_delta.y, 0.))
+        } else {
+            entity_bounding_box
+        };
+        let mut search_box =
+            step_box.expand_towards(Vec3::new(movement.x, max_up_step as f64, movement.z));
+        if !pushed_down_onto_ground {
+            // vanilla's -1.0E-5F, a float widened to double
+            search_box = search_box.expand_towards(Vec3::new(0., -(1.0E-5f32 as f64), 0.));
         }
+        let mut step_colliders = entity_collisions.to_vec();
+        step_colliders.extend(block_collisions(&search_box));
 
-        if step_to_delta.horizontal_distance_squared()
-            > collided_delta.horizontal_distance_squared()
-        {
-            return step_to_delta.add(collide_bounding_box(
-                Vec3::ZERO.with_y(-step_to_delta.y + movement.y),
-                &entity_bounding_box.move_relative(step_to_delta),
-                world,
-                &entity_collisions,
-            ));
+        let heights = candidate_step_up_heights(
+            &step_box,
+            &step_colliders,
+            max_up_step,
+            collided_delta.y as f32,
+        );
+        for height in heights {
+            let stepped = collide_with_shapes(
+                Vec3::new(movement.x, height as f64, movement.z),
+                step_box,
+                &step_colliders,
+            );
+            if stepped.horizontal_distance_squared() > collided_delta.horizontal_distance_squared()
+            {
+                let dy = entity_bounding_box.min.y - step_box.min.y;
+                return Vec3::new(stepped.x, stepped.y - dy, stepped.z);
+            }
         }
     }
 
     collided_delta
+}
+
+/// The heights a step can end at, ascending: each collider's Y coordinate above the box's
+/// bottom, not below it, not equal to the move's own vertical result, and at most the step
+/// height.
+///
+/// In Mojmap, this is `Entity#collectCandidateStepUpHeights`.
+// Spec: specs/B1-movement.md §4.2
+fn candidate_step_up_heights(
+    step_box: &Aabb,
+    colliders: &[VoxelShape],
+    max_up_step: f32,
+    collided_y: f32,
+) -> Vec<f32> {
+    let mut heights: Vec<f32> = Vec::new();
+    for shape in colliders {
+        for &y in shape.get_coords(Axis::Y) {
+            let h = (y - step_box.min.y) as f32;
+            if h < 0. || h == collided_y {
+                continue;
+            }
+            if h > max_up_step {
+                break;
+            }
+            if !heights.contains(&h) {
+                heights.push(h);
+            }
+        }
+    }
+    heights.sort_by(|a, b| a.total_cmp(b));
+    heights
 }
 
 /// The velocity factor of the block the entity is in or standing on.
@@ -435,26 +489,6 @@ fn can_fall_at_least(
     )
 }
 
-fn collide_bounding_box(
-    movement: Vec3,
-    entity_bounding_box: &Aabb,
-    world: &BotWorld,
-    entity_collisions: &[VoxelShape],
-) -> Vec3 {
-    let mut collision_boxes: Vec<VoxelShape> = Vec::with_capacity(entity_collisions.len() + 1);
-
-    if !entity_collisions.is_empty() {
-        collision_boxes.extend_from_slice(entity_collisions);
-    }
-
-    // TODO: world border
-
-    let block_collisions =
-        get_block_collisions(world, &entity_bounding_box.expand_towards(movement));
-    collision_boxes.extend(block_collisions);
-    collide_with_shapes(movement, *entity_bounding_box, &collision_boxes)
-}
-
 fn collide_with_shapes(
     mut movement: Vec3,
     mut entity_box: Aabb,
@@ -563,4 +597,70 @@ pub fn legacy_calculate_solid(block: BlockState) -> bool {
     }
     let bounds = shape.bounds();
     bounds.size() >= 0.7291666666666666 || bounds.get_size(Axis::Y) >= 1.0
+}
+
+#[cfg(test)]
+mod step_up_tests {
+    use super::*;
+
+    fn run(on_ground: bool, bottom: f64, ledge_top: f64, movement: Vec3) -> Vec3 {
+        // A floor with top at y 0 and a ledge from x 0.3 on, top at `ledge_top`.
+        let floor = box_shape(-5., -1., -5., 5., 0., 5.);
+        let ledge = box_shape(0.3, 0., -5., 5., ledge_top, 5.);
+        let aabb = Aabb {
+            min: Vec3::new(-0.3, bottom, -0.3),
+            max: Vec3::new(0.3, bottom + 1.8, 0.3),
+        };
+        collide_with(&aabb, on_ground, 0.6, movement, &[], &|_| {
+            vec![floor.clone(), ledge.clone()]
+        })
+    }
+
+    // Vanilla steps from the box after the downward part of the move (bottom 0, after the
+    // 0.125 drop), so the ledge at 0.6875 is above the 0.6 cap and the move is blocked.
+    #[test]
+    fn step_cap_counts_from_the_landing_box() {
+        let r = run(false, 0.125, 0.6875, Vec3::new(0.1, -0.3, 0.));
+        assert_eq!(r.x, 0., "blocked, got {r:?}");
+        assert_eq!(r.y, -0.125, "lands on the floor, got {r:?}");
+    }
+
+    // Same ledge from the ground: the start box is the landing box, cap 0.6 again.
+    #[test]
+    fn grounded_ledge_above_cap_blocks() {
+        let r = run(true, 0., 0.6875, Vec3::new(0.1, 0., 0.));
+        assert_eq!(r.x, 0.0, "{r:?}");
+    }
+
+    // A ledge of 0.5 from the landing box (bottom 0 after the drop) is climbed: the result
+    // is relative to the start box, so y is 0.5 - 0.125.
+    #[test]
+    fn landing_box_step_within_cap_climbs() {
+        let r = run(false, 0.125, 0.5, Vec3::new(0.1, -0.3, 0.));
+        assert_eq!(r.x, 0.1, "{r:?}");
+        assert!((r.y - 0.375).abs() < 1e-9, "{r:?}");
+    }
+
+    // Start bottom 0.125, ledge top 0.7: 0.575 above the start box, 0.7 above the landing box.
+    // The old code climbed it; vanilla caps from the landing box and blocks.
+    #[test]
+    fn ledge_inside_start_cap_but_outside_landing_cap_blocks() {
+        let r = run(false, 0.125, 0.7, Vec3::new(0.1, -0.3, 0.));
+        assert_eq!(r.x, 0., "{r:?}");
+    }
+
+    // On the ground with no downward move, a 0.5 ledge is climbed.
+    #[test]
+    fn grounded_low_ledge_climbs() {
+        let r = run(true, 0., 0.5, Vec3::new(0.1, 0., 0.));
+        assert_eq!(r.x, 0.1, "{r:?}");
+        assert!((r.y - 0.5).abs() < 1e-9, "{r:?}");
+    }
+
+    // In the air (not on ground, no floor hit) there is no step.
+    #[test]
+    fn airborne_does_not_step() {
+        let r = run(false, 0.4, 0.5, Vec3::new(0.1, 0., 0.));
+        assert_eq!(r.x, 0., "{r:?}");
+    }
 }
