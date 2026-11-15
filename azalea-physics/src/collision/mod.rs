@@ -6,6 +6,8 @@ pub mod offset;
 mod shape;
 mod sturdy;
 pub mod world_collisions;
+#[cfg(test)]
+mod vanilla_move_cases;
 
 use std::sync::LazyLock;
 
