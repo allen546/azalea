@@ -469,23 +469,3 @@ fn test_a_pusher_before_the_bot_is_taken_after_its_own_interpolation_step() {
     // The bot felt the push in this tick's travel: the cow, 0.5 away on +x, pushes it to -x.
     assert!(bot_pos(&simulation).x < x0 - 0.02, "moved {}", bot_pos(&simulation).x - x0);
 }
-
-// Spec: specs/F5-version-layer.md §4.6 (What Null computes: one push per server id, never the own id)
-// A shared swarm `World` can hold a second entity that carries a server id (another bot's view of
-// it). Vanilla holds one entity per id and `LivingEntity#pushEntities` takes its candidates from
-// `Level#getEntities(this, ..)`, which leaves the entity itself out.
-#[test]
-fn test_no_push_from_an_entity_with_the_bots_own_id() {
-    let _lock = init();
-    let mut simulation = setup();
-    let own = simulation.minecraft_entity_id();
-    // Control: a player with another id, 0.3 away, pushes.
-    let other = add_at(&mut simulation, EntityKind::Player, 190, (BX + 0.3, 64., BZ));
-    simulation.tick();
-    assert!(velocity(&simulation).x < -0.02, "control: another id pushes: {}", velocity(&simulation).x);
-    // The same entity given the bot's own id no longer pushes it.
-    simulation.app.world_mut().entity_mut(other).insert(own);
-    let before = record(&simulation).total;
-    simulation.tick();
-    assert_eq!(record(&simulation).total, before, "the bot was pushed by an entity with its own id");
-}

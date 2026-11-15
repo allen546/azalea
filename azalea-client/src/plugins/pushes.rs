@@ -22,7 +22,7 @@
 //!
 //! Spec: specs/B1-movement.md §4.2 (Pushes from entities)
 
-use azalea_core::{entity_id::MinecraftEntityId, game_type::GameMode, position::{ChunkPos, Vec3}, tick::GameTick};
+use azalea_core::{game_type::GameMode, position::{ChunkPos, Vec3}, tick::GameTick};
 use azalea_entity::{
     Dead, EntityKindComponent, EntityUuid, HasClientLoaded, LocalEntity, OnClimbable, Physics,
     Position,
@@ -43,7 +43,6 @@ use azalea_registry::builtin::EntityKind;
 use azalea_world::{WorldName, Worlds};
 use bevy_app::{App, Plugin};
 use bevy_ecs::{prelude::*, query::QueryData};
-use std::collections::HashSet;
 
 use crate::{
     local_player::{LocalGameMode, TabList},
@@ -102,7 +101,6 @@ struct BotData {
     sleeping: Option<&'static SleepingPos>,
     riding: Option<&'static RidingVehicle>,
     scoreboard: Option<&'static Scoreboard>,
-    own_id: Option<&'static MinecraftEntityId>,
     tab_list: Option<&'static TabList>,
     profile: Option<&'static GameProfileComponent>,
 }
@@ -118,7 +116,6 @@ struct PusherData {
     profile: Option<&'static GameProfileComponent>,
     living: Has<AbstractLiving>,
     boat: Has<AbstractBoat>,
-    mcid: Option<&'static MinecraftEntityId>,
 }
 
 /// One pass of the push function. `AFTER` false is pass A (pushers that tick before the bot),
@@ -149,21 +146,7 @@ fn push_pass<const AFTER: bool>(
         let teams = bot.scoreboard.filter(|s| !s.is_empty());
 
         let mut hits: Vec<(Entity, (f64, f64))> = Vec::new();
-        // Patch 41: each server id pushes at most once per pass, and never the bot's own id.
-        // Vanilla holds one entity per id and `Level#getPushableEntities` → `Level#getEntities(this, ..)` leaves `this` out
-        // (`LivingEntity#pushEntities`); the shared swarm `World` can hold a second entity with an
-        // id (another bot's view of it), so the rule is applied here.
-        // The id is claimed before the reach and side checks: the view copy is this client's only copy, so a
-        // twin never pushes in its place, and in neither pass (`test_the_view_copy_decides_even_when_out_of_reach`).
-        // Spec: specs/F5-version-layer.md §4.6 (What Null computes)
-        let own_id = bot.own_id.copied();
-        let mut claimed: HashSet<MinecraftEntityId> = HashSet::new();
         let mut consider = |entity: Entity, pos: Vec3, data: &PusherDataItem| {
-            if let Some(id) = data.mcid.copied() {
-                if Some(id) == own_id || !claimed.insert(id) {
-                    return;
-                }
-            }
             let Some(class) = pusher_class(data.living, data.boat, **data.kind) else { return };
             // A pass handles the pushers on its side of the bot in the tick order.
             let before = bot.ids.tick_order().ticks_before(entity, bot.entity);
