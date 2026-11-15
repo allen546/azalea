@@ -103,6 +103,14 @@ pub struct World {
     /// players.
     pub entity_by_id: IntMap<azalea_core::entity_id::MinecraftEntityId, Entity>,
 
+    /// An index of Minecraft UUIDs to Azalea ECS entities in this world.
+    ///
+    /// Each bot has its own world, so a lookup here never returns another bot's copy of an
+    /// entity (Null fork, patch 72).
+    ///
+    /// Spec: specs/plans/LOAD_CONTRACT.md "Swarm world design" item 1
+    pub entity_by_uuid: HashMap<uuid::Uuid, Entity>,
+
     pub registries: RegistryHolder,
 }
 
@@ -169,6 +177,7 @@ impl From<ChunkStorage> for World {
             chunks,
             entities_by_chunk: HashMap::new(),
             entity_by_id: IntMap::default(),
+            entity_by_uuid: HashMap::new(),
             registries: RegistryHolder::default(),
         }
     }

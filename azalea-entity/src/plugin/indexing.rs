@@ -16,9 +16,15 @@ use uuid::Uuid;
 use super::LoadedBy;
 use crate::{EntityUuid, LocalEntity, Position};
 
+/// Maps an account UUID to the bot's own (local) entity, so a rejoin reuses the entity.
+///
+/// Only `handle_start_join_server_event` writes it. It holds no other entity: lookups of entities
+/// seen in a world go through [`World::entity_by_uuid`], one per bot (Null fork, patch 72).
+///
+/// Spec: specs/plans/LOAD_CONTRACT.md "Swarm world design" item 1
 #[derive(Default, Resource)]
 pub struct EntityUuidIndex {
-    /// An index of entities by their UUIDs
+    /// An index of the bots' own entities by account UUID
     entity_by_uuid: HashMap<Uuid, Entity>,
 }
 impl EntityUuidIndex {
@@ -243,7 +249,6 @@ pub fn insert_entity_chunk_position(
 #[allow(clippy::type_complexity)]
 pub fn remove_despawned_entities_from_indexes(
     mut commands: Commands,
-    mut entity_uuid_index: ResMut<EntityUuidIndex>,
     worlds: Res<Worlds>,
     query: Query<
         (
@@ -262,10 +267,6 @@ pub fn remove_despawned_entities_from_indexes(
         let Some(world_lock) = worlds.get(world_name) else {
             // the world isn't even loaded by us, so we can safely delete the entity
             debug!("Despawned entity {entity:?} because it's in a world that isn't loaded anymore");
-            // Each bot holds its own copy of an entity, so the index may point at another bot's copy.
-            if entity_uuid_index.get(uuid) == Some(entity) {
-                entity_uuid_index.remove(uuid);
-            }
             // and now remove the entity from the ecs
             commands.entity(entity).despawn();
 
@@ -325,9 +326,9 @@ pub fn remove_despawned_entities_from_indexes(
                 }
             }
         }
-        // remove it from the uuid index
-        if entity_uuid_index.get(uuid) == Some(entity) {
-            entity_uuid_index.remove(uuid);
+        // remove it from the per-world uuid index (only if it is this copy)
+        if world.entity_by_uuid.get(uuid) == Some(&entity) {
+            world.entity_by_uuid.remove(uuid);
         }
         if world.entity_by_id.remove(minecraft_id).is_none() {
             debug!(
@@ -351,7 +352,6 @@ pub fn add_entity_to_indexes(
     ecs_entity: Entity,
     entity_uuid: Option<Uuid>,
     entity_id_index: &mut EntityIdIndex,
-    entity_uuid_index: &mut EntityUuidIndex,
     world: &mut World,
 ) {
     // per-client id index
@@ -361,10 +361,7 @@ pub fn add_entity_to_indexes(
     world.entity_by_id.insert(entity_id, ecs_entity);
 
     if let Some(uuid) = entity_uuid {
-        // per-world uuid index
-        // Every bot holds a copy of one uuid; never overwrite an earlier entry.
-        if !entity_uuid_index.contains_key(&uuid) {
-            entity_uuid_index.insert(uuid, ecs_entity);
-        }
+        // per-world uuid index: each bot has its own world, so this never meets another bot's copy
+        world.entity_by_uuid.insert(uuid, ecs_entity);
     }
 }

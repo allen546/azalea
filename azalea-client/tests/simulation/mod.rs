@@ -17,6 +17,7 @@ mod drop_click_swings;
 mod enchantments;
 mod entity_interpolation;
 mod entity_pushes;
+mod entity_uuid_per_world;
 mod fast_login;
 mod input_log;
 mod item_use_hold_and_release;

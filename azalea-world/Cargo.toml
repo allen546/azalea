@@ -22,6 +22,7 @@ parking_lot.workspace = true
 rustc-hash.workspace = true
 serde = { workspace = true, optional = true }
 tracing.workspace = true
+uuid.workspace = true
 
 [features]
 serde = ["dep:serde"]

@@ -17,7 +17,7 @@ use azalea_core::{
     data_registry::{DataRegistryWithKey, ResolvableDataRegistry},
     entity_id::MinecraftEntityId,
 };
-use azalea_entity::indexing::{EntityIdIndex, EntityUuidIndex};
+use azalea_entity::indexing::EntityIdIndex;
 use azalea_protocol::{
     address::{ResolvableAddr, ResolvedAddr},
     connect::Proxy,
@@ -482,7 +482,8 @@ impl Client {
     /// Also see [`Self::entity_by_uuid`] and
     /// [`Self::entity_id_by_minecraft_id`].
     pub fn entity_id_by_uuid(&self, uuid: Uuid) -> Option<Entity> {
-        self.map_resource::<EntityUuidIndex, _>(|entity_uuid_index| entity_uuid_index.get(&uuid))
+        // This bot's own world only (Null fork, patch 72).
+        self.world().ok()?.read().entity_by_uuid.get(&uuid).copied()
     }
     /// Get an [`EntityRef`] in the world by its Minecraft UUID, if it's within
     /// render distance.

@@ -14,7 +14,7 @@ use azalea_entity::{
     Attributes, Dead, EntityBundle, EntityKindComponent, HasClientLoaded, LoadedBy, LocalEntity, LookDirection,
     Physics, PlayerAbilities, Position,
     effect_events::{AddEffectEvent, RemoveEffectsEvent},
-    indexing::{EntityIdIndex, EntityUuidIndex},
+    indexing::EntityIdIndex,
     inventory::Inventory,
     metadata::{Health, apply_metadata},
 };
@@ -229,7 +229,6 @@ impl GamePacketHandler<'_> {
             >,
             MessageWriter<WorldLoadedEvent>,
             ResMut<Worlds>,
-            ResMut<EntityUuidIndex>,
             Query<&mut LoadedBy, Without<LocalEntity>>,
         )>(
             self.ecs,
@@ -238,7 +237,6 @@ impl GamePacketHandler<'_> {
                 mut query,
                 mut world_loaded_events,
                 mut worlds,
-                mut entity_uuid_index,
                 mut loaded_by_query,
             )| {
                 let (
@@ -332,7 +330,6 @@ impl GamePacketHandler<'_> {
                     self.player,
                     Some(game_profile.uuid),
                     &mut entity_id_index,
-                    &mut entity_uuid_index,
                     &mut world_holder.shared.write(),
                 );
 
@@ -604,7 +601,6 @@ impl GamePacketHandler<'_> {
             Query<&mut LoadedBy>,
             Query<Entity>,
             Res<Worlds>,
-            ResMut<EntityUuidIndex>,
             Query<Has<LocalEntity>>,
         )>(
             self.ecs,
@@ -614,7 +610,6 @@ impl GamePacketHandler<'_> {
                 mut loaded_by_query,
                 entity_query,
                 worlds,
-                mut entity_uuid_index,
                 local_query,
             )| {
                 let (mut entity_id_index, world_name, tab_list) =
@@ -687,7 +682,6 @@ impl GamePacketHandler<'_> {
                     ecs_entity,
                     Some(p.uuid),
                     &mut entity_id_index,
-                    &mut entity_uuid_index,
                     &mut world.write(),
                 );
 

@@ -606,6 +606,7 @@ dependencies = [
  "rustc-hash",
  "serde",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

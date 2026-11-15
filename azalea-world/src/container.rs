@@ -79,6 +79,7 @@ impl Worlds {
                     chunks: ChunkStorage::new(height, min_y),
                     entities_by_chunk: HashMap::new(),
                     entity_by_id: IntMap::default(),
+            entity_by_uuid: HashMap::new(),
                     registries: default_registries.clone(),
                 }));
                 debug!("Added new world {name:?}");

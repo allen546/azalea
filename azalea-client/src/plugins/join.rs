@@ -122,7 +122,8 @@ pub fn handle_start_join_server_event(
         } else {
             let entity = commands.spawn_empty().id();
             debug!("Created new entity {entity:?} for client");
-            // add to the uuid index
+            // Only join entities enter this index, so a lookup by account uuid never returns a copy
+            // of an entity seen in another bot's world (Null fork, patch 72).
             entity_uuid_index.insert(uuid, entity);
             entity
         };
