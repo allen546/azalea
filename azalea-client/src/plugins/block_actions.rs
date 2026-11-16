@@ -17,7 +17,7 @@
 //!
 //! [`ClientboundBlockChangedAck`]: azalea_protocol::packets::game::ClientboundBlockChangedAck
 
-use azalea_block::{BlockState, PlaceFamily, place_family};
+use azalea_block::{BlockState, PlaceFamily, place_family, torch_wall_block};
 use azalea_core::{
     direction::Direction,
     entity_id::MinecraftEntityId,
@@ -1296,8 +1296,11 @@ struct PlaceInFlight {
 // Spec: specs/B6-placement-breaking.md §4.6 (settle from the ack and the block left behind)
 /// Whether the item for block `kind` can leave `cell`. Sponges change in the tick they are placed:
 /// `SpongeBlock#onPlace` absorbs water, `WetSpongeBlock#onPlace` dries where water evaporates.
+/// A torch, head or coral fan item places its wall block on a wall (`StandingAndWallBlockItem`).
 fn place_leaves(kind: BlockKind, cell: BlockKind) -> bool {
-    cell == kind || matches!((kind, cell), (BlockKind::Sponge, BlockKind::WetSponge) | (BlockKind::WetSponge, BlockKind::Sponge))
+    cell == kind
+        || torch_wall_block(kind) == Some(cell)
+        || matches!((kind, cell), (BlockKind::Sponge, BlockKind::WetSponge) | (BlockKind::WetSponge, BlockKind::Sponge))
 }
 
 // Spec: specs/B6-placement-breaking.md §4.6 (settle from the ack and the block left behind)
@@ -1678,8 +1681,17 @@ mod tests {
         let bad = judged(false, Some(BlockKind::Dirt), Some(BlockKind::Bedrock));
         assert_eq!(bad.outcome, BlockActionOutcome::Refused);
         assert_eq!(bad.refusal, Some(BlockActionRefusal::OtherBlock));
-        // An unknown family (a torch can leave a wall torch): any change counts, a known gap.
+        // An unknown family: any change counts, a known gap.
         assert_eq!(judged(false, None, Some(BlockKind::WallTorch)).outcome, BlockActionOutcome::Accepted);
+    }
+
+    #[test]
+    fn a_torch_may_leave_its_wall_block() {
+        for (item, wall) in [(BlockKind::Torch, BlockKind::WallTorch), (BlockKind::SoulTorch, BlockKind::SoulWallTorch)] {
+            assert_eq!(judged(false, Some(item), Some(item)).outcome, BlockActionOutcome::Accepted);
+            assert_eq!(judged(false, Some(item), Some(wall)).outcome, BlockActionOutcome::Accepted, "{item:?}");
+        }
+        assert_eq!(judged(false, Some(BlockKind::Torch), Some(BlockKind::SoulWallTorch)).outcome, BlockActionOutcome::Refused);
     }
 
     #[test]
